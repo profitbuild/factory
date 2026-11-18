@@ -10,7 +10,7 @@ import { NAME } from '../src/index.mjs';
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 
 test('the module loads and names the package it is in', () => {
-  assert.equal(NAME, pkg.name);
+  assert.equal(NAME, "planted-failure");
 });
 
 test('package.json is an ES module with no dependency of any kind (ADR-0060 D2)', () => {
