@@ -1,0 +1,12 @@
+{
+  "name": "@profitbuild/dispatcher",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runs each agent of a factory task in a container that holds no credential (incident-platform ADR-0060)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": "./src/index.mjs",
+  "scripts": {
+    "test": "node --test"
+  }
+}

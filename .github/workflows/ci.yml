@@ -1,0 +1,104 @@
+# ============================================================
+# CI of the factory (backlog #0-267 of incident-platform, ADR-0060): the dispatcher's tests on the Node of
+# .node-version, and the workflow linters at incident-platform's pins. The two job names, `Test` and `Lint Workflows`,
+# become the required checks of main's ruleset once their first run has registered them: from then on, renaming a
+# job without changing the ruleset leaves every pull request waiting for ever.
+# ============================================================
+
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# GITHUB_TOKEN scope is declared here, not left to the repository setting (that one is read-only too, and lives in
+# the UI, where a change shows in no diff). Every scope not listed is `none`; no job here writes anything.
+permissions:
+  contents: read
+
+# A new push to a pull request cancels that PR's run still in progress; a push to main is never cancelled, so
+# main's every merge has its own result (each push its own group, `run_id`).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+# Every `uses:` names a full commit SHA with its tag in a comment; the repository requires it (SHA pinning) and
+# allows GitHub's own actions only.
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: ./.github/actions/setup-node
+
+      - name: The dispatcher's tests
+        working-directory: dispatcher
+        run: node --test
+
+  lint:
+    name: Lint Workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # The same pins as incident-platform's lint-workflows job (its check-pinned-tools.sh proves them against their
+    # publishers); a bump there is made here too until stage T makes one template.
+    env:
+      ACTIONLINT_VERSION: v1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      SHELLCHECK_VERSION: v0.11.0
+      SHELLCHECK_SHA256: b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+      ZIZMOR_VERSION: v1.30.1
+      ZIZMOR_SHA256: e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint, shellcheck and zizmor (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          tools="${RUNNER_TEMP}/lint-tools"
+          .github/scripts/install-pinned-tool.sh --repo rhysd/actionlint --tag "$ACTIONLINT_VERSION" \
+            --asset "actionlint_${ACTIONLINT_VERSION#v}_linux_amd64.tar.gz" --sha256 "$ACTIONLINT_SHA256" \
+            --member actionlint --into "$tools"
+          .github/scripts/install-pinned-tool.sh --repo koalaman/shellcheck --tag "$SHELLCHECK_VERSION" \
+            --asset "shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.gz" --sha256 "$SHELLCHECK_SHA256" \
+            --member "shellcheck-${SHELLCHECK_VERSION}/shellcheck" --into "$tools"
+          .github/scripts/install-pinned-tool.sh --repo zizmorcore/zizmor --tag "$ZIZMOR_VERSION" \
+            --asset zizmor-x86_64-unknown-linux-gnu.tar.gz --sha256 "$ZIZMOR_SHA256" \
+            --member zizmor --into "$tools"
+          "${tools}/actionlint" -version
+          "${tools}/shellcheck" --version
+          "${tools}/zizmor" --version
+
+      # -shellcheck names the pinned binary, so the runner's own shellcheck is never the one used.
+      - name: Lint the workflows (actionlint)
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/lint-tools/actionlint" -shellcheck="${RUNNER_TEMP}/lint-tools/shellcheck"
+
+      # Every tracked .sh file, every severity, --norc: no .shellcheckrc turns a check off; a finding that is meant
+      # is disabled at its line, with its reason. --source-path=SCRIPTDIR, as incident-platform's check-shell.rb
+      # passes it: a script's `source` of a file next to it is followed and checked, not reported as SC1091.
+      - name: Shellcheck the scripts
+        run: |
+          set -euo pipefail
+          git ls-files -z -- '*.sh' | xargs -0 --no-run-if-empty \
+            "${RUNNER_TEMP}/lint-tools/shellcheck" --norc --severity=style --external-sources --source-path=SCRIPTDIR
+
+      # Exits non-zero on any finding not suppressed; reads .github/zizmor.yml by itself.
+      - name: Audit the workflows and actions (zizmor)
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/lint-tools/zizmor" --offline --persona regular --format github .

@@ -1,0 +1,26 @@
+# ============================================================
+# Sets up the Node every test of CI runs on: the exact version in .node-version (incident-platform ADR-0043, a copy
+# of its action until stage T of its ADR-0055 makes the template; backlog #0-267).
+#
+# The only place actions/setup-node is used, pinned by SHA, and without a `node-version` input, so .node-version
+# alone decides the version. No package manager cache and no install: the dispatcher loads Node's built-in modules
+# only (ADR-0060 D2), so nothing comes from npm.
+#
+# setup-node downloads Node from actions/node-versions or nodejs.org and checks no SHA-256 or signature here: the
+# binary's integrity rests on that action. Needs the repository checked out.
+# ============================================================
+name: Set up Node
+description: Installs the Node of .node-version and prints its version
+
+runs:
+  using: composite
+  steps:
+    - name: Node from .node-version
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version-file: .node-version
+        package-manager-cache: false
+
+    - name: Node version
+      shell: bash
+      run: node --version
