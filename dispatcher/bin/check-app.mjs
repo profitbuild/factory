@@ -1,0 +1,50 @@
+#!/usr/bin/env node
+/**
+ * Proves builder-app against GitHub, on the build VM as the dispatcher's user (incident-platform backlog #0-271):
+ *
+ *   node dispatcher/bin/check-app.mjs [--env <file>] [--api <url>]
+ *
+ * Reads the dispatcher's env file (default /home/dispatcher/.config/factory/env: the app's id, its installation's id
+ * and its key's path), mints a token after every check (the key is a regular file of this user, readable by no one
+ * else; the installation on profitbuild/incident-platform is the env file's, of the env file's app, holding exactly
+ * Contents write, Pull requests write and Metadata read; the token is narrowed to that repository, reaches only it and
+ * holds the same three), expects 404 for the app's installation on profitbuild/factory, and revokes the token. Each
+ * check passed is a line on stdout; the first that fails is a line on stderr, and the exit code 1. No token is printed.
+ * `--api` is GitHub's API over HTTPS (or a loopback address, for the tests): the app's JWT goes to it.
+ */
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+
+import { DISPATCHER_ENV_FILE, readDispatcherEnv } from '../src/config/env-file.mjs';
+import { GITHUB_API } from '../src/github/app-token.mjs';
+import { checkApiUrl } from '../src/github/checked-token.mjs';
+import { checkApp } from '../src/github/check-app.mjs';
+
+const say = (stream, line) => stream.write(`check-app: ${line}\n`);
+
+export async function main(argv, fetchImpl = fetch) {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      env: { type: 'string', default: DISPATCHER_ENV_FILE },
+      api: { type: 'string', default: GITHUB_API },
+    },
+    strict: true,
+    allowPositionals: false,
+  });
+  checkApiUrl(values.api);
+  const env = await readDispatcherEnv(values.env);
+  say(process.stdout, `env ${values.env}: app ${env.appId}, installation ${env.installationId}`);
+  await checkApp({ env, baseUrl: values.api, fetchImpl, report: (line) => say(process.stdout, line) });
+  say(process.stdout, 'all checks passed');
+}
+
+const isMain = import.meta.main
+  ?? (process.argv[1] !== undefined && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url));
+if (isMain) {
+  main(process.argv.slice(2)).catch((error) => {
+    say(process.stderr, error.message);
+    process.exitCode = 1;
+  });
+}
