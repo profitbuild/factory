@@ -1,8 +1,9 @@
 # ============================================================
 # CI of the factory (backlog #0-267 of incident-platform, ADR-0060): the dispatcher's tests on the Node of
-# .node-version, and the workflow linters at incident-platform's pins. The two job names, `Test` and `Lint Workflows`,
-# become the required checks of main's ruleset once their first run has registered them: from then on, renaming a
-# job without changing the ruleset leaves every pull request waiting for ever.
+# .node-version, the workflow linters at incident-platform's pins, and the secret scan of every commit added
+# (#0-268). The job names, `Test`, `Lint Workflows` and `Secret Scan`, are the required checks of main's ruleset once
+# their first run has registered them (the owner adds each to the ruleset): from then on, renaming a job without
+# changing the ruleset leaves every pull request waiting for ever.
 # ============================================================
 
 name: CI
@@ -102,3 +103,45 @@ jobs:
         run: |
           set -euo pipefail
           "${RUNNER_TEMP}/lint-tools/zizmor" --offline --persona regular --format github .
+
+  # Secrets in the commits a pull request or a push adds (incident-platform backlog #0-268, its ADR-0036): the scan of
+  # incident-platform's `secret-scan` job, its scripts copied unchanged but for their notice. Here before 4.2, since
+  # from #0-269 on the commits are pushed by profitbuild-factory-dev from its devcontainer, and 4.2 brings the code that
+  # handles builder-app's key. betterleaks needs no token and reads no secret: the job holds only the read-only
+  # GITHUB_TOKEN of every job here, so the pull requests the app opens (same-repository, run without approval) reach
+  # nothing more by it. The pin is incident-platform's (its check-pinned-tools.sh proves it against the publisher);
+  # incident-platform's CI fails when the two differ (#0-268).
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      BETTERLEAKS_VERSION: v1.9.0
+      BETTERLEAKS_SHA256: f8b185a39ffcece2a1ca82bf3a4e7435cd81963ffd16b7a9128daf75f35f6de7
+
+    steps:
+      # The full history: both ends of the range, and every commit between them, must be in the clone.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install betterleaks (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          .github/scripts/install-pinned-tool.sh --repo betterleaks/betterleaks --tag "$BETTERLEAKS_VERSION" \
+            --asset "betterleaks_${BETTERLEAKS_VERSION#v}_linux_x64.tar.gz" --sha256 "$BETTERLEAKS_SHA256" \
+            --member betterleaks --into "${RUNNER_TEMP}/scan-tools"
+          "${RUNNER_TEMP}/scan-tools/betterleaks" version
+
+      # The script's own cases first, with the same binary, so a broken script cannot pass.
+      - name: No secret in the commits
+        env:
+          FROM: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          TO: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.after }}
+        run: |
+          set -euo pipefail
+          BETTERLEAKS="${RUNNER_TEMP}/scan-tools/betterleaks" .github/scripts/test-secret-scan.sh
+          .github/scripts/secret-scan.sh "${RUNNER_TEMP}/scan-tools/betterleaks" "$FROM" "$TO"
