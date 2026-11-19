@@ -48,11 +48,16 @@ factory at one.
 
 ### Review
 
-**Until stage 5**; incident-platform backlog #0-270 may change the way before then (for example, `/review` fetching
-the factory's pull request itself). Today the review is incident-platform's panel's, run on files: the draft's
-`gh pr diff` and the result of its CI, saved in `.ai/runs/manual/<directory>/`, a new directory for each round, with
-the gate as `gate-r<n>.json` (the verifier refuses any other name); then `/review <digits>`, whose digits pick the
-reviewers (1 general, 2 security, 3 performance, 4 migration, 5 k8s, 6 docs, 7 architecture).
+**Until stage 5**, when the factory gets a review panel of its own. Today the review is incident-platform's panel's:
+the owner runs `/review factory#<n> <digits>` in their session on incident-platform (incident-platform backlog
+#0-270), whose digits pick the reviewers (1 general, 2 security, 3 performance, 4 migration, 5 k8s, 6 docs,
+7 architecture; security and architecture always judge a pull request of this repository by the factory's rules).
+It fetches the draft from GitHub's API as files, a new directory for each head
+(`scripts/factory-admin/fetch-factory-pr.sh` there): the diff pinned to the head, the delta since the round before,
+every commit's full message, the description, the changed files and the gate, which is this pull request's own CI.
+Nothing of the change runs on the owner's Mac, and no git runs on a clone of it. It waits while the CI runs; a failed
+check stops the review until it is fixed; a change under `.github/` is judged as a change of the CI that gates it.
+A round that finds something is followed by fixes as further commits and a new `/review factory#<n>` on the new head.
 
 ### Conventions of commit messages and pull request descriptions
 
