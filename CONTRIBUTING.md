@@ -55,7 +55,7 @@ the owner runs `/review factory#<n> <digits>` in their session on incident-platf
 It fetches the draft from GitHub's API as files, a new directory for each head
 (`scripts/factory-admin/fetch-factory-pr.sh` there): the diff pinned to the head, the delta since the round before,
 every commit's full message, the description, the changed files and the gate, which is this pull request's own CI.
-Nothing of the change runs on the owner's Mac, and no git runs on a clone of it. It waits while the CI runs; a failed
+Nothing of the change runs on the owner's Mac, and no git runs on a clone of it. It refuses while the CI runs (the owner waits, then fetches again); a failed
 check stops the review until it is fixed; a change under `.github/` is judged as a change of the CI that gates it.
 A round that finds something is followed by fixes as further commits and a new `/review factory#<n>` on the new head.
 
