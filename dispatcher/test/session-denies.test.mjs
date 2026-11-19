@@ -50,6 +50,8 @@ const REQUIRED_DENIES = [
   "Bash(gh api *Environment*)",
   "Bash(gh api *secrets*)",
   "Bash(gh secret *)",
+  "Read(./.env)",
+  "Read(./.env.*)",
 ];
 
 test('.claude/settings.json denies every command of the list', () => {
