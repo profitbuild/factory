@@ -58,7 +58,8 @@ export function createAppJwt({ appId, privateKey, now = Date.now() }) {
 /**
  * One call to GitHub's REST API, bounded by `timeoutMs` (the answer's body included). A non-2xx answer throws with the
  * method, the path, the status and GitHub's own `message`; never with a header or a body sent, which carry the
- * credential, nor with the answer's text, which may.
+ * credential, nor with the answer's text, which may. That error carries the answer's status as `status` too, for a
+ * caller that expects one (check-app expects 404, #0-271); an error with no answer has none.
  */
 async function githubRequest({
   baseUrl, method, path, bearer, body, fetchImpl = fetch, timeoutMs = REQUEST_TIMEOUT_MS,
@@ -103,7 +104,8 @@ async function githubRequest({
   }
   if (!response.ok) {
     const message = typeof answer?.message === 'string' ? answer.message : '(no JSON message in the answer)';
-    throw new Error(`GitHub ${method} ${path}: ${response.status} ${message}`);
+    throw Object.assign(new Error(`GitHub ${method} ${path}: ${response.status} ${message}`),
+      { status: response.status });
   }
   if (answer === undefined) {
     throw new Error(`GitHub ${method} ${path}: ${response.status}, the answer is not JSON`);

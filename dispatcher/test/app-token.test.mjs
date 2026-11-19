@@ -96,6 +96,13 @@ test('a refusal throws with the status and GitHub\'s message, never the credenti
     /404 Not Found/);
 });
 
+test('a refusal carries GitHub\'s status as error.status (check-app expects 404, #0-271)', async () => {
+  await assert.rejects(findRepositoryInstallation({ baseUrl: fake.baseUrl, jwt: 'j', owner: 'x', repo: 'y' }),
+    { status: 404 });
+  await assert.rejects(createInstallationToken({ baseUrl: fake.baseUrl, jwt: 'j', installationId: 7, permissions: {} }),
+    { status: 422 });
+});
+
 test('the repositories of a token are read from every page', async () => {
   assert.deepEqual(await listInstallationRepositories({ baseUrl: fake.baseUrl, token: 't' }),
     ['profitbuild/factory', 'profitbuild/other']);
