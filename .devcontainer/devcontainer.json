@@ -1,0 +1,48 @@
+{
+  // Where a session writes the factory's code, holding the hour's token of the app `profitbuild-factory-dev` and no
+  // other GitHub credential (incident-platform backlog #0-269, ADR-0060 D5 as amended). Start it from the owner's
+  // clone on main with the devcontainer CLI: `devcontainer up --workspace-folder .`; this file and the Dockerfile are
+  // read from there. Not with VS Code's "Reopen in Container": that extension forwards the host's git credential
+  // helper (the owner's admin token) and SSH agent into the container; credential-check.sh refuses it loudly, and
+  // the firewall gives SSH no way out, but the helper's socket is VS Code's own, which no rule here closes.
+  "name": "factory (profitbuild-factory-dev)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  // For the firewall only (init-firewall.sh, run through the one sudo rule `node` has).
+  "runArgs": [
+    "--cap-add=NET_ADMIN",
+    "--cap-add=NET_RAW"
+  ],
+  "containerUser": "node",
+  "remoteUser": "node",
+  // The workspace is a volume of the container's own, not the host's clone: a bind mount would let the container
+  // change files the host then runs (dispatcher/bin/dev-token.mjs, next to the app's key) or plant a git hook that
+  // runs at the owner's next `git` there, with the owner's admin token. factory-workspace.sh clones into it once.
+  "workspaceMount": "source=factory-dev-workspace,target=/workspace,type=volume",
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    // The token's directory, read-only: the host's dev-token.mjs writes `token` there and nothing else. It must
+    // exist before the container starts (dev-token.mjs creates it), and must not be the key's directory, which
+    // dev-token.mjs refuses.
+    "source=${localEnv:HOME}/.local/state/profitbuild-factory-dev,target=/run/factory-token,type=bind,readonly",
+    // Claude Code's login and settings (CLAUDE_CONFIG_DIR below): this container's own, shared with no other.
+    "source=factory-dev-claude,target=/home/node/.claude,type=volume"
+  ],
+  "containerEnv": {
+    // Every commit made here is the app's bot user's, whoever types it; its GitHub noreply address
+    // (<user id>+<login>), so no real mailbox reaches the public history. The user id is GitHub's for
+    // `profitbuild-factory-dev[bot]` (`gh api users/profitbuild-factory-dev%5Bbot%5D`).
+    "GIT_AUTHOR_NAME": "profitbuild-factory-dev[bot]",
+    "GIT_AUTHOR_EMAIL": "358440930+profitbuild-factory-dev[bot]@users.noreply.github.com",
+    "GIT_COMMITTER_NAME": "profitbuild-factory-dev[bot]",
+    "GIT_COMMITTER_EMAIL": "358440930+profitbuild-factory-dev[bot]@users.noreply.github.com",
+    "CLAUDE_CONFIG_DIR": "/home/node/.claude"
+  },
+  // No SSH agent, whatever the client forwards (SSH to GitHub is closed by the firewall too).
+  "remoteEnv": {
+    "SSH_AUTH_SOCK": ""
+  },
+  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh && /usr/local/bin/credential-check.sh && /usr/local/bin/factory-workspace.sh",
+  "postAttachCommand": "/usr/local/bin/credential-check.sh"
+}
