@@ -5,7 +5,8 @@
 # A copy of profitbuild/incident-platform's .github/scripts/install-pinned-tool.sh (backlog #0-267): the backlog
 # items and ADRs named here are that repository's, and so are Renovate, check-pinned-tools.sh and this script's tests,
 # which the paragraph below describes: here a pin is bumped by hand, to the value incident-platform's checks proved.
-# Stage T of its ADR-0055 makes one template of it; until then a change to either copy is made to both.
+# Stage T of its ADR-0055 makes one template of it; until then a change to either copy is made to both, and
+# incident-platform's CI fails when the two differ beyond this paragraph (backlog #0-268 there).
 #
 #   install-pinned-tool.sh --repo rhysd/actionlint --tag v1.7.12 \
 #       --asset actionlint_1.7.12_linux_amd64.tar.gz --sha256 <64 hex> \

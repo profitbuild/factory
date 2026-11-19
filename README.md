@@ -18,18 +18,19 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 | Path | What |
 |---|---|
 | `dispatcher/` | The dispatcher: Node (`.node-version`), built-in modules only, no package from npm (ADR-0060 D2). Its tests: `cd dispatcher && node --test` |
-| `.github/workflows/ci.yml` | CI: the dispatcher's tests (`Test`) and the workflow linters at incident-platform's pins (`Lint Workflows`) |
+| `.github/workflows/ci.yml` | CI: the dispatcher's tests (`Test`), the workflow linters at incident-platform's pins (`Lint Workflows`), and the secret scan of every commit a pull request or a push adds (`Secret Scan`, betterleaks) |
 | `.github/scripts/install-pinned-tool.sh` | Installs a CI tool pinned by tag and SHA-256; a copy of incident-platform's until stage T makes one template |
+| `.github/scripts/secret-scan.sh`, `test-secret-scan.sh` | The secret scan and its cases; copies of incident-platform's, which its CI keeps equal to the originals but for their notice |
 | `.devcontainer/` | Where a session writes this repository's code, as the app `profitbuild-factory-dev` (see "Changes") |
 | `dispatcher/bin/dev-token.mjs` | Run on the host: mints that app's hour token for the devcontainer |
 | `.claude/settings.json` | The denies of a Claude Code session started here; `dispatcher/test/session-denies.test.mjs` keeps them |
 
 ## Changes
 
-`main` changes only by the owner's pull requests: the ruleset requires a pull request and the code owner's review,
-and refuses force pushes and deletion (the two CI jobs become required checks once their first run has registered
-them); a tag can be neither moved nor deleted, since products load the factory at one, and only an admin creates
-one.
+`main` changes only by pull requests the owner merges: the ruleset requires a pull request and the code owner's
+review, and refuses force pushes and deletion; its required checks are the CI jobs `Test` and `Lint Workflows`, and
+`Secret Scan` once its first run has registered it and the owner has added it to the ruleset; a tag can be neither
+moved nor deleted, since products load the factory at one, and only an admin creates one.
 
 The code is written by a session holding the token of the GitHub App `profitbuild-factory-dev`, and no other GitHub
 credential (incident-platform ADR-0060 D5 as amended, backlog #0-269). The app is installed on this repository
