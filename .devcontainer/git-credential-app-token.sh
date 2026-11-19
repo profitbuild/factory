@@ -5,6 +5,9 @@
 # URL, an argument or the environment. With no token it answers `quit=1`, so git asks no helper after it: a helper a
 # client added to ~/.gitconfig (VS Code's, which asks the host's, the owner's admin token) would come next otherwise
 # (review round 2).
+# Why a file, when builder-app's push (dispatcher/libexec/git-askpass.sh) takes its token from git's environment: the
+# token is minted on the host and crosses into this container, which is no child of the minting process; that
+# script's header says it in full.
 set -euo pipefail
 token_file=/run/factory-token/token
 # git sends the request's attributes on stdin; none of them changes the answer.

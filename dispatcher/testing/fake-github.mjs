@@ -1,7 +1,9 @@
 // Not a test file: node --test runs every file under test/, so the helpers live here.
 // A fake of the few GitHub REST endpoints the app-token code calls, on node:http (incident-platform backlog #0-269).
-// Each route is a function of the request returning { status, body, delayMs? }; every request is recorded, its body
-// parsed; `delayMs` holds the answer back, for a test that acts while a request is in flight.
+// Each route is a function of the request returning { status, body, headers?, delayMs? }; every request is recorded,
+// its body parsed when it is JSON and kept as text otherwise (git's pack); `delayMs` holds the answer back, for a test
+// that acts while a request is in flight. A body that is a string or a Buffer is sent as it is, with the route's
+// `headers` (git's smart HTTP, incident-platform backlog #0-271); any other body is sent as JSON.
 import { createServer } from 'node:http';
 import { generateKeyPairSync } from 'node:crypto';
 
@@ -27,16 +29,21 @@ export async function startFakeGitHub(routes) {
     req.on('data', (chunk) => { raw += chunk; });
     req.on('end', () => {
       const url = new URL(req.url, 'http://fake');
-      const request = {
-        method: req.method, path: url.pathname, query: url.searchParams, headers: req.headers,
-        body: raw === '' ? undefined : JSON.parse(raw),
-      };
+      let body;
+      try {
+        body = raw === '' ? undefined : JSON.parse(raw);
+      } catch {
+        body = raw;
+      }
+      const request = { method: req.method, path: url.pathname, query: url.searchParams, headers: req.headers, body };
       requests.push(request);
       const route = routes[`${req.method} ${url.pathname}`];
-      const { status, body, delayMs = 0 } = route ? route(request) : { status: 404, body: { message: 'Not Found' } };
+      const answer = route ? route(request) : { status: 404, body: { message: 'Not Found' } };
+      const { status, body: sent, headers = {}, delayMs = 0 } = answer;
+      const verbatim = sent === undefined || typeof sent === 'string' || Buffer.isBuffer(sent);
       setTimeout(() => {
-        res.writeHead(status, body === undefined ? {} : { 'Content-Type': 'application/json' });
-        res.end(body === undefined ? undefined : JSON.stringify(body));
+        res.writeHead(status, verbatim ? headers : { 'Content-Type': 'application/json', ...headers });
+        res.end(verbatim ? sent : JSON.stringify(sent));
       }, delayMs);
     });
   });

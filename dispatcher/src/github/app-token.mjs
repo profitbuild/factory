@@ -56,9 +56,19 @@ export function createAppJwt({ appId, privateKey, now = Date.now() }) {
 }
 
 /**
+ * A call that got no answer, or none it could read: `kind` is 'timeout' or 'network', and `cause` the error of fetch
+ * (which names the connection, never the request's headers). The retries of #0-261 must tell these from an answer of
+ * GitHub's (which carries `status`) without parsing the message, whose text stays as it was.
+ */
+function failedCall(message, kind, cause) {
+  return Object.assign(new Error(message, { cause }), { kind });
+}
+
+/**
  * One call to GitHub's REST API, bounded by `timeoutMs` (the answer's body included). A non-2xx answer throws with the
  * method, the path, the status and GitHub's own `message`; never with a header or a body sent, which carry the
- * credential, nor with the answer's text, which may.
+ * credential, nor with the answer's text, which may. That error carries the answer's status as `status` too, for a
+ * caller that expects one (check-app expects 404, #0-271); an error with no answer has none.
  */
 async function githubRequest({
   baseUrl, method, path, bearer, body, fetchImpl = fetch, timeoutMs = REQUEST_TIMEOUT_MS,
@@ -79,9 +89,9 @@ async function githubRequest({
     });
   } catch (error) {
     if (error.name === 'TimeoutError') {
-      throw new Error(`GitHub ${method} ${path}: no answer in ${timeoutMs / 1000} s`);
+      throw failedCall(`GitHub ${method} ${path}: no answer in ${timeoutMs / 1000} s`, 'timeout', error);
     }
-    throw new Error(`GitHub ${method} ${path}: ${error.message}`);
+    throw failedCall(`GitHub ${method} ${path}: ${error.message}`, 'network', error);
   }
   if (response.status === 204) {
     return null;
@@ -90,8 +100,9 @@ async function githubRequest({
   try {
     text = await response.text();
   } catch (error) {
-    throw new Error(`GitHub ${method} ${path}: ${error.name === 'TimeoutError'
-      ? `no answer in ${timeoutMs / 1000} s` : 'the answer could not be read'}`);
+    const timedOut = error.name === 'TimeoutError';
+    const what = timedOut ? `no answer in ${timeoutMs / 1000} s` : 'the answer could not be read';
+    throw failedCall(`GitHub ${method} ${path}: ${what}`, timedOut ? 'timeout' : 'network', error);
   }
   // Parsed here, so that an answer which is not JSON throws without quoting it: a token's answer carries the token,
   // and JSON.parse's own message quotes the text it failed on.
@@ -103,7 +114,8 @@ async function githubRequest({
   }
   if (!response.ok) {
     const message = typeof answer?.message === 'string' ? answer.message : '(no JSON message in the answer)';
-    throw new Error(`GitHub ${method} ${path}: ${response.status} ${message}`);
+    throw Object.assign(new Error(`GitHub ${method} ${path}: ${response.status} ${message}`),
+      { status: response.status });
   }
   if (answer === undefined) {
     throw new Error(`GitHub ${method} ${path}: ${response.status}, the answer is not JSON`);
