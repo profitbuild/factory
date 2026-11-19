@@ -23,6 +23,7 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 | `.github/scripts/secret-scan.sh`, `test-secret-scan.sh` | The secret scan and its cases; copies of incident-platform's, which its CI keeps equal to the originals but for their notice |
 | `.devcontainer/` | Where a session writes this repository's code, as the app `profitbuild-factory-dev` (see "Changes") |
 | `dispatcher/bin/dev-token.mjs` | Run on the host: mints that app's hour token for the devcontainer |
+| `CONTRIBUTING.md` | How a change is made, from the change to the merge, and who writes what: what stays after ADR-0055's migration, and what holds until a named stage |
 | `.claude/settings.json` | The denies of a Claude Code session started here; `dispatcher/test/session-denies.test.mjs` keeps them |
 
 ## Changes
