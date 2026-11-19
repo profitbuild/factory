@@ -1,14 +1,16 @@
 // builder-app's push (incident-platform backlog #0-271, AC2): a real `git push`, built by gitPushCommand, to a fake
 // git smart-HTTP server on a loopback address. The token reaches the server through libexec/git-askpass.sh, and no
-// argument, no file, no hook, no credential helper and no other child; a control run without the overrides shows
-// that the hook and the helper planted here would have had it. A URL rewritten to another host gets no credential.
+// argument, no file, no hook, no credential helper, no ssh command and no other child; control runs without the
+// overrides show that the hook, the helper and the ssh command planted here would have had it. A URL rewritten to
+// another host gets no credential, one rewritten to ssh:// is refused by git. The tests push over http:// to
+// loopback, so they pass allowProtocols 'http:https' explicitly; the default is 'https' alone.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { GIT_ASKPASS, PUSH_URL, gitPushCommand } from '../src/github/builder-token.mjs';
+import { GIT_ASKPASS, PUSH_ENV_ALLOWED, PUSH_URL, gitPushCommand } from '../src/github/builder-token.mjs';
 import { startFakeGitHub } from '../testing/fake-github.mjs';
 import { filesContaining, makeRoot } from '../testing/builder-github.mjs';
 
@@ -80,10 +82,12 @@ async function setUp(name) {
   await writeFile(join(repo, '.git', 'hooks', 'pre-push'), dumper('hook'));
   await chmod(join(repo, '.git', 'hooks', 'pre-push'), 0o755);
   run('config', 'credential.helper', join(dir, 'helper'));
-  await writeFile(join(bin, 'git'),
-    `#!/bin/sh\nprintf '%s\\n' "$@" >> ${join(dumps, 'argv')}\nexec ${REAL_GIT} "$@"\n`);
+  // The wrapper is the git process itself (it execs git): the names of its environment are what every child of git
+  // inherits. Names only, since one of them is the token's.
+  await writeFile(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$@" >> ${join(dumps, 'argv')}\n`
+    + `env | cut -d= -f1 >> ${join(dumps, 'git-env-names')}\nexec ${REAL_GIT} "$@"\n`);
   await chmod(join(bin, 'git'), 0o755);
-  const baseEnv = { PATH: `${bin}:${process.env.PATH}`, HOME: home, LANG: 'C' };
+  const baseEnv = { PATH: `${bin}:${process.env.PATH}`, HOME: home, LANG: 'C', SECRET_X: 'a-secret-of-the-parent' };
   return { dir, repo, dumps, home, baseEnv, run };
 }
 
@@ -100,7 +104,8 @@ const spawnRun = ({ command, args, env }, cwd) => new Promise((resolve) => {
 test('the push reaches the server with the token, in no argument, file, hook, helper or other env', async () => {
   const { dir, repo, dumps, baseEnv } = await setUp('push');
   const before = structuredClone(baseEnv);
-  const command = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url, baseEnv });
+  const command = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url,
+    allowProtocols: 'http:https', baseEnv });
   const { code, stdout, stderr } = await spawnRun(command, repo);
   assert.equal(code, 0, stderr);
   assert.ok(git.authorizations.includes(basic('x-access-token', TOKEN)), 'the server got the token');
@@ -113,6 +118,12 @@ test('the push reaches the server with the token, in no argument, file, hook, he
   assert.equal(await exists(join(dumps, 'hook')), false, 'the pre-push hook did not run');
   assert.equal(await exists(join(dumps, 'helper')), false, 'the credential helper was not asked');
   assert.deepEqual(await filesContaining(dir, TOKEN), [], 'nowhere on the disk of the run, HOME and .git included');
+  const names = (await readFile(join(dumps, 'git-env-names'), 'utf8')).trim().split('\n');
+  assert.ok(names.includes('FACTORY_PUSH_TOKEN'), 'the wrapper saw git\'s environment');
+  assert.equal(names.includes('SECRET_X'), false, 'a variable of the parent outside the allowlist does not reach git');
+  assert.equal(names.includes('LANG'), false);
+  assert.deepEqual(names.filter((n) => ![...PUSH_ENV_ALLOWED, 'PWD', 'SHLVL', '_'].includes(n)
+    && !n.startsWith('GIT_') && !n.startsWith('FACTORY_PUSH_')), [], 'git sees nothing but the allowlist and ours');
   assert.equal(Object.values(process.env).some((value) => value?.includes(TOKEN)), false, 'not in process.env');
 });
 
@@ -132,7 +143,8 @@ test('a push URL rewritten by insteadOf to another host gets no credential, and 
   const { repo, run, baseEnv } = await setUp('insteadof');
   run('config', `url.${other.baseUrl}/.insteadOf`, `${git.baseUrl}/`);
   const start = other.requests.length;
-  const command = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url, baseEnv });
+  const command = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url,
+    allowProtocols: 'http:https', baseEnv });
   const { code, stderr } = await spawnRun(command, repo);
   assert.notEqual(code, 0);
   assert.ok(other.requests.length > start, 'git went to the other host');
@@ -142,18 +154,23 @@ test('a push URL rewritten by insteadOf to another host gets no credential, and 
   assert.doesNotMatch(stderr, new RegExp(TOKEN));
 });
 
-test('the command: the token in its env alone, the overrides, an explicit URL, no inherited GIT_ variable', () => {
+test('the command: the token in its env alone, the overrides, an explicit URL, only the allowed variables', () => {
   const baseEnv = { PATH: '/usr/bin', HOME: '/home/x', GIT_SSL_NO_VERIFY: '1', GIT_ASKPASS: '/evil',
-    GIT_CONFIG_PARAMETERS: "'core.hooksPath'='/evil'", FACTORY_PUSH_ORIGIN: 'https://evil.example', SSH_ASKPASS: '/e' };
+    GIT_CONFIG_PARAMETERS: "'core.hooksPath'='/evil'", FACTORY_PUSH_ORIGIN: 'https://evil.example', SSH_ASKPASS: '/e',
+    SECRET_X: 's', LANG: 'C', LD_PRELOAD: '/evil.so', HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'localhost',
+    GIT_ALLOW_PROTOCOL: 'ssh:https' };
   const { command, args, env } = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], baseEnv });
   assert.equal(command, 'git');
   assert.deepEqual(args, ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', '-c', 'credential.helper=',
     'push', '--no-verify', '--porcelain', PUSH_URL, 'HEAD:refs/heads/feat/x']);
   assert.equal(PUSH_URL, 'https://github.com/profitbuild/incident-platform.git');
   assert.deepEqual(env, {
-    PATH: '/usr/bin', HOME: '/home/x', GIT_ASKPASS, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null', FACTORY_PUSH_ORIGIN: 'https://github.com', FACTORY_PUSH_TOKEN: TOKEN,
+    PATH: '/usr/bin', HOME: '/home/x', HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'localhost', GIT_ASKPASS,
+    GIT_ALLOW_PROTOCOL: 'https', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+    FACTORY_PUSH_ORIGIN: 'https://github.com', FACTORY_PUSH_TOKEN: TOKEN,
   });
+  assert.deepEqual(PUSH_ENV_ALLOWED, ['PATH', 'HOME', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy',
+    'http_proxy', 'no_proxy']);
 });
 
 test('the command refuses a URL with credentials or not HTTPS, a refspec that is an option, and no token', () => {
@@ -161,10 +178,13 @@ test('the command refuses a URL with credentials or not HTTPS, a refspec that is
   assert.throws(() => gitPushCommand({ ...ok, url: 'https://x:y@github.com/profitbuild/incident-platform.git' }),
     /no user or password/);
   assert.throws(() => gitPushCommand({ ...ok, url: 'http://github.com/profitbuild/incident-platform.git' }),
-    /must be https:\/\//);
+    /must be an https:\/\/ URL/);
   assert.throws(() => gitPushCommand({ ...ok, refspecs: ['--force'] }), /none starting with "-"/);
   assert.throws(() => gitPushCommand({ ...ok, refspecs: [] }), /one or more/);
   assert.throws(() => gitPushCommand({ ...ok, token: '' }), /a token is required/);
+  assert.throws(() => gitPushCommand({ ...ok, url: 'http://127.0.0.1:1/x.git' }), /http among them/,
+    'http:// to loopback needs http allowed explicitly');
+  assert.throws(() => gitPushCommand({ ...ok, allowProtocols: 'https ssh' }), /protocols joined by ":"/);
 });
 
 /** Runs the askpass script as git does, the question in $1. */
@@ -190,4 +210,42 @@ test('askpass: the user and the token for the origin, nothing for another host, 
   const unset = await askpass("Password for 'https://x-access-token@github.com': ", { FACTORY_PUSH_TOKEN: TOKEN });
   assert.notEqual(unset.code, 0);
   assert.equal(unset.stdout, '');
+});
+
+/**
+ * A repository whose config rewrites the push URL to ssh:// and names a core.sshCommand that dumps its environment,
+ * as an agent could write it (the hole round 1 of the review found).
+ */
+async function setUpSsh(name) {
+  const setup = await setUp(name);
+  const sshCommand = join(setup.dir, 'ssh-command');
+  await writeFile(sshCommand, `#!/bin/sh\nenv >> ${join(setup.dumps, 'ssh')}\nexit 1\n`);
+  await chmod(sshCommand, 0o755);
+  setup.run('config', 'url.ssh://git@127.0.0.1:1/.insteadOf', `${git.baseUrl}/`);
+  setup.run('config', 'core.sshCommand', sshCommand);
+  setup.run('config', 'protocol.ssh.allow', 'always');
+  return setup;
+}
+
+test('a push URL rewritten by insteadOf to ssh:// is refused by git: the ssh command never runs', async () => {
+  const { dir, repo, dumps, baseEnv } = await setUpSsh('ssh');
+  const start = git.requests.length;
+  const command = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url,
+    allowProtocols: 'http:https', baseEnv });
+  const { code, stderr } = await spawnRun(command, repo);
+  assert.notEqual(code, 0);
+  assert.match(stderr, /transport 'ssh' not allowed/);
+  assert.equal(await exists(join(dumps, 'ssh')), false, 'the ssh command did not run');
+  assert.equal(git.requests.length, start);
+  assert.deepEqual(await filesContaining(dir, TOKEN), []);
+});
+
+test('control: without GIT_ALLOW_PROTOCOL, the ssh command of the config gets the token', async () => {
+  const { repo, dumps, baseEnv } = await setUpSsh('ssh-control');
+  const { env, args } = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url,
+    allowProtocols: 'http:https', baseEnv });
+  delete env.GIT_ALLOW_PROTOCOL;
+  const { code } = await spawnRun({ command: 'git', args, env }, repo);
+  assert.notEqual(code, 0);
+  assert.match(await readFile(join(dumps, 'ssh'), 'utf8'), new RegExp(`FACTORY_PUSH_TOKEN=${TOKEN}`));
 });

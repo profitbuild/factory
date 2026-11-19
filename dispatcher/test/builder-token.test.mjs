@@ -5,10 +5,11 @@
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { chmod, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { RefusedError } from '../src/github/checked-token.mjs';
+import { RefusedError, readAppKey } from '../src/github/checked-token.mjs';
 import {
   BUILDER_PERMISSIONS, createBuilderTokenSource, mintBuilderToken,
 } from '../src/github/builder-token.mjs';
@@ -97,7 +98,7 @@ test('a key that is a symlink, even to a file of mode 600, is refused', async ()
   await symlink(files.keyPath, link);
   const tokens = createBuilderTokenSource({ env: { ...files.env, keyPath: link }, baseUrl: fake.baseUrl,
     now: () => clock.now });
-  await assertRefused(tokens, /the key .*link\.pem is not a regular file \(a symlink is refused\)/);
+  await assertRefused(tokens, /the key .*link\.pem is not a regular file \(a symlink/);
   assert.equal(fake.state.minted.length, 0);
 });
 
@@ -108,6 +109,18 @@ test('a key that is a directory is refused as not a regular file', async () => {
   await chmod(files.dir, 0o700);
   await assertRefused(tokens, /the key .* is not a regular file/);
 });
+
+test('a key swapped for a FIFO between the lstat and the open is refused at once, not waited on', { timeout: 5000 },
+  async () => {
+    const files = await writeAppFiles(root, fake.privateKey);
+    const swap = async () => {
+      await rm(files.keyPath);
+      execFileSync('mkfifo', ['-m', '600', files.keyPath]);
+    };
+    await assert.rejects(readAppKey(files.keyPath, { afterLstat: swap }),
+      (error) => error instanceof RefusedError
+        && /changed while it was read|is not a regular file/.test(error.message));
+  });
 
 // Without root, a test cannot give a file another owner; the check is made to require another uid instead.
 test('a key owned by another user is refused (the owner required set to another uid)', async () => {
@@ -140,10 +153,11 @@ test('an installation holding Pull requests read, not write, gets no token asked
   assert.equal(fake.state.minted.length, 0);
 });
 
-test('an installation other than the env file\'s gets no token asked for', async () => {
+test('an installation other than BUILDER_APP_INSTALLATION_ID\'s gets no token asked for', async () => {
   fake.state.installation.id = INSTALLATION_ID + 1;
   const { tokens } = await source();
-  await assertRefused(tokens, new RegExp(`is ${INSTALLATION_ID + 1}, not ${INSTALLATION_ID} as the env file says`));
+  await assertRefused(tokens,
+    new RegExp(`is ${INSTALLATION_ID + 1}, not ${INSTALLATION_ID} as BUILDER_APP_INSTALLATION_ID says`));
   assert.equal(fake.state.minted.length, 0);
 });
 
@@ -261,4 +275,32 @@ test('no token is in process.env, nor in the environment of a child spawned afte
   });
   assert.equal(childEnv.includes(token), false);
   assert.deepEqual(await filesContaining(root, token), []);
+});
+
+test('a refusal after the token is minted is thrown even when its revoke fails, not the revoke\'s error', async () => {
+  fake.state.repositories = ['profitbuild/factory'];
+  fake.state.failRevoke = true;
+  const { tokens } = await source();
+  await assert.rejects(tokens.getToken(), (error) => {
+    assert.ok(error instanceof RefusedError, error.message);
+    assert.match(error.message, /reaches \["profitbuild\/factory"\]/);
+    return true;
+  });
+  assert.ok(fake.requests.some((r) => r.method === 'DELETE'), 'the revoke was tried');
+});
+
+test('an API that is neither HTTPS nor loopback is refused before the key is read or a JWT made', async () => {
+  const files = await writeAppFiles(root, fake.privateKey);
+  const start = fake.requests.length;
+  for (const baseUrl of ['http://api.example.com', 'ftp://127.0.0.1']) {
+    assert.throws(() => createBuilderTokenSource({ env: files.env, baseUrl }), /the API must be an https:\/\/ URL/);
+    let jwtMade = false;
+    await assert.rejects(mintBuilderToken({ env: files.env, baseUrl, fetchImpl: () => { jwtMade = true; } }),
+      /the API must be an https:\/\/ URL/);
+    assert.equal(jwtMade, false);
+  }
+  await assert.rejects(mintBuilderToken({ env: { ...files.env, keyPath: '/nonexistent' },
+    baseUrl: 'http://x.example' }),
+    /the API must be/, 'refused before the key is read: no ENOENT');
+  assert.equal(fake.requests.length, start);
 });

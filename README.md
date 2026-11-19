@@ -24,8 +24,8 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 | `.devcontainer/` | Where a session writes this repository's code, as the app `profitbuild-factory-dev` (see "Changes") |
 | `dispatcher/bin/dev-token.mjs` | Run on the host: mints that app's hour token for the devcontainer |
 | `dispatcher/src/github/builder-token.mjs` | builder-app's token for the dispatcher (stage 4.2): minted after the checks of `checked-token.mjs`, narrowed to incident-platform, kept in memory until 5 minutes before it expires, given to `git push` through `dispatcher/libexec/git-askpass.sh` only |
-| `dispatcher/bin/check-app.mjs` | Run on the build VM as the dispatcher's user: mints a builder-app token, runs every check, expects 404 for an installation on factory, revokes the token; prints no token |
-| `/home/dispatcher/.config/factory/env` | On the build VM, not here: builder-app's `BUILDER_APP_ID`, `BUILDER_APP_INSTALLATION_ID` and `BUILDER_APP_KEY` (`dispatcher/src/config/env-file.mjs`); no id sits in the code |
+| `dispatcher/bin/check-app.mjs` | Run on the build VM as the dispatcher's user, `node --env-file=/home/dispatcher/.config/factory/env dispatcher/bin/check-app.mjs`: mints a builder-app token, runs every check, expects 404 for an installation on factory, revokes the token; prints no token |
+| `/home/dispatcher/.config/factory/env` | On the build VM, not here: builder-app's `BUILDER_APP_ID`, `BUILDER_APP_INSTALLATION_ID` and `BUILDER_APP_KEY`, as `KEY=value` lines. The dispatcher reads its settings from the environment only (incident-platform ADR-0055, `dispatcher/src/config/builder-env.mjs`), and Node loads the file into it with `--env-file`: no parser of it is ours, none is in a shell. No id sits in the code |
 | `CONTRIBUTING.md` | How a change is made, from the change to the merge, and who writes what: what stays after ADR-0055's migration, and what holds until a named stage |
 | `.claude/settings.json` | The denies of a Claude Code session started here; `dispatcher/test/session-denies.test.mjs` keeps them |
 

@@ -6,7 +6,7 @@
  *
  * Parametrized by the repository and the permissions, for builder-app today (builder-token.mjs). dispatcher/bin/
  * dev-token.mjs keeps its own copy of these checks for now (#0-271 AC4): it does not narrow its token, on purpose, and
- * its permissions and builder-app's part at stage 4.5; moving it onto this module is a backlog item of its own.
+ * its permissions and builder-app's part at stage 4.5; moving it onto this module is incident-platform backlog #0-273.
  *
  * Nothing here writes to the disk or prints; a refusal's message names what GitHub answered (permissions, repository
  * names, ids), never a token, the JWT or the key.
@@ -18,6 +18,7 @@ import {
   revokeInstallationToken,
 } from './app-token.mjs';
 import { readOwnFile } from '../config/own-file.mjs';
+import { requireHttpsOrLoopback } from './url-policy.mjs';
 
 /** A check against GitHub's answers, or of the key's file, failed: no token may stand on it. */
 export class RefusedError extends Error {}
@@ -27,11 +28,7 @@ const show = (permissions) => JSON.stringify(sortedEntries(permissions));
 
 /** HTTPS, or plain HTTP to a loopback address (a test's fake GitHub); anything else would get the app's JWT. */
 export function checkApiUrl(api) {
-  const url = new URL(api);
-  const loopback = ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
-    throw new Error(`the API must be an https:// URL, not ${url.protocol}//${url.host}`);
-  }
+  requireHttpsOrLoopback(api, 'the API');
   return api;
 }
 
@@ -39,11 +36,12 @@ export function checkApiUrl(api) {
  * The app's private key, refused unless it is a regular file of the process's user that no one else can read.
  *
  * @param {string} path
- * @param {{ uid?: number }} [options] the owner required, the process's user by default (for tests)
+ * @param {{ uid?: number, afterLstat?: () => Promise<void> }} [options] the owner required, the process's user by
+ *   default, and readOwnFile's afterLstat (for tests)
  */
-export async function readAppKey(path, { uid } = {}) {
+export async function readAppKey(path, { uid, afterLstat } = {}) {
   return readOwnFile(path, {
-    what: 'the key', forbiddenMode: 0o077, uid, refuse: (message) => new RefusedError(message),
+    what: 'the key', forbiddenMode: 0o077, uid, afterLstat, refuse: (message) => new RefusedError(message),
   });
 }
 
@@ -51,7 +49,7 @@ export async function readAppKey(path, { uid } = {}) {
 export function checkInstallation(installation, { appId, installationId, permissions, repository }) {
   if (installation.id !== installationId) {
     throw new RefusedError(`the installation on ${repository} is ${installation.id}, not ${installationId} `
-      + 'as the env file says');
+      + 'as BUILDER_APP_INSTALLATION_ID says');
   }
   if (installation.app_id !== appId) {
     throw new RefusedError(`the installation on ${repository} is the app ${installation.app_id}'s, not ${appId}'s`);
@@ -84,11 +82,13 @@ export function checkTokenPermissions(tokenPermissions, permissions) {
  *   permissions: Record<string, string>, baseUrl: string, fetchImpl?: typeof fetch, timeoutMs?: number,
  *   uid?: number, report?: (line: string) => void }} options `report` is told each check that passed (check-app)
  * @returns {Promise<{ token: string, expiresAt: string }>}
- * @throws {RefusedError} a check failed; {Error} GitHub was not reached or answered an error
+ * @throws {RefusedError} a check failed; {Error} `baseUrl` is neither HTTPS nor loopback (checked before the key is
+ *   read and the JWT made), or GitHub was not reached or answered an error
  */
 export async function mintCheckedToken({
   appId, installationId, keyPath, owner, repo, permissions, baseUrl, fetchImpl, timeoutMs, uid, report = () => {},
 }) {
+  checkApiUrl(baseUrl);
   const repository = `${owner}/${repo}`;
   const privateKey = await readAppKey(keyPath, { uid });
   report(`key ${keyPath}: a regular file of uid ${uid ?? process.getuid()}, readable by no one else: ok`);

@@ -1,6 +1,7 @@
-// bin/check-app.mjs (incident-platform backlog #0-271, AC3), run as the dispatcher's user runs it, against a fake
-// GitHub: it passes, printing each check and no token, and revokes its token; it fails when the app's installation on
-// factory answers anything but 404, or a check fails, and revokes the token all the same.
+// bin/check-app.mjs (incident-platform backlog #0-271, AC3), run as the dispatcher's user runs it, with
+// `node --env-file=<the env file>`, against a fake GitHub: it passes, printing each check and no token, and revokes
+// its token; it fails when the app's installation on factory answers anything but 404, a check fails, or the token
+// cannot be revoked. The child gets PATH alone of this process's environment: its settings come from the file.
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -22,7 +23,8 @@ beforeEach(() => fake.reset());
 async function checkApp(extra = [], files = undefined) {
   const { envPath } = files ?? await writeAppFiles(root, fake.privateKey);
   return new Promise((resolve) => {
-    execFile(process.execPath, [SCRIPT, '--env', envPath, '--api', fake.baseUrl, ...extra],
+    execFile(process.execPath, [`--env-file=${envPath}`, SCRIPT, '--api', fake.baseUrl, ...extra],
+      { env: { PATH: process.env.PATH } },
       (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr }));
   });
 }
@@ -31,14 +33,15 @@ const noToken = ({ stdout, stderr }) => {
   assert.doesNotMatch(stdout + stderr, /eyJ/, 'no JWT');
 };
 
-test('check-app passes: every check on stdout, the token revoked, no token printed', async () => {
+test('check-app passes: settings from --env-file, each check on stdout, the token revoked', async () => {
   const start = fake.requests.length;
   const result = await checkApp();
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stderr, '');
   noToken(result);
   const lines = result.stdout.trim().split('\n');
-  assert.match(lines[0], new RegExp(`^check-app: env .*env: app ${APP_ID}, installation ${INSTALLATION_ID}$`));
+  assert.equal(lines[0], `check-app: settings: app ${APP_ID}, installation ${INSTALLATION_ID}`,
+    'node --env-file loaded the ids');
   assert.match(lines[1], /^check-app: key .*builder-app\.pem: a regular file of uid \d+, readable by no one else: ok$/);
   assert.equal(lines[2], `check-app: installation ${INSTALLATION_ID} of app ${APP_ID} on profitbuild/incident-platform `
     + `holds ${JSON.stringify(PERMISSIONS)}: ok`);
@@ -85,13 +88,34 @@ test('check-app fails when a check fails, with the token revoked and nothing mor
   assert.equal(fake.requests.slice(start).some((r) => r.path === '/repos/profitbuild/factory/installation'), false);
 });
 
-test('check-app refuses an env file writable by others, and an API that is not HTTPS, asking nothing', async () => {
+test('check-app refuses an unknown BUILDER_APP_ variable, and an API that is not HTTPS, asking nothing', async () => {
   const start = fake.requests.length;
-  const loose = await checkApp([], await writeAppFiles(root, fake.privateKey, { envMode: 0o666 }));
-  assert.equal(loose.code, 1);
-  assert.match(loose.stderr, /the env file .* has mode 666/);
+  const typo = await checkApp([], await writeAppFiles(root, fake.privateKey, {
+    envText: 'BUILDER_APP_ID=1\nBUILDER_APP_INSTALLATION_ID=2\nBUILDER_APP_KYE=/x\n' }));
+  assert.equal(typo.code, 1);
+  assert.match(typo.stderr, /^check-app: unknown variable BUILDER_APP_KYE/m);
   const plain = await checkApp(['--api', 'http://api.example.com']);
   assert.equal(plain.code, 1);
   assert.match(plain.stderr, /the API must be an https:\/\/ URL/);
   assert.equal(fake.requests.length, start);
+});
+
+test('check-app fails when the final revoke fails, naming the token left unrevoked', async () => {
+  fake.state.failRevoke = true;
+  const result = await checkApp();
+  assert.equal(result.code, 1);
+  noToken(result);
+  assert.match(result.stdout, /no installation on profitbuild\/factory \(404\): ok/);
+  assert.doesNotMatch(result.stdout, /token revoked|all checks passed/);
+  assert.match(result.stderr, new RegExp('^check-app: the token could not be revoked \\(it expires within the hour\\): '
+    + 'GitHub DELETE /installation/token: 502 Bad Gateway$', 'm'));
+});
+
+test('check-app reports the first failure, not the revoke\'s, when both fail', async () => {
+  fake.state.failRevoke = true;
+  fake.state.factory = () => ({ status: 200, body: { id: 7, app_id: APP_ID } });
+  const result = await checkApp();
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /^check-app: the app is installed on profitbuild\/factory/m);
+  assert.doesNotMatch(result.stderr, /could not be revoked/);
 });

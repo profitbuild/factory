@@ -26,6 +26,7 @@ export async function startBuilderGitHub({ clock = { get now() { return Date.now
     failNextTokenRequest: false,
     tokenDelayMs: 0,
     factory: () => ({ status: 404, body: { message: 'Not Found' } }),
+    failRevoke: false,
     minted: [],
     revoked: [],
   });
@@ -71,6 +72,9 @@ export async function startBuilderGitHub({ clock = { get now() { return Date.now
       if (!tokenValid(headers.authorization)) {
         return unauthorized;
       }
+      if (state.failRevoke) {
+        return { status: 502, body: { message: 'Bad Gateway' } };
+      }
       state.revoked.push(headers.authorization.replace(/^Bearer /, ''));
       return { status: 204 };
     },
@@ -79,19 +83,20 @@ export async function startBuilderGitHub({ clock = { get now() { return Date.now
 }
 
 /**
- * A fresh directory holding the key (mode `keyMode`) and an env file naming it; returns their paths and the env.
+ * A fresh directory holding the key (mode `keyMode`) and an env file naming it, for `node --env-file`; returns their
+ * paths, the variables of the file, and the settings they give.
  */
-export async function writeAppFiles(root, privateKey, { keyMode = 0o600, envMode = 0o600, envText } = {}) {
+export async function writeAppFiles(root, privateKey, { keyMode = 0o600, envText } = {}) {
   await mkdir(root, { recursive: true });
   const dir = await mkdtemp(join(root, 'app-'));
   const keyPath = join(dir, 'builder-app.pem');
   await writeFile(keyPath, privateKey, { mode: 0o600 });
   await chmod(keyPath, keyMode);
   const envPath = join(dir, 'env');
-  await writeFile(envPath, envText ?? `# a test's\nBUILDER_APP_ID=${APP_ID}\n`
-    + `BUILDER_APP_INSTALLATION_ID=${INSTALLATION_ID}\nBUILDER_APP_KEY=${keyPath}\n`, { mode: 0o600 });
-  await chmod(envPath, envMode);
-  return { dir, keyPath, envPath, env: { appId: APP_ID, installationId: INSTALLATION_ID, keyPath } };
+  const vars = { BUILDER_APP_ID: String(APP_ID), BUILDER_APP_INSTALLATION_ID: String(INSTALLATION_ID),
+    BUILDER_APP_KEY: keyPath };
+  await writeFile(envPath, envText ?? `# a test's\n${Object.entries(vars).map(([k, v]) => `${k}=${v}\n`).join('')}`);
+  return { dir, keyPath, envPath, vars, env: { appId: APP_ID, installationId: INSTALLATION_ID, keyPath } };
 }
 
 export const makeRoot = (name) => mkdtemp(join(tmpdir(), `${name}-`));

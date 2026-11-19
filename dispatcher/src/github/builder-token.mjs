@@ -4,13 +4,14 @@
  * check of checked-token.mjs, narrowed to profitbuild/incident-platform, kept in memory until 5 minutes before it
  * expires, never on the disk, in process.env or in a log; handed to `git push` only, through GIT_ASKPASS.
  *
- * The app's id, its installation's id and its key's path come from the dispatcher's env file (env-file.mjs), not from
- * here.
+ * The app's id, its installation's id and its key's path come from the dispatcher's environment (builder-env.mjs), not
+ * from here.
  */
 import { fileURLToPath } from 'node:url';
 
 import { GITHUB_API, revokeInstallationToken } from './app-token.mjs';
-import { mintCheckedToken, revokeQuietly } from './checked-token.mjs';
+import { checkApiUrl, mintCheckedToken, revokeQuietly } from './checked-token.mjs';
+import { requireHttpsOrLoopback } from './url-policy.mjs';
 
 /** What builder-app holds, and the only thing its token may hold; Issues waits for stage 4.5. */
 export const BUILDER_PERMISSIONS = Object.freeze({ contents: 'write', metadata: 'read', pull_requests: 'write' });
@@ -61,6 +62,8 @@ export async function mintBuilderToken({
  */
 export function createBuilderTokenSource(options) {
   const { baseUrl = GITHUB_API, fetchImpl, timeoutMs, now = Date.now } = options;
+  // Refused here, before any key is read or JWT made, as well as in every mint (mintCheckedToken).
+  checkApiUrl(baseUrl);
   let held = null;
   let inFlight = null;
   let closed = false;
@@ -98,13 +101,17 @@ export function createBuilderTokenSource(options) {
   return { getToken, revoke };
 }
 
+/**
+ * What of the dispatcher's environment a push inherits: the search path, HOME, and the proxy variables (a VM may
+ * reach GitHub through one). Nothing else, so a variable the dispatcher holds (a secret of a later step included)
+ * reaches neither git nor any child of git: an allowlist, not a denylist over process.env.
+ */
+export const PUSH_ENV_ALLOWED = Object.freeze(['PATH', 'HOME', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy',
+  'http_proxy', 'no_proxy']);
+
 /** An explicit https:// URL, or http:// to a loopback address (the tests' fake GitHub), with no user or password. */
 function checkPushUrl(url) {
-  const parsed = new URL(url);
-  const loopback = ['127.0.0.1', '[::1]', 'localhost'].includes(parsed.hostname);
-  if (!(parsed.protocol === 'https:' || (parsed.protocol === 'http:' && loopback))) {
-    throw new Error(`a push URL must be https://, not ${parsed.protocol}`);
-  }
+  const parsed = requireHttpsOrLoopback(url, 'a push URL');
   if (parsed.username || parsed.password) {
     throw new Error('a push URL must carry no user or password');
   }
@@ -118,31 +125,47 @@ function checkPushUrl(url) {
  * file, and not in process.env, so no other child of the dispatcher inherits it.
  *
  * The rule: **the token goes only to a git run in a repository whose configuration the dispatcher trusts.** A
- * repository whose .git/config an agent wrote is not one: its config can still run code or redirect the push that the
- * overrides below do not reach (`http.<url>.sslVerify`, `http.proxy`, a filter, an alias). Pushing from the
- * dispatcher's own clone, with the agent's work fetched into it, is stage 4.3/4.5's. The overrides are a second layer:
- * no hook (`core.hooksPath`, `--no-verify`), no fsmonitor command, no credential helper (one would be handed the token
- * on `store`), no system or global config, no inherited GIT_* variable, no terminal prompt; a URL rewritten by
- * `insteadOf` to another host gets no credential from the askpass script.
+ * repository whose .git/config an agent wrote is not one. The overrides below are a second layer and cover part of
+ * what such a config can do:
+ * - a URL rewritten by `insteadOf` to another https:// host gets no credential: the askpass script answers only for
+ *   the origin of `url`;
+ * - a URL rewritten to another protocol (`ssh://`, whose `core.sshCommand` would run with this environment, token
+ *   included; `ext::`, `file://`) is refused by git itself: GIT_ALLOW_PROTOCOL allows `allowProtocols` only, `https`,
+ *   and it wins over any `protocol.<name>.allow` of the config;
+ * - no hook (`core.hooksPath`, `--no-verify`), no fsmonitor command, no credential helper (one would be handed the
+ *   token on `store`), no system or global config, no terminal prompt; the environment is PUSH_ENV_ALLOWED and what
+ *   is set here, nothing else of the dispatcher's.
+ * The rest of .git/config can still send the token elsewhere or let it be read on the way: `http.proxy`,
+ * `http.<url>.sslVerify`, `http.sslCAInfo`, `http.curloptResolve`, `include.path` (which brings in any of them). Hence
+ * the rule, which stage 4.3 turns into a check: pushing from the dispatcher's own clone, with the agent's work
+ * fetched into it, is 4.3/4.5's.
  *
- * @param {{ token: string, refspecs: string[], url?: string, baseEnv?: Record<string, string | undefined> }} options
- *   `url` is PUSH_URL but in tests; `baseEnv` the environment to start from, process.env by default, not changed.
+ * @param {{ token: string, refspecs: string[], url?: string, allowProtocols?: string,
+ *   baseEnv?: Record<string, string | undefined> }} options `url` is PUSH_URL but in tests; `allowProtocols` the
+ *   value of GIT_ALLOW_PROTOCOL, `https` but in tests (`http:https`, to a loopback server), and it must allow `url`'s
+ *   own; `baseEnv` the environment the allowed variables are taken from, process.env by default, not changed.
  * @returns {{ command: 'git', args: string[], env: Record<string, string> }}
  */
-export function gitPushCommand({ token, refspecs, url = PUSH_URL, baseEnv = process.env }) {
+export function gitPushCommand({ token, refspecs, url = PUSH_URL, allowProtocols = 'https', baseEnv = process.env }) {
   if (typeof token !== 'string' || token === '') {
     throw new Error('gitPushCommand: a token is required');
   }
   const parsed = checkPushUrl(url);
+  const scheme = parsed.protocol.replace(/:$/, '');
+  if (!/^[a-z]+(:[a-z]+)*$/.test(allowProtocols)
+    || !allowProtocols.split(':').includes(scheme)) {
+    throw new Error(`gitPushCommand: allowProtocols must be protocols joined by ":", ${scheme} among them`);
+  }
   if (!Array.isArray(refspecs) || refspecs.length === 0
     || refspecs.some((refspec) => typeof refspec !== 'string' || refspec === '' || refspec.startsWith('-'))) {
     throw new Error('gitPushCommand: refspecs must be one or more, none starting with "-"');
   }
-  const env = Object.fromEntries(Object.entries(baseEnv)
-    .filter(([name, value]) => value !== undefined && !name.startsWith('GIT_') && !name.startsWith('FACTORY_PUSH_')
-      && name !== 'SSH_ASKPASS'));
+  const env = Object.fromEntries(PUSH_ENV_ALLOWED
+    .filter((name) => typeof baseEnv[name] === 'string')
+    .map((name) => [name, baseEnv[name]]));
   Object.assign(env, {
     GIT_ASKPASS,
+    GIT_ALLOW_PROTOCOL: allowProtocols,
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',

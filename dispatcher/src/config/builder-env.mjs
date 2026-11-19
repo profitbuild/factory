@@ -1,92 +1,66 @@
 /**
- * The dispatcher's env file (incident-platform backlog #0-271): where builder-app's id, its installation's id and its
- * key's path come from, so that no id sits in src/ (#0-271 AC4). It is read here, never loaded into process.env, which
- * every child would inherit.
- *
- * The format is a subset of systemd's EnvironmentFile: `KEY=value` lines, `#` comments and blank lines; no quotes, no
- * `export`, no expansion.
+ * builder-app's settings, from the dispatcher's environment only (incident-platform ADR-0055; backlog #0-271): the
+ * app's id, its installation's id and its key's path, so that no id sits in src/ (#0-271 AC4).
  *
  *   BUILDER_APP_ID=<the app's id>
  *   BUILDER_APP_INSTALLATION_ID=<its installation's id on profitbuild/incident-platform>
  *   BUILDER_APP_KEY=<absolute path of its private key>        (optional, DEFAULT_KEY_PATH)
  *
- * A key other dispatcher settings use is ignored, so later steps add theirs; a key with the prefix BUILDER_APP_ that is
- * not one of the three is refused, since it is most likely one of them misspelt. A refusal names the line and the key,
- * never a value: should a secret be pasted here by mistake, it reaches no log. The file is the process user's own,
- * writable by no one else (whoever writes it chooses the installation the dispatcher asks for); others may read it,
- * since the ids are not secrets.
+ * On the build VM they are written in /home/dispatcher/.config/factory/env (DISPATCHER_ENV_FILE), which Node itself
+ * loads: `node --env-file=/home/dispatcher/.config/factory/env dispatcher/bin/check-app.mjs`. No parser of that file
+ * is ours, and none is in a shell. The ids are no secrets, so the file's owner and mode are not checked; the key's
+ * are (checked-token.mjs, readAppKey).
+ *
+ * A variable with the prefix BUILDER_APP_ that is not one of the three is refused, since it is most likely one of them
+ * misspelt. A refusal names the variable, never its value: should a secret be set there by mistake, it reaches no log.
  */
 import { isAbsolute } from 'node:path';
 
-import { readOwnFile } from './own-file.mjs';
-
-/** Where the dispatcher's env file lives on the build VM. */
+/** Where the dispatcher's env file lives on the build VM, for `node --env-file`. */
 export const DISPATCHER_ENV_FILE = '/home/dispatcher/.config/factory/env';
-/** builder-app's key, when the env file names none. */
+/** builder-app's key, when BUILDER_APP_KEY is not set. */
 export const DEFAULT_KEY_PATH = '/home/dispatcher/.config/factory/builder-app.pem';
 
-/** The env file is missing something, holds something malformed, or is not the dispatcher's own. */
+/** A builder-app setting is missing, malformed or unknown. */
 export class ConfigError extends Error {}
 
 const PREFIX = 'BUILDER_APP_';
 const positiveInteger = (value) => /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value));
-const KEYS = {
+const SETTINGS = {
   BUILDER_APP_ID: { field: 'appId', valid: positiveInteger, parse: Number, expected: 'a positive integer' },
   BUILDER_APP_INSTALLATION_ID: {
     field: 'installationId', valid: positiveInteger, parse: Number, expected: 'a positive integer',
   },
   BUILDER_APP_KEY: { field: 'keyPath', valid: isAbsolute, parse: String, expected: 'an absolute path' },
 };
-
-/** Parses the text of an env file; `source` names it in errors. */
-export function parseDispatcherEnv(text, source = 'the env file') {
-  const seen = new Map();
-  const config = { keyPath: DEFAULT_KEY_PATH };
-  text.split('\n').forEach((raw, index) => {
-    const line = raw.replace(/\r$/, '');
-    const number = index + 1;
-    if (/^\s*(#.*)?$/.test(line)) {
-      return;
-    }
-    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match) {
-      throw new ConfigError(`${source}, line ${number}: not KEY=value`);
-    }
-    const [, key, value] = match;
-    const spec = KEYS[key];
-    if (!spec) {
-      if (key.startsWith(PREFIX)) {
-        throw new ConfigError(`${source}, line ${number}: unknown key ${key} (known: ${Object.keys(KEYS).join(', ')})`);
-      }
-      return;
-    }
-    if (seen.has(key)) {
-      throw new ConfigError(`${source}, line ${number}: ${key} set again (first on line ${seen.get(key)})`);
-    }
-    seen.set(key, number);
-    if (!spec.valid(value)) {
-      throw new ConfigError(`${source}, line ${number}: ${key} must be ${spec.expected}`);
-    }
-    config[spec.field] = spec.parse(value);
-  });
-  for (const key of ['BUILDER_APP_ID', 'BUILDER_APP_INSTALLATION_ID']) {
-    if (!seen.has(key)) {
-      throw new ConfigError(`${source}: ${key} is missing`);
-    }
-  }
-  return config;
-}
+const REQUIRED = ['BUILDER_APP_ID', 'BUILDER_APP_INSTALLATION_ID'];
 
 /**
- * Reads and checks the dispatcher's env file.
+ * builder-app's settings from `env`.
  *
- * @param {string} [path]
- * @param {{ uid?: number }} [options] the owner required, the process's user by default (for tests)
- * @returns {Promise<{ appId: number, installationId: number, keyPath: string }>}
+ * @param {Record<string, string | undefined>} [env] process.env by default
+ * @returns {{ appId: number, installationId: number, keyPath: string }}
+ * @throws {ConfigError}
  */
-export async function readDispatcherEnv(path = DISPATCHER_ENV_FILE, { uid } = {}) {
-  const text = await readOwnFile(path, {
-    what: 'the env file', forbiddenMode: 0o022, uid, refuse: (message) => new ConfigError(message),
-  });
-  return parseDispatcherEnv(text, path);
+export function readBuilderEnv(env = process.env) {
+  for (const name of Object.keys(env).sort()) {
+    if (name.startsWith(PREFIX) && !SETTINGS[name]) {
+      throw new ConfigError(`unknown variable ${name} (known: ${Object.keys(SETTINGS).join(', ')})`);
+    }
+  }
+  const config = { keyPath: DEFAULT_KEY_PATH };
+  for (const [name, spec] of Object.entries(SETTINGS)) {
+    const value = env[name];
+    if (value === undefined) {
+      if (REQUIRED.includes(name)) {
+        throw new ConfigError(`${name} is not set (on the build VM: node --env-file=${DISPATCHER_ENV_FILE})`);
+      }
+      continue;
+    }
+    if (!spec.valid(value)) {
+      throw new ConfigError(`${name} must be ${spec.expected}`);
+    }
+    config[spec.field] = spec.parse(value);
+  }
+  return config;
 }

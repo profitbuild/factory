@@ -30,8 +30,9 @@ test('no number of six digits or more (an app, installation or bot id) in the co
 
 test('the modules the token passes through import from node:fs nothing that writes', async () => {
   const READ_ONLY = new Set(['constants', 'lstat', 'open']);
-  for (const file of ['src/config/own-file.mjs', 'src/config/env-file.mjs', 'src/github/app-token.mjs',
-    'src/github/checked-token.mjs', 'src/github/builder-token.mjs', 'src/github/check-app.mjs', 'bin/check-app.mjs']) {
+  for (const file of ['src/config/own-file.mjs', 'src/config/builder-env.mjs', 'src/github/app-token.mjs',
+    'src/github/url-policy.mjs', 'src/github/checked-token.mjs', 'src/github/builder-token.mjs',
+    'src/github/check-app.mjs', 'bin/check-app.mjs']) {
     const text = await read(file);
     assert.doesNotMatch(text, /import \* as \w+ from 'node:fs/, file);
     assert.doesNotMatch(text, /require\(/, file);
