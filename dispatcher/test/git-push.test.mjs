@@ -87,7 +87,8 @@ async function setUp(name) {
   await writeFile(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$@" >> ${join(dumps, 'argv')}\n`
     + `env | cut -d= -f1 >> ${join(dumps, 'git-env-names')}\nexec ${REAL_GIT} "$@"\n`);
   await chmod(join(bin, 'git'), 0o755);
-  const baseEnv = { PATH: `${bin}:${process.env.PATH}`, HOME: home, LANG: 'C', SECRET_X: 'a-secret-of-the-parent' };
+  const baseEnv = { PATH: `${bin}:${process.env.PATH}`, HOME: home, LANG: 'pl_PL.UTF-8',
+    SECRET_X: 'a-secret-of-the-parent' };
   return { dir, repo, dumps, home, baseEnv, run };
 }
 
@@ -122,7 +123,7 @@ test('the push reaches the server with the token, in no argument, file, hook, he
   assert.ok(names.includes('FACTORY_PUSH_TOKEN'), 'the wrapper saw git\'s environment');
   assert.equal(names.includes('SECRET_X'), false, 'a variable of the parent outside the allowlist does not reach git');
   assert.equal(names.includes('LANG'), false);
-  assert.deepEqual(names.filter((n) => ![...PUSH_ENV_ALLOWED, 'PWD', 'SHLVL', '_'].includes(n)
+  assert.deepEqual(names.filter((n) => ![...PUSH_ENV_ALLOWED, 'LC_ALL', 'PWD', 'SHLVL', '_'].includes(n)
     && !n.startsWith('GIT_') && !n.startsWith('FACTORY_PUSH_')), [], 'git sees nothing but the allowlist and ours');
   assert.equal(Object.values(process.env).some((value) => value?.includes(TOKEN)), false, 'not in process.env');
 });
@@ -157,7 +158,8 @@ test('a push URL rewritten by insteadOf to another host gets no credential, and 
 test('the command: the token in its env alone, the overrides, an explicit URL, only the allowed variables', () => {
   const baseEnv = { PATH: '/usr/bin', HOME: '/home/x', GIT_SSL_NO_VERIFY: '1', GIT_ASKPASS: '/evil',
     GIT_CONFIG_PARAMETERS: "'core.hooksPath'='/evil'", FACTORY_PUSH_ORIGIN: 'https://evil.example', SSH_ASKPASS: '/e',
-    SECRET_X: 's', LANG: 'C', LD_PRELOAD: '/evil.so', HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'localhost',
+    SECRET_X: 's', LANG: 'pl_PL.UTF-8', LC_ALL: 'pl_PL.UTF-8', LC_MESSAGES: 'pl_PL.UTF-8', LD_PRELOAD: '/evil.so',
+    HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'localhost',
     GIT_ALLOW_PROTOCOL: 'ssh:https' };
   const { command, args, env } = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], baseEnv });
   assert.equal(command, 'git');
@@ -166,7 +168,8 @@ test('the command: the token in its env alone, the overrides, an explicit URL, o
   assert.equal(PUSH_URL, 'https://github.com/profitbuild/incident-platform.git');
   assert.deepEqual(env, {
     PATH: '/usr/bin', HOME: '/home/x', HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'localhost', GIT_ASKPASS,
-    GIT_ALLOW_PROTOCOL: 'https', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_ALLOW_PROTOCOL: 'https', LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
     FACTORY_PUSH_ORIGIN: 'https://github.com', FACTORY_PUSH_TOKEN: TOKEN,
   });
   assert.deepEqual(PUSH_ENV_ALLOWED, ['PATH', 'HOME', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy',

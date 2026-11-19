@@ -134,7 +134,8 @@ function checkPushUrl(url) {
  *   and it wins over any `protocol.<name>.allow` of the config;
  * - no hook (`core.hooksPath`, `--no-verify`), no fsmonitor command, no credential helper (one would be handed the
  *   token on `store`), no system or global config, no terminal prompt; the environment is PUSH_ENV_ALLOWED and what
- *   is set here, nothing else of the dispatcher's.
+ *   is set here (LC_ALL=C among it, so git's messages are English for 4.3/4.5 to parse), nothing else of the
+ *   dispatcher's.
  * The rest of .git/config can still send the token elsewhere or let it be read on the way: `http.proxy`,
  * `http.<url>.sslVerify`, `http.sslCAInfo`, `http.curloptResolve`, `include.path` (which brings in any of them). Hence
  * the rule, which stage 4.3 turns into a check: pushing from the dispatcher's own clone, with the agent's work
@@ -166,6 +167,8 @@ export function gitPushCommand({ token, refspecs, url = PUSH_URL, allowProtocols
   Object.assign(env, {
     GIT_ASKPASS,
     GIT_ALLOW_PROTOCOL: allowProtocols,
+    // git's messages in English whatever the dispatcher's locale: 4.3/4.5 parse them. Set here, never inherited.
+    LC_ALL: 'C',
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',

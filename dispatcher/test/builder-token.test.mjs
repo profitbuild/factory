@@ -6,7 +6,9 @@ import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
+import { closeSync, constants, openSync } from 'node:fs';
 import { chmod, rm, symlink } from 'node:fs/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { join } from 'node:path';
 
 import { RefusedError, readAppKey } from '../src/github/checked-token.mjs';
@@ -110,17 +112,30 @@ test('a key that is a directory is refused as not a regular file', async () => {
   await assertRefused(tokens, /the key .* is not a regular file/);
 });
 
-test('a key swapped for a FIFO between the lstat and the open is refused at once, not waited on', { timeout: 5000 },
-  async () => {
-    const files = await writeAppFiles(root, fake.privateKey);
-    const swap = async () => {
-      await rm(files.keyPath);
-      execFileSync('mkfifo', ['-m', '600', files.keyPath]);
-    };
-    await assert.rejects(readAppKey(files.keyPath, { afterLstat: swap }),
-      (error) => error instanceof RefusedError
-        && /changed while it was read|is not a regular file/.test(error.message));
-  });
+// Should the open wait on the FIFO (O_NONBLOCK gone), the test must fail fast, not hang the run: an open blocked in
+// libuv's thread pool keeps the process alive for ever. After 2 s it opens the FIFO for writing with
+// O_WRONLY | O_NONBLOCK, which releases a reader blocked in open, lets the read settle, and fails.
+test('a key swapped for a FIFO between the lstat and the open is refused at once, not waited on', async () => {
+  const files = await writeAppFiles(root, fake.privateKey);
+  const swap = async () => {
+    await rm(files.keyPath);
+    execFileSync('mkfifo', ['-m', '600', files.keyPath]);
+  };
+  const reading = readAppKey(files.keyPath, { afterLstat: swap });
+  const outcome = await Promise.race([reading.then(() => 'settled', () => 'settled'),
+    sleep(2000, 'blocked', { ref: false })]);
+  if (outcome === 'blocked') {
+    const writer = openSync(files.keyPath, constants.O_WRONLY | constants.O_NONBLOCK);
+    try {
+      await reading.catch(() => {});
+    } finally {
+      closeSync(writer);
+    }
+    assert.fail('the open of the key waited on a FIFO for a writer');
+  }
+  await assert.rejects(reading, (error) => error instanceof RefusedError
+    && /changed while it was read|is not a regular file/.test(error.message));
+});
 
 // Without root, a test cannot give a file another owner; the check is made to require another uid instead.
 test('a key owned by another user is refused (the owner required set to another uid)', async () => {
