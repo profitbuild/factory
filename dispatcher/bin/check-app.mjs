@@ -6,7 +6,9 @@
  *
  * Its settings come from the environment only (ADR-0055): BUILDER_APP_ID, BUILDER_APP_INSTALLATION_ID and
  * BUILDER_APP_KEY (src/config/builder-env.mjs). Node's own --env-file loads them from the dispatcher's env file; no
- * parser of that file is the factory's, and none is in a shell.
+ * parser of that file is the factory's, and none is in a shell. A variable already set in the environment wins over
+ * the file's value. The file is trusted as code is (it can set NODE_OPTIONS): builder-env.mjs says why and who may
+ * write it.
  *
  * It mints a token after every check (the key is a regular file of this user, readable by no one else; the
  * installation on profitbuild/incident-platform is BUILDER_APP_INSTALLATION_ID, of BUILDER_APP_ID, holding exactly

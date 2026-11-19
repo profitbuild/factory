@@ -8,8 +8,14 @@
  *
  * On the build VM they are written in /home/dispatcher/.config/factory/env (DISPATCHER_ENV_FILE), which Node itself
  * loads: `node --env-file=/home/dispatcher/.config/factory/env dispatcher/bin/check-app.mjs`. No parser of that file
- * is ours, and none is in a shell. The ids are no secrets, so the file's owner and mode are not checked; the key's
- * are (checked-token.mjs, readAppKey).
+ * is ours, and none is in a shell. A variable already set in the process's environment wins over the file's value.
+ *
+ * That file is trusted as code is. It can set NODE_OPTIONS (`--require`, for one), which runs code in the process
+ * that reads the key before any check of ours runs; nothing here can check the file in time, since Node has loaded
+ * it before this module exists. So only its owner may write it: the file 600, its directory 700, both the
+ * dispatcher user's, which the deployment of step 4.2b checks (incident-platform backlog #0-272). And it never holds
+ * a secret: its values go to process.env, which every child of the dispatcher inherits. The key's file is checked
+ * here (checked-token.mjs, readAppKey).
  *
  * A variable with the prefix BUILDER_APP_ that is not one of the three is refused, since it is most likely one of them
  * misspelt. A refusal names the variable, never its value: should a secret be set there by mistake, it reaches no log.
