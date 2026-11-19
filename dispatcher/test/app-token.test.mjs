@@ -3,6 +3,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVerify, generateKeyPairSync } from 'node:crypto';
+import { inspect } from 'node:util';
 
 import {
   createAppJwt, createInstallationToken, findRepositoryInstallation, listInstallationRepositories,
@@ -119,6 +120,32 @@ test('an answer that is not JSON throws without quoting it', async () => {
   await assert.rejects(findRepositoryInstallation({ baseUrl: fake.baseUrl, jwt: 'j', owner: 'x', repo: 'broken' }),
     /GET \/repos\/x\/broken\/installation: 200, the answer is not JSON$/);
 });
+
+test('a timeout and a network failure carry kind and cause, their messages unchanged, no credential (#0-261)',
+  async () => {
+    await assert.rejects(findRepositoryInstallation({ baseUrl: fake.baseUrl, jwt: 'secret-jwt', owner: 'x',
+      repo: 'slow', timeoutMs: 100 }), (error) => {
+      assert.equal(error.message, 'GitHub GET /repos/x/slow/installation: no answer in 0.1 s');
+      assert.equal(error.kind, 'timeout');
+      assert.equal(error.cause?.name, 'TimeoutError');
+      assert.equal(error.status, undefined);
+      assert.doesNotMatch(inspect(error, { depth: 10 }), /secret-jwt/);
+      return true;
+    });
+    // A port that was listening and is closed: the connection is refused.
+    const closed = await startFakeGitHub({});
+    await closed.close();
+    await assert.rejects(findRepositoryInstallation({ baseUrl: closed.baseUrl, jwt: 'secret-jwt', owner: 'x',
+      repo: 'y' }), (error) => {
+      assert.equal(error.message, 'GitHub GET /repos/x/y/installation: fetch failed');
+      assert.equal(error.kind, 'network');
+      assert.ok(error.cause instanceof Error);
+      assert.doesNotMatch(inspect(error, { depth: 10 }), /secret-jwt/);
+      return true;
+    });
+    await assert.rejects(findRepositoryInstallation({ baseUrl: fake.baseUrl, jwt: 'j', owner: 'x', repo: 'y' }),
+      (error) => error.status === 404 && error.kind === undefined, 'an answer of GitHub\'s has a status, no kind');
+  });
 
 test('a call GitHub does not answer in time throws, naming the call and the wait', async () => {
   const started = Date.now();
