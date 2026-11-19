@@ -28,9 +28,9 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 ## Changes
 
 `main` changes only by pull requests the owner merges: the ruleset requires a pull request and the code owner's
-review, and refuses force pushes and deletion; its required checks are the CI jobs `Test` and `Lint Workflows`, and
-`Secret Scan` once its first run has registered it and the owner has added it to the ruleset; a tag can be neither
-moved nor deleted, since products load the factory at one, and only an admin creates one.
+review, and refuses force pushes and deletion; its required checks are the CI jobs `Test`, `Lint Workflows` and
+`Secret Scan`; a tag can be neither moved nor deleted, since products load the factory at one, and only an admin
+creates one (today the owner alone).
 
 The code is written by a session holding the token of the GitHub App `profitbuild-factory-dev`, and no other GitHub
 credential (incident-platform ADR-0060 D5 as amended, backlog #0-269). The app is installed on this repository
@@ -40,6 +40,8 @@ and a change to `.github/workflows/`. Contents write still lets it publish a rel
 or delete a branch through the API: there the session's denies (`.claude/settings.json`) are the only barrier. A branch other than `main` can also be deleted by a push (`git push origin --delete <b>`), which no deny stops.
 
 ## Development
+
+How a change is made, from the change to the merge, and who writes what: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The session runs in `.devcontainer/`, on the owner's Mac:
 
