@@ -103,9 +103,19 @@ test('AC7: every variable shaped like a secret is named, in name order', () => {
     /^A, Z hold values shaped like a secret: .*; remove them$/, [TOKEN]);
 });
 
-test('AC7: ordinary values pass', () => {
+test('AC7: a token after any character that cannot be part of it is refused; sk-ant- too', () => {
+  const anthropic = `${'sk'}-ant-api03-${'x'.repeat(80)}`;
+  for (const value of [`https://${'ghp'}_${TOKEN}@github.com/o/r.git`, `a,${'ghs'}_${TOKEN}`, `a;${'ghs'}_${TOKEN}`,
+    `(${'ghu'}_${TOKEN})`, `/${'ghs'}_${TOKEN}`, anthropic, `key=${anthropic}`, `${'ghs'}_${TOKEN}x`]) {
+    refused(() => refuseSecretShaped({ V: value }), /^V holds a value shaped like a secret/, [value, TOKEN]);
+  }
+});
+
+test('AC7: ordinary values pass, a word with a prefix and a token too short among them', () => {
   refuseSecretShaped({
     ...VALID, PATH: '/usr/local/bin:/usr/bin', HOME: '/home/dispatcher', NOTE: 'gh_ is not a token, nor ghs alone',
-    DIR: '/srv/ghs_cache', LIST: 'a,ghx_b', EMPTY: '', DASHES: '----- BEGIN', NUMBER: '123456',
+    DIR: '/srv/ghs_cache', COLON: ':ghs_cache', LIST: 'a,ghx_b', EMPTY: '', DASHES: '----- BEGIN', NUMBER: '123456',
+    SHORT: `${'ghs'}_${'x'.repeat(35)}`, PAT: `${'github_pat'}_${'x'.repeat(35)}`, ANT: `${'sk'}-ant-short`,
+    INSIDE: `abc${'ghs'}_${TOKEN}`, TASK: 'task-ant-colony',
   });
 });

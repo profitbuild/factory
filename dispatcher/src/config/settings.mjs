@@ -51,13 +51,17 @@ export function readSettings(env, { prefix, settings, required, defaults = {}, m
 }
 
 /**
- * What a secret looks like (incident-platform backlog #0-275 AC7): a PEM block anywhere in the value, or a GitHub
- * token (installation `ghs_`, personal `ghp_`, OAuth `gho_`, user-to-server `ghu_`, refresh `ghr_`, fine-grained
- * `github_pat_`) at the start of the value or after a space, a quote, `=` or `:` ("Bearer ghs_…", "token=ghp_…").
+ * What a secret looks like (incident-platform backlog #0-275 AC7): a PEM block anywhere in the value; a GitHub token
+ * (installation `ghs_`, personal `ghp_`, OAuth `gho_`, user-to-server `ghu_`, refresh `ghr_`: 36 characters after
+ * the prefix; fine-grained `github_pat_`, longer); or an Anthropic key (`sk-ant-`, which reaches the dispatcher with
+ * step 4.6). A token counts at the start of the value or after any character that cannot be part of it
+ * ("Bearer ghs_…", "https://ghp_…@host", "a,ghs_…"), and only at its length, so that a word such as /srv/ghs_cache
+ * is not one.
  */
 const SECRET_SHAPES = [
   /-----BEGIN [A-Z0-9 ]+-----/,
-  /(?:^|[\s"'=:])(?:gh[psour]_[A-Za-z0-9]|github_pat_)/,
+  /(?:^|[^A-Za-z0-9_])(?:gh[psour]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{36,})/,
+  /(?:^|[^A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{32,}/,
 ];
 
 /**
