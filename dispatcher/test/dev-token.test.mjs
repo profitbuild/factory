@@ -299,11 +299,7 @@ test('--watch: SIGHUP (the terminal closed) revokes the token and deletes the fi
   assert.equal(await exists(join(out, 'token')), false);
 });
 
-// The deletion is made to fail by the directory's mode, which root ignores: under uid 0 (the git 2.43 job's
-// container) the file is deleted and the case cannot be made, so it is skipped there, saying why; it runs everywhere else.
-test('--watch: a token file that cannot be deleted is still revoked, and the stop exits 1', {
-  skip: process.getuid() === 0 ? 'root deletes a file whatever its directory\'s mode: the failure cannot be made' : false,
-}, async () => {
+test('--watch: a token file that cannot be deleted is still revoked, and the stop exits 1', async () => {
   const { out, watch, requests } = await setUp();
   const { child, exited, stderr } = watch();
   await until(() => exists(join(out, 'token')), 'the token file');
