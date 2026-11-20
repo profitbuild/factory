@@ -57,6 +57,10 @@ export function readSettings(env, { prefix, settings, required, defaults = {}, m
  * step 4.6). A token counts at the start of the value or after any character that cannot be part of it
  * ("Bearer ghs_…", "https://ghp_…@host", "a,ghs_…"), and only at its length, so that a word such as /srv/ghs_cache
  * is not one.
+ *
+ * The boundary has a cost: a token glued to a letter, a digit or `_` ("abcghs_…", "x_ghs_…") is not caught. This is
+ * a second layer, against a secret written in the env file by mistake; the main control is that no secret is ever
+ * given to the dispatcher through its environment (builder-app's key is a file, 4.6's key the proxy's).
  */
 const SECRET_SHAPES = [
   /-----BEGIN [A-Z0-9 ]+-----/,

@@ -116,6 +116,7 @@ test('AC7: ordinary values pass, a word with a prefix and a token too short amon
     ...VALID, PATH: '/usr/local/bin:/usr/bin', HOME: '/home/dispatcher', NOTE: 'gh_ is not a token, nor ghs alone',
     DIR: '/srv/ghs_cache', COLON: ':ghs_cache', LIST: 'a,ghx_b', EMPTY: '', DASHES: '----- BEGIN', NUMBER: '123456',
     SHORT: `${'ghs'}_${'x'.repeat(35)}`, PAT: `${'github_pat'}_${'x'.repeat(35)}`, ANT: `${'sk'}-ant-short`,
-    INSIDE: `abc${'ghs'}_${TOKEN}`, TASK: 'task-ant-colony',
+    // The boundary's cost (settings.mjs): a token glued to a letter, a digit or _ is not caught.
+    INSIDE: `abc${'ghs'}_${TOKEN}`, GLUED: `x_${'ghs'}_${TOKEN}`, TASK: 'task-ant-colony',
   });
 });
