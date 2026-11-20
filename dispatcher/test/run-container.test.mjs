@@ -2,7 +2,8 @@
 // command line is sudo's rule's, `-n -H -u factory --` and the program by its full path; the environment holds nothing
 // of the dispatcher's; no argument is shaped like a secret (sudo logs them); a call past its time is refused at once,
 // without waiting for an orphan that holds its output, and the caller's kill runs; output is bounded; a sudo that
-// refuses (no rule) is a refusal naming sudo's words.
+// refuses (no rule) is a refusal naming the command and its exit code; what a call writes to stderr, the agent's
+// side's, is never quoted, nor an argument of it (review round 1 N1).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, readFile, writeFile } from 'node:fs/promises';
@@ -83,7 +84,7 @@ test('a call past its time is refused at once, though an orphan holds its output
     /ran past 200 ms: stopped, its output no longer read; and the kill after it failed: docker kill failed$/);
   });
 
-test('output past the bound is refused; stdin reaches the command; a sudo with no rule is a refusal in its words',
+test('output past the bound is refused; stdin reaches the command; a sudo with no rule is a refusal naming the command',
   async () => {
     const flood = await script('flood', 'head -c 100000 /dev/zero');
     await assert.rejects(runContainerCommand({ program: 'docker', args: ['logs'], sudo: flood, outputLimit: 1000 }),
@@ -94,8 +95,22 @@ test('output past the bound is refused; stdin reaches the command; a sudo with n
     const fake = makeFakeDaemon(join(root.dir, 'norule'));
     const noRule = await script('no-rule-sudo', 'echo "sudo: a password is required" >&2; exit 1');
     await assert.rejects(mustRun({ program: 'docker', args: ['ps'], sudo: noRule }),
-      /^Error: docker ps failed \(exit 1\): sudo: a password is required$/);
+      /^Error: docker ps failed \(exit 1\); its stderr, the agent's side's, is not quoted$/);
     await assert.rejects(runContainerCommand({ program: 'docker', args: ['ps'], sudo: join(root.dir, 'none') }),
       /could not be run: ENOENT$/);
     assert.equal(fake.calls().length, 0);
   });
+
+test('review round 1 N1: what the agent\'s side writes to stderr is not quoted, nor the call\'s arguments', async () => {
+  // Put together at run time from two parts, so that no file of the repository holds text shaped like a secret.
+  const secret = 'ghs' + `_${'z'.repeat(36)}`;
+  const leaky = await script('leaky', `echo "fatal: token ${secret}" >&2; echo "${secret}"; exit 2`);
+  await assert.rejects(mustRun({ program: 'docker', args: ['exec', '-i', 'container-name-with-data', 'cat'],
+    sudo: leaky }), (error) => {
+    assert.equal(error.message, 'docker exec failed (exit 2); its stderr, the agent\'s side\'s, is not quoted');
+    assert.ok(!error.message.includes('ghs_') && !error.message.includes('container-name-with-data'));
+    return true;
+  });
+  await assert.rejects(mustRun({ program: 'docker', args: ['volume', 'rm', 'v'], sudo: leaky }),
+    /^Error: docker volume rm failed \(exit 2\); its stderr/);
+});

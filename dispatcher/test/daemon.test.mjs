@@ -85,7 +85,7 @@ test('AC13: a running container labelled factory.rollback refuses, naming it and
       labels: { 'factory.rollback': '1' } }), plantedContainer({ name: 'unlabelled' })] });
     await assert.rejects(refuseWhileRollback({ sudo: fake.sudo, when: 'the run is refused' }), (error) => {
       assert.ok(error instanceof RollbackRunningError);
-      assert.match(error.message, /^the run is refused: a running container carries factory\.rollback: rollback-devcontainer \([0-9a-f]{12}\)\. If it is a rollback, end it .*; if it is not \(a killed run left it\), clear it with `node \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep --force`$/);
+      assert.match(error.message, /^the run is refused: a running container carries factory\.rollback: rollback-devcontainer \([0-9a-f]{12}\)\. If it is a rollback, end it .*; if it is not \(a killed run left it\), clear it with `node --env-file=\/home\/dispatcher\/\.config\/factory\/env \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep --force`$/);
       return true;
     });
     assert.deepEqual(fake.calls().map((c) => c.args), [['ps', '--no-trunc', '--filter', 'label=factory.rollback',
@@ -102,7 +102,8 @@ test('a sweep out of order fails, since docker refuses a volume a stopped contai
   // The volumes first, as a wrong order would: docker refuses those still in use, and the check finds them.
   const { mustRun } = await import('../src/container/run-container.mjs');
   await assert.rejects(mustRun({ program: 'docker', sudo: fake.sudo,
-    args: ['volume', 'rm', 'incident-platform-gh', 'compose_data'] }), /volume is in use/);
+    args: ['volume', 'rm', 'incident-platform-gh', 'compose_data'] }),
+  /docker volume rm failed \(exit 1\); its stderr, the agent's side's, is not quoted$/);
   assert.ok(fake.read().volumes.some((v) => v.name === 'incident-platform-gh'));
 });
 
@@ -111,16 +112,17 @@ test('a sweep that leaves something refuses the run, naming what is left and the
   fake.update((s) => { s.scenario.ignoreRm = true; });
   await assert.rejects(sweepDaemon({ runId: RUN_ID, helperImage: HELPER_IMAGE, sudo: fake.sudo }), (error) => {
     assert.ok(error instanceof Error);
-    return /docker volume rm failed .*volume is in use/.test(error.message);
+    return /^docker volume rm failed \(exit 1\); its stderr, the agent's side's, is not quoted$/.test(error.message);
   });
   fake.update((s) => { s.volumes = s.volumes.filter((v) => v.name === 'factory-dispatcher-m2'); s.networks = s.networks
     .filter((x) => ['bridge', 'host', 'none'].includes(x.name)); });
   await assert.rejects(checkSwept({ sudo: fake.sudo }), (error) => {
     assert.ok(error instanceof SweepError);
-    assert.match(error.message, /^the sweep left containers task-old \(.*\), testcontainers-postgres .* on factory's daemon: the run is refused until `node \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep` leaves it empty$/);
+    assert.match(error.message, /^the sweep left containers task-old \(.*\), testcontainers-postgres .* on factory's daemon: the run is refused until `node --env-file=\/home\/dispatcher\/\.config\/factory\/env \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep` leaves it empty$/);
     return true;
   });
-  assert.equal(SWEEP_COMMAND, 'node /opt/factory-checkout/dispatcher/src/cli.mjs sweep');
+  assert.equal(SWEEP_COMMAND,
+    'node --env-file=/home/dispatcher/.config/factory/env /opt/factory-checkout/dispatcher/src/cli.mjs sweep');
   const empty = await setUp();
   fake.update(() => {});
   empty.update((s) => { s.networks = s.networks.filter((x) => ['bridge', 'host', 'none'].includes(x.name)); });

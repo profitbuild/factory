@@ -142,5 +142,5 @@ test('AC12: the work directory is removed whole, dot entries and the directory i
     assert.ok((await stat('/etc')).isDirectory(), 'a link is removed, not followed');
     fake.update((s) => { s.scenario.helperFails = true; });
     await assert.rejects(removeAllWorkDirs({ runId: RUN_ID, image: IMAGE, sudo: fake.sudo }),
-      /the work directories could not be removed: docker run failed \(exit 1\): helper: failed by the scenario/);
+      /the work directories could not be removed: docker run failed \(exit 1\); its stderr, the agent's side's, is not quoted$/);
   });

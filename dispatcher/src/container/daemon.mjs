@@ -19,7 +19,9 @@
  * Everything read from docker's output is untrusted: an id, a name, each line is held to a pattern, or refused; a
  * name is quoted in a refusal only when it is one.
  */
-import { M2_VOLUME, ROLLBACK_LABEL, TASK_LABEL, taskPaths } from './paths.mjs';
+import {
+  DISPATCHER_ENV_FILE, FACTORY_CHECKOUT, M2_VOLUME, ROLLBACK_LABEL, TASK_LABEL, taskPaths,
+} from './paths.mjs';
 import { mustRun } from './run-container.mjs';
 import { removeAllWorkDirs } from './work-dir.mjs';
 
@@ -34,8 +36,11 @@ const ID = /^[0-9a-f]{64}$/;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 const BUILTIN_NETWORKS = new Set(['bridge', 'host', 'none']);
 
-/** The cleanup a refusal names: the dispatcher's sweep alone. */
-export const SWEEP_COMMAND = 'node /opt/factory-checkout/dispatcher/src/cli.mjs sweep';
+/**
+ * The cleanup a refusal names, the dispatcher's sweep alone, as it runs pasted on the VM: with the env file, from the
+ * checkout the dispatcher runs from (ADR-0062 point 3; review round 1 gen-9a47).
+ */
+export const SWEEP_COMMAND = `node --env-file=${DISPATCHER_ENV_FILE} ${FACTORY_CHECKOUT}/dispatcher/src/cli.mjs sweep`;
 
 const docker = (args, { sudo, input } = {}) => mustRun({ program: 'docker', args, input, sudo });
 

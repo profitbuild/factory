@@ -86,14 +86,22 @@ export async function inTaskEnvironment({ runId, helperImage, sudo }, inside) {
     try {
       await refuseWhileRollback({ sudo, when: 'the run is refused after its network was made' });
     } catch (error) {
-      await removeOwnObjects({ runId, sudo });
-      throw Object.assign(error, { ownObjectsRemoved: true });
+      // The refusal wins, whatever the removal of the run's own objects does: a rollback is running, so no sweep
+      // may follow (review round 1 gen-5c1e). A failure of that removal is told in the refusal, and the next run's
+      // sweep, once the rollback has ended, removes what is left.
+      error.noSweepAfter = true;
+      try {
+        await removeOwnObjects({ runId, sudo });
+      } catch (removal) {
+        error.message = `${error.message}; and the run's own objects could not all be removed: ${removal.message}`;
+      }
+      throw error;
     }
     result = await inside();
   } catch (error) {
     failure = error;
   }
-  if (failure?.ownObjectsRemoved) {
+  if (failure?.noSweepAfter) {
     throw failure;
   }
   try {

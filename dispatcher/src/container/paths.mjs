@@ -12,6 +12,11 @@ export const HELPER_TASKS = '/tasks';
 export const FACTORY_CHECKOUT = '/opt/factory-checkout';
 /** ... and where the task container holds it, read-only. */
 export const FACTORY_MOUNT = '/opt/factory';
+/**
+ * The dispatcher's env file on the VM, which Node loads with --env-file (README, "Layout"): every command of the
+ * dispatcher's that a refusal names gives it.
+ */
+export const DISPATCHER_ENV_FILE = '/home/dispatcher/.config/factory/env';
 /** The one volume a sweep keeps: the shared Maven cache (stage-4.md "4.3": shared in v0). */
 export const M2_VOLUME = 'factory-dispatcher-m2';
 /** Where the task's clone is in its container. */

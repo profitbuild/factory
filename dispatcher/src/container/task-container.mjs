@@ -31,7 +31,7 @@ import { blockTask } from '../state/tasks.mjs';
 import { killTask } from './daemon.mjs';
 import { parseJsonc } from './jsonc.mjs';
 import { FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, TASK_LABEL, WORKSPACE, taskPaths } from './paths.mjs';
-import { ContainerTimeoutError, firstLines, mustRun, runContainerCommand } from './run-container.mjs';
+import { ContainerTimeoutError, mustRun, runContainerCommand } from './run-container.mjs';
 import { checkImageMetadata, checkTaskConfig } from './task-config.mjs';
 
 /** The container is not what the dispatcher asked for, or a file of the configuration is not in the base. */
@@ -282,7 +282,7 @@ export async function callInTask({ stateDir, task, ...call }) {
 export async function probeTimeout({ container, sudo }) {
   const result = await execInTask({ container, args: ['true'], limitS: 30, graceS: 5, sudo });
   if (result.code !== 0) {
-    refuse(`the task image cannot run a call under timeout (exit ${result.code}): ${firstLines(result.stderr)
-      || 'no message'}; the image must hold coreutils' timeout`);
+    refuse(`the task image cannot run a call under timeout (exit ${result.code}): the image must hold coreutils' `
+      + 'timeout (its stderr, the agent\'s side\'s, is not quoted)');
   }
 }

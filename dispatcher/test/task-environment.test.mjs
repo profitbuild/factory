@@ -136,6 +136,31 @@ test('AC13: a rollback starting while the run builds is seen by the second check
   assert.ok(!after.includes('rm') && !after.includes('volume rm') && !after.includes('run'), `no sweep: ${after}`);
 });
 
+test('review round 1 gen-5c1e: the second check\'s refusal wins when the run\'s own objects cannot be removed: no '
+  + 'sweep follows, the rollback and its logins survive', async () => {
+  const rollback = plantedContainer({ name: 'rollback', labels: { 'factory.rollback': '1' },
+    volumes: ['incident-platform-gh', 'incident-platform-claude'] });
+  const { fake } = await setUp();
+  fake.update((s) => {
+    s.scenario.after = { 'network create': [rollback] };
+    s.scenario.networkRmFails = true;
+    s.scenario.afterVolumes = { 'network create': [{ name: 'incident-platform-gh', labels: {} },
+      { name: 'incident-platform-claude', labels: {} }] };
+  });
+  const env = { runId: RUN_ID, helperImage: HELPER_IMAGE, sudo: fake.sudo };
+  await assert.rejects(inTaskEnvironment(env, async () => {}), (error) => {
+    assert.ok(error instanceof RollbackRunningError, `${error.constructor.name}: ${error.message}`);
+    assert.match(error.message, /^the run is refused after its network was made: a running container carries factory\.rollback: rollback .*; and the run's own objects could not all be removed: docker network rm failed \(exit 1\)/);
+    return true;
+  });
+  const state = fake.read();
+  assert.deepEqual(state.containers.map((c) => [c.name, c.running]), [['rollback', true]], 'the rollback survives');
+  assert.deepEqual(state.volumes.map((v) => v.name).sort(), ['incident-platform-claude', 'incident-platform-gh'],
+    'and its logins');
+  const after = steps(fake).slice(steps(fake).lastIndexOf('ps (rollback)') + 1);
+  assert.deepEqual(after.filter((c) => ['rm', 'volume rm', 'run'].includes(c)), [], `no sweep after the refusal: ${after}`);
+});
+
 test('AC13: a running rollback refuses the run at its start, and nothing is removed', async () => {
   const { fake } = await setUp({ initial: { containers: [plantedContainer({ name: 'rollback',
     labels: { 'factory.rollback': '1' } }), plantedContainer({ name: 'testcontainers' })] } });
@@ -236,7 +261,7 @@ test('AC9, AC3: the built image\'s metadata off the list, a mount, privilege or 
   await blocked(await setUp(), /the task container is privileged/, (fake) => {
     fake.update((s) => { s.scenario.privileged = true; });
   });
-  await blocked(await setUp(), /devcontainer up failed \(exit 1\): devcontainer up: failed by the scenario/, (fake) => {
+  await blocked(await setUp(), /devcontainer up failed \(exit 1\); its stderr, the agent's side's, is not quoted$/, (fake) => {
     fake.update((s) => { s.scenario.upFails = true; });
   });
   await blocked(await setUp(), /the work directory of .* could not be made/, (fake) => {
@@ -332,4 +357,39 @@ test('AC6: the task\'s commits leave as git bundle create - on exec\'s stdout, i
     await assert.rejects(bundleFromTask({ stateDir, container, prerequisite: product.base, ref: 'refs/heads/base',
       sudo: fake.sudo, ...bad }), TypeError);
   }
+});
+
+test('review round 1 N1: what devcontainer, docker or the task container write to stderr reaches no refusal and no '
+  + 'reason in task.json', async () => {
+  // Put together at run time from two parts, so that no file of the repository holds text shaped like a secret.
+  const secret = 'ghs' + `_${'q'.repeat(36)}`;
+  const leaked = (text) => text.includes(secret) || text.includes('ghs_');
+  const up = await setUp();
+  const fromUp = await blocked(up, /^the task container: devcontainer up failed \(exit 1\); its stderr, the agent's side's, is not quoted$/,
+    (fake) => { fake.update((s) => { s.scenario.upFails = `error: ${secret}`; }); });
+  assert.ok(fromUp);
+  assert.ok(!leaked(await readFile(join(up.stateDir, 'tasks', RUN_ID, 'task.json'), 'utf8')));
+  const probe = await setUp();
+  await blocked(probe, /^the task container: the task image cannot run a call under timeout \(exit 3\): the image must hold coreutils' timeout \(its stderr, the agent's side's, is not quoted\)$/,
+    (fake) => { fake.update((s) => { s.scenario.execFails = { stderr: `timeout: ${secret}`, code: 3 }; }); });
+  assert.ok(!leaked(await readFile(join(probe.stateDir, 'tasks', RUN_ID, 'task.json'), 'utf8')));
+  const out = await setUp();
+  const { container } = await setUpTaskContainer({ ...out.options, task: await createTask(out.stateDir, { runId: RUN_ID }) });
+  out.fake.update((s) => { s.scenario.execFails = { stderr: `fatal: ${secret}`, code: 128 }; });
+  await assert.rejects(bundleFromTask({ stateDir: out.stateDir, container, prerequisite: out.product.base,
+    ref: 'refs/heads/base', sudo: out.fake.sudo }), (error) => {
+    assert.equal(error.message, 'git bundle create in the task container failed (exit 128); its stderr, the agent\'s '
+      + 'side\'s, is not quoted');
+    assert.ok(!leaked(error.message));
+    return true;
+  });
+});
+
+test('a call that exits 124, timeout\'s own code for its limit, is taken as its timeout', async () => {
+  const { stateDir, options, fake } = await setUp();
+  const { container } = await setUpTaskContainer({ ...options, task: await createTask(stateDir, { runId: RUN_ID }) });
+  assert.equal((await execInTask({ container, sudo: fake.sudo, limitS: 5, args: ['sh', '-c', 'exit 123'] })).code, 123);
+  await assert.rejects(execInTask({ container, sudo: fake.sudo, limitS: 5, args: ['sh', '-c', 'exit 124'] }),
+    /^Error: the call sh in the task container ran past 5 s \(timeout's exit 124\): its processes were ended$/);
+  assert.equal(fake.read().containers.find((c) => c.id === container.id).running, false, 'killed by the label');
 });

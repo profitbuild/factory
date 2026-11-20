@@ -13,8 +13,9 @@
 //  - `docker exec ... <id> <command>` runs the command for real (`timeout` included), in the container's workspace
 //    as mapped, with the -e variables it was given;
 //  - `devcontainer up` reads the override, makes a container from it (mounts from workspaceMount, the `--mount=`
-//    run arguments and the listed features' metadata) and an image whose devcontainer.metadata label is what the
-//    real CLI would write, unless the scenario says otherwise.
+//    run arguments and those of the image's label) and an image whose devcontainer.metadata label is what the real
+//    CLI would write, the features' entries from their artifacts (feature-artifact.mjs), unless the scenario says
+//    otherwise.
 // A scenario (state.scenario) changes one thing: an image's labels, extra mounts, a container that appears after a
 // command (a rollback starting while the run builds), an rm that removes nothing, an exec that hangs with an orphan
 // holding its output.
@@ -24,7 +25,7 @@ import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } fro
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { TASK_CONFIG_LIST } from '../src/container/task-config.mjs';
+import { labelEntry } from './feature-artifact.mjs';
 
 const PROGRAMS = { '/usr/bin/docker': 'docker', '/usr/local/bin/devcontainer': 'devcontainer' };
 const TASKS_ROOT = '/home/factory/tasks';
@@ -164,6 +165,11 @@ function after(context, key) {
     context.state.containers.push(...added);
     delete context.state.scenario.after[key];
   }
+  const volumes = context.state.scenario.afterVolumes?.[key];
+  if (volumes) {
+    context.state.volumes.push(...volumes);
+    delete context.state.scenario.afterVolumes[key];
+  }
 }
 
 async function docker(context, takesInput) {
@@ -209,6 +215,10 @@ async function docker(context, takesInput) {
     return;
   }
   if (sub.startsWith('network rm')) {
+    if (state.scenario.networkRmFails) {
+      fail('Error response from daemon: error while removing network: failed by the scenario');
+      return;
+    }
     const ids = rest.slice(1);
     state.networks = state.networks.filter((n) => !ids.includes(n.id));
     save();
@@ -324,6 +334,11 @@ function exec(context, input) {
     return undefined;
   }
   const command = args.slice(i + 1);
+  if (state.scenario.execFails) {
+    // The call ran and failed, writing what the scenario gives to stderr: the agent's side's words.
+    fail(state.scenario.execFails.stderr, state.scenario.execFails.code);
+    return undefined;
+  }
   if (state.scenario.execHangs) {
     // The CLI is gone, but an orphan of its holds its stdout open: the dispatcher must stop reading by itself.
     const orphan = spawn('sleep', ['60'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true });
@@ -368,13 +383,12 @@ function metadataMounts(label) {
     .map((m) => ({ Type: m.type, Source: m.source, Destination: m.target, RW: m.readonly !== true }));
 }
 
-/** The label the real CLI writes: the features' entries, then the configuration's own. */
+/**
+ * The label the real CLI writes: the features' entries, made from their artifacts at their digests (never from the
+ * dispatcher's list, review round 1 arc-c7d1), then the configuration's own.
+ */
 function defaultMetadata(override) {
-  const features = Object.keys(override.features ?? {}).map((ref) => {
-    const [name, digest] = ref.split('@');
-    const [, entry] = Object.entries(TASK_CONFIG_LIST.features).find(([id]) => id.startsWith(`${name}:`));
-    return { id: ref, ...entry.digests[digest].metadata };
-  });
+  const features = Object.keys(override.features ?? {}).map((ref) => labelEntry(ref.split('@')[1], ref));
   const own = { remoteUser: override.remoteUser, capAdd: override.capAdd, containerEnv: override.containerEnv,
     updateRemoteUserUID: override.updateRemoteUserUID, containerUser: override.containerUser };
   for (const name of ['postCreateCommand', 'postStartCommand']) {
@@ -393,7 +407,7 @@ function devcontainer(context) {
     return;
   }
   if (state.scenario.upFails) {
-    fail('devcontainer up: failed by the scenario');
+    fail(typeof state.scenario.upFails === 'string' ? state.scenario.upFails : 'devcontainer up: failed by the scenario');
     return;
   }
   const override = JSON.parse(readFileSync(host(config, option('--override-config')), 'utf8'));

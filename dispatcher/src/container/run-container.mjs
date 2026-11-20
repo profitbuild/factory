@@ -2,16 +2,19 @@
  * The one starter of every container command of the dispatcher's (incident-platform ADR-0062 point 1; backlog #0-277
  * AC9): no `docker`, `devcontainer` or command in a container runs as `dispatcher`, the uid that reads builder-app's
  * key. Each runs as `factory`, the agent's side (ADR-0057), through the one sudoers rule the build VM's provisioning
- * writes (`/etc/sudoers.d/factory-dispatcher`: these two programs by their full paths, as `factory`, no prompt,
- * env_reset, no setenv):
+ * writes (`/etc/sudoers.d/factory-dispatcher`: these two programs by their full paths, as `factory`, no prompt;
+ * `Defaults:dispatcher env_reset, !setenv, secure_path="/usr/local/bin:/usr/bin:/bin", runcwd="/",
+ * env_file=/etc/factory-dispatcher.env`):
  *
  *   /usr/bin/sudo -n -H -u factory -- /usr/bin/docker|/usr/local/bin/devcontainer <args>
  *
  * - sudo by its full path, `-n` (no prompt: a missing rule fails, never waits), `-H` (HOME is factory's, so the
  *   CLIs read and write factory's own ~/.docker and caches), `--` before the program;
  * - the program by its full path (PATH does not choose it), one of the two the rule names;
- * - the environment childEnv's, holding nothing of the dispatcher's: sudo resets it anyway, and the programs reach
- *   factory's daemon through ADR-0057's /run/docker.sock link;
+ * - the environment childEnv's, holding nothing of the dispatcher's, and sudo resets it anyway. What the programs get
+ *   is the rule's: DOCKER_HOST (unix:///run/docker.sock, factory's daemon, ADR-0057) from the rule's env_file, PATH
+ *   from its secure_path (so the devcontainer CLI's `#!/usr/bin/env node` finds /usr/local/bin/node), and its
+ *   runcwd, /. The starter passes no variable, no directory and no -D: the rule decides all three;
  * - no argument shaped like a secret: sudo logs a command's arguments (4.6's token goes on stdin or the like). The
  *   refusal names the argument's position, never its value;
  * - its output bounded; its time bounded by a timer of its own: past it, `onTimeout` runs (the caller's kill of the
@@ -155,19 +158,18 @@ export function runContainerCommand({
   });
 }
 
-/** The first lines of a command's stderr, with control characters dropped: for a refusal, never quoted whole. */
-export const firstLines = (text, count = 3) => text.split('\n').map((l) => l.replace(/[\u0000-\u001f\u007f]/g, ''))
-  .filter(Boolean).slice(0, count).join(' / ').slice(0, 500);
-
 /**
- * A call that must succeed: its exit code 0, or a ContainerRunError naming the command and the first lines of what it
- * wrote to stderr.
+ * A call that must succeed: its exit code 0, or a ContainerRunError naming the command (the program and its
+ * subcommand, never an argument, which can carry data) and the exit code. What the call wrote to stderr is the agent's
+ * side's (docker, devcontainer and the task container all run as factory), so it is never quoted, in a refusal nor in
+ * a task's reason (review round 1 N1, SEC-31): from 4.6 on, the container holds a token its code could print there.
+ * run-git.mjs keeps a remote's words out of a push's refusal the same way.
  */
 export async function mustRun(options) {
   const result = await runContainerCommand(options);
   if (result.code !== 0) {
-    throw new ContainerRunError(`${commandName(options.program, options.args)} failed (exit ${result.code}): `
-      + `${firstLines(result.stderr) || 'no message'}`);
+    throw new ContainerRunError(`${commandName(options.program, options.args)} failed (exit ${result.code}); its `
+      + 'stderr, the agent\'s side\'s, is not quoted');
   }
   return result;
 }

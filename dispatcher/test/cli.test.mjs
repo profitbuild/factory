@@ -205,7 +205,7 @@ test('#0-277: sweep removes a killed run\'s leftovers; it refuses while a rollba
     volumes: [{ name: 'incident-platform-gh', labels: {} }] });
   await assert.rejects(call(['sweep']), (error) => {
     assert.match(error.message, /^the sweep is refused: a running container carries factory\.rollback: planted-rollback \(/);
-    assert.match(error.message, /clear it with `node \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep --force`$/);
+    assert.match(error.message, /clear it with `node --env-file=\/home\/dispatcher\/\.config\/factory\/env \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep --force`$/);
     return true;
   });
   assert.equal(fake.read().containers.length, 2, 'nothing removed');

@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {
   TaskConfigError, buildOverride, checkImageMetadata, checkList, checkTaskConfig, TASK_CONFIG_LIST,
 } from '../src/container/task-config.mjs';
+import { LABEL_FIELDS, artifact, labelEntry } from '../testing/feature-artifact.mjs';
 import { CONFIG, CONFIG_PATH, FEATURE, FEATURE_DIGEST, FEATURE_REF, LOCK } from '../testing/task-product.mjs';
 
 const RUN_ID = '20261120T101500Z-3f9a1c';
@@ -214,6 +215,9 @@ test('the review of #0-282: a feature\'s entry is taken only when it is, value b
     { ...feature, mounts: [...feature.mounts, { source: '/', target: '/host', type: 'bind' }] },
     { ...feature, mounts: [{ ...feature.mounts[0], source: '/run/user/1001/docker.sock' }] },
     { ...feature, customizations: { vscode: { extensions: ['x'] } } },
+    { ...feature, customizations: { ...feature.customizations, vscode: { ...feature.customizations.vscode,
+      extensions: [...feature.customizations.vscode.extensions, 'evil.extension'] } } },
+    (({ customizations, ...measured }) => measured)(feature),
     { ...feature, containerEnv: { DOCKER_HOST: 'tcp://evil:2375' } },
   ];
   for (const entry of changed) {
@@ -248,3 +252,15 @@ test('an entry that is no feature\'s holds only the carried fields by their rule
     refusedLabel(['x'], /is not an object/);
     assert.throws(() => checkImageMetadata('{not json', { carried }), /is not JSON/);
   });
+
+test('review round 1 arc-c7d1: the list holds, for the feature at its digest, what its artifact declares, whole; a '
+  + 'label made from the artifact is taken, under the feature\'s digest reference or its id', () => {
+  const declared = artifact(FEATURE_DIGEST);
+  assert.equal(declared.version, TASK_CONFIG_LIST.features[FEATURE].digests[FEATURE_DIGEST].version);
+  assert.deepEqual(METADATA, Object.fromEntries(LABEL_FIELDS.filter((f) => Object.hasOwn(declared, f))
+    .map((f) => [f, declared[f]])), 'every field devcontainer up copies, and nothing else');
+  assert.deepEqual(Object.keys(METADATA).sort(), ['customizations', 'entrypoint', 'mounts', 'securityOpt']);
+  for (const id of [FEATURE_REF, FEATURE]) {
+    assert.equal(checkImageMetadata(label([labelEntry(FEATURE_DIGEST, id), own]), { carried }).length, 2, id);
+  }
+});
