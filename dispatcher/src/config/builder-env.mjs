@@ -19,27 +19,32 @@
  *
  * A variable with the prefix BUILDER_APP_ that is not one of the three is refused, since it is most likely one of them
  * misspelt. A refusal names the variable, never its value: should a secret be set there by mistake, it reaches no log.
+ * The mechanism is settings.mjs's, shared with FACTORY_* (factory-env.mjs, #0-275).
  */
 import { isAbsolute } from 'node:path';
+
+import { ConfigError, positiveInteger, readSettings } from './settings.mjs';
+
+export { ConfigError };
 
 /** Where the dispatcher's env file lives on the build VM, for `node --env-file`. */
 export const DISPATCHER_ENV_FILE = '/home/dispatcher/.config/factory/env';
 /** builder-app's key, when BUILDER_APP_KEY is not set. */
 export const DEFAULT_KEY_PATH = '/home/dispatcher/.config/factory/builder-app.pem';
 
-/** A builder-app setting is missing, malformed or unknown. */
-export class ConfigError extends Error {}
-
-const PREFIX = 'BUILDER_APP_';
-const positiveInteger = (value) => /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value));
-const SETTINGS = {
-  BUILDER_APP_ID: { field: 'appId', valid: positiveInteger, parse: Number, expected: 'a positive integer' },
-  BUILDER_APP_INSTALLATION_ID: {
-    field: 'installationId', valid: positiveInteger, parse: Number, expected: 'a positive integer',
+const GROUP = {
+  prefix: 'BUILDER_APP_',
+  settings: {
+    BUILDER_APP_ID: { field: 'appId', valid: positiveInteger, parse: Number, expected: 'a positive integer' },
+    BUILDER_APP_INSTALLATION_ID: {
+      field: 'installationId', valid: positiveInteger, parse: Number, expected: 'a positive integer',
+    },
+    BUILDER_APP_KEY: { field: 'keyPath', valid: isAbsolute, parse: String, expected: 'an absolute path' },
   },
-  BUILDER_APP_KEY: { field: 'keyPath', valid: isAbsolute, parse: String, expected: 'an absolute path' },
+  required: ['BUILDER_APP_ID', 'BUILDER_APP_INSTALLATION_ID'],
+  defaults: { keyPath: DEFAULT_KEY_PATH },
+  missingHint: ` (on the build VM: node --env-file=${DISPATCHER_ENV_FILE})`,
 };
-const REQUIRED = ['BUILDER_APP_ID', 'BUILDER_APP_INSTALLATION_ID'];
 
 /**
  * builder-app's settings from `env`.
@@ -49,24 +54,5 @@ const REQUIRED = ['BUILDER_APP_ID', 'BUILDER_APP_INSTALLATION_ID'];
  * @throws {ConfigError}
  */
 export function readBuilderEnv(env = process.env) {
-  for (const name of Object.keys(env).sort()) {
-    if (name.startsWith(PREFIX) && !SETTINGS[name]) {
-      throw new ConfigError(`unknown variable ${name} (known: ${Object.keys(SETTINGS).join(', ')})`);
-    }
-  }
-  const config = { keyPath: DEFAULT_KEY_PATH };
-  for (const [name, spec] of Object.entries(SETTINGS)) {
-    const value = env[name];
-    if (value === undefined) {
-      if (REQUIRED.includes(name)) {
-        throw new ConfigError(`${name} is not set (on the build VM: node --env-file=${DISPATCHER_ENV_FILE})`);
-      }
-      continue;
-    }
-    if (!spec.valid(value)) {
-      throw new ConfigError(`${name} must be ${spec.expected}`);
-    }
-    config[spec.field] = spec.parse(value);
-  }
-  return config;
+  return readSettings(env, GROUP);
 }
