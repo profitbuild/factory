@@ -45,6 +45,35 @@ jobs:
         working-directory: dispatcher
         run: node --test
 
+  test-git-2-43:
+    name: Test (git 2.43)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Ubuntu 24.04's own git, 2.43.0: the build VM's (incident-platform backlog #0-276, AC6). The runner's git is newer.
+    container: ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+    steps:
+      - name: Install git
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+          git --version
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: ./.github/actions/setup-node
+
+      - name: The push's and the bundle's tests on git 2.43
+        working-directory: dispatcher
+        run: |
+          set -euo pipefail
+          git --version
+          node --test test/push.test.mjs test/bundle.test.mjs test/git-push.test.mjs test/child-env.test.mjs
+
   lint:
     name: Lint Workflows
     runs-on: ubuntu-latest
