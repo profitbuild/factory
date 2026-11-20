@@ -51,7 +51,8 @@ export async function startFakeGitHub(routes) {
   return {
     baseUrl: `http://127.0.0.1:${server.address().port}`,
     requests,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    // Idle keep-alive connections closed too, so that close() does not wait out their timeout.
+    close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }),
   };
 }
 

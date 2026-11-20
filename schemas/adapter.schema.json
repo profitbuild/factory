@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/profitbuild/factory/blob/main/schemas/adapter.schema.json",
+  "title": "A product's adapter, .factory/adapter.json",
+  "description": "What the factory needs to know of a product (incident-platform ADR-0060 D6, stage-4.md \"4.3\", backlog #0-275). Every field is required and no other is allowed. A command is a list of arguments, run without a shell; a path is relative to the product's root and never leaves it. The dispatcher reads this file and runs the product's commands from the product's main only (4.3d). Checked by dispatcher/src/schema/validate.mjs, which refuses any keyword it does not check.",
+  "type": "object",
+  "required": ["repository", "gate", "changedPaths", "queue", "protectedPaths", "trustedPaths", "taskImage", "profile",
+    "factoryVersion"],
+  "additionalProperties": false,
+  "properties": {
+    "repository": {
+      "description": "The product's repository on GitHub, owner/name (the name not . nor ..): where builder-app pushes and opens its pull requests.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/(?!\\.{1,2}$)[A-Za-z0-9._-]+$"
+    },
+    "gate": {
+      "description": "The product's test gate: the command, and the contract its JSON answer keeps (schemas/gate.schema.json).",
+      "type": "object",
+      "required": ["command", "contract"],
+      "additionalProperties": false,
+      "properties": {
+        "command": { "$ref": "#/$defs/command" },
+        "contract": { "const": "gate.schema.json" }
+      }
+    },
+    "changedPaths": {
+      "description": "The command that lists the paths a branch changes and classifies them (Owner-only, needs a human).",
+      "type": "object",
+      "required": ["command"],
+      "additionalProperties": false,
+      "properties": {
+        "command": { "$ref": "#/$defs/command" }
+      }
+    },
+    "queue": {
+      "description": "Where the next item comes from: BACKLOG.md-style files until stage 7.",
+      "type": "object",
+      "required": ["kind", "files"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "backlog-md" },
+        "files": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/path" } }
+      }
+    },
+    "protectedPaths": {
+      "description": "The file that lists the product's protected paths.",
+      "type": "object",
+      "required": ["file"],
+      "additionalProperties": false,
+      "properties": {
+        "file": { "$ref": "#/$defs/path" }
+      }
+    },
+    "trustedPaths": {
+      "description": "The product's paths the dispatcher runs from main, which a task branch may not change (a directory ends with /).",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/path" }
+    },
+    "taskImage": {
+      "description": "The task container's image: the product's devcontainer.",
+      "type": "string",
+      "minLength": 1
+    },
+    "profile": {
+      "description": "The factory's profile for the product's stack (e.g. spring-boot).",
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "factoryVersion": {
+      "description": "The factory's tag the product loads, vMAJOR.MINOR.PATCH.",
+      "type": "string",
+      "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"
+    }
+  },
+  "$defs": {
+    "path": {
+      "description": "A path relative to the product's root that never leaves it: not absolute, no .. segment (the lookahead reads across lines, [\\s\\S]), no backslash, and no control character nor line separator (U+0000-U+001F, U+007F, U+2028, U+2029).",
+      "type": "string",
+      "pattern": "^(?!/)(?![\\s\\S]*(?:^|/)\\.\\.(?:/|$))[^\\\\\\u0000-\\u001f\\u007f\\u2028\\u2029]+$"
+    },
+    "script": {
+      "description": "The product's script a command runs: a path with at least one / (so never a program found on PATH, such as bash, env or node, however the command is run), not ending with / (a directory), and not starting with - (it would read as an option).",
+      "$ref": "#/$defs/path",
+      "pattern": "^(?!-)(?!.*/$).*/"
+    },
+    "command": {
+      "description": "A command as its arguments, run without a shell: the first is the product's script, a path; the others any non-empty strings.",
+      "type": "array",
+      "minItems": 1,
+      "prefixItems": [{ "$ref": "#/$defs/script" }],
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
