@@ -20,10 +20,12 @@ after(async () => {
 });
 beforeEach(() => fake.reset());
 
-async function checkApp(extra = [], files = undefined) {
+/** Runs check-app with `extra`; `repository` is the --repository given (null: none), incident-platform by default. */
+async function checkApp(extra = [], files = undefined, { repository = 'profitbuild/incident-platform' } = {}) {
   const { envPath } = files ?? await writeAppFiles(root, fake.privateKey);
   return new Promise((resolve) => {
-    execFile(process.execPath, [`--env-file=${envPath}`, SCRIPT, '--api', fake.baseUrl, ...extra],
+    execFile(process.execPath, [`--env-file=${envPath}`, SCRIPT, '--api', fake.baseUrl,
+      ...(repository === null ? [] : ['--repository', repository]), ...extra],
       { env: { PATH: process.env.PATH } },
       (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr }));
   });
@@ -118,4 +120,31 @@ test('check-app reports the first failure, not the revoke\'s, when both fail', a
   assert.equal(result.code, 1);
   assert.match(result.stderr, /^check-app: the app is installed on profitbuild\/factory/m);
   assert.doesNotMatch(result.stderr, /could not be revoked/);
+});
+
+test('check-app requires --repository, in the adapter schema\'s shape, and asks nothing without it (#0-276)', async () => {
+  const start = fake.requests.length;
+  const none = await checkApp([], undefined, { repository: null });
+  assert.equal(none.code, 1);
+  assert.match(none.stderr, /^check-app: --repository <owner\/name> is required/);
+  for (const repository of ['incident-platform', 'profitbuild/..', './x', 'a/b/c']) {
+    const bad = await checkApp([], undefined, { repository });
+    assert.equal(bad.code, 1, repository);
+    assert.match(bad.stderr, /a repository must be owner\/name, as the adapter has it/);
+  }
+  assert.equal(fake.requests.length, start, 'no request without a valid repository');
+});
+
+test('check-app checks the repository it is given: another product\'s installation and token (#0-276 AC3)', async () => {
+  fake.state.repositories = ['profitbuild/other-product'];
+  const start = fake.requests.length;
+  const result = await checkApp([], undefined, { repository: 'profitbuild/other-product' });
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(fake.requests.slice(start).some((r) => r.path === '/repos/profitbuild/other-product/installation'));
+  assert.equal(fake.requests.slice(start).some((r) => r.path.includes('incident-platform')), false);
+  const posts = fake.requests.slice(start).filter((r) => r.method === 'POST');
+  assert.deepEqual(posts.map((r) => r.body.repositories), [['other-product']], 'the token narrowed to it');
+  fake.state.repositories = ['profitbuild/incident-platform'];
+  const wrong = await checkApp([], undefined, { repository: 'profitbuild/other-product' });
+  assert.equal(wrong.code, 1, 'a token reaching another repository is refused');
 });

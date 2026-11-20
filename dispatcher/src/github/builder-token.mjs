@@ -1,15 +1,18 @@
 /**
  * builder-app's token, for the dispatcher (incident-platform backlog #0-271, ADR-0060 D5 as amended, stage 4.2): the
- * first secret that writes to incident-platform with no one at the keyboard. Minted from the app's key after every
- * check of checked-token.mjs, narrowed to profitbuild/incident-platform, kept in memory until 5 minutes before it
- * expires, never on the disk, in process.env or in a log; handed to `git push` only, through GIT_ASKPASS.
+ * first secret that writes to a product with no one at the keyboard. Minted from the app's key after every check of
+ * checked-token.mjs, narrowed to the product's repository, kept in memory until 5 minutes before it expires, never on
+ * the disk, in process.env or in a log; handed to `git push` only, through GIT_ASKPASS, in a push repository the
+ * dispatcher made (push.mjs).
  *
- * The app's id, its installation's id and its key's path come from the dispatcher's environment (builder-env.mjs), not
- * from here.
+ * The app's id, its installation's id and its key's path come from the dispatcher's environment (builder-env.mjs);
+ * the repository from the product's adapter, `repository` (incident-platform ADR-0060 D6, backlog #0-276 AC3): none
+ * of them from here.
  */
 import { fileURLToPath } from 'node:url';
 
 import { GITHUB_API, revokeInstallationToken } from './app-token.mjs';
+import adapterSchema from '../../../schemas/adapter.schema.json' with { type: 'json' };
 import permissions from './builder-permissions.json' with { type: 'json' };
 import { checkApiUrl, mintCheckedToken, revokeQuietly } from './checked-token.mjs';
 import { requireHttpsOrLoopback } from './url-policy.mjs';
@@ -25,10 +28,34 @@ import { requireHttpsOrLoopback } from './url-policy.mjs';
  * is shared and could be changed.
  */
 export const BUILDER_PERMISSIONS = Object.freeze({ ...permissions });
-/** The one repository builder-app's token reaches. */
-export const BUILDER_REPOSITORY = Object.freeze({ owner: 'profitbuild', repo: 'incident-platform' });
-/** Where builder-app pushes: an explicit URL, never a remote's name, which the repository's config could redefine. */
-export const PUSH_URL = 'https://github.com/profitbuild/incident-platform.git';
+/** owner/name, by the adapter schema's own pattern (schemas/adapter.schema.json): one source for the shape. */
+const REPOSITORY = new RegExp(adapterSchema.properties.repository.pattern, 'u');
+
+/**
+ * The product's repository, `owner/name` from its adapter, as { owner, repo }; refused unless it has the adapter's
+ * shape.
+ *
+ * @param {string} repository
+ * @returns {{ owner: string, repo: string }}
+ */
+export function parseRepository(repository) {
+  if (typeof repository !== 'string' || !REPOSITORY.test(repository)) {
+    throw new TypeError('a repository must be owner/name, as the adapter has it');
+  }
+  const [owner, repo] = repository.split('/');
+  return Object.freeze({ owner, repo });
+}
+
+/**
+ * Where builder-app pushes the product's branches: an explicit URL, never a remote's name, which a config could
+ * redefine. `base` is GitHub but in tests.
+ *
+ * @param {string} repository owner/name
+ */
+export function pushUrl(repository, base = 'https://github.com') {
+  const { owner, repo } = parseRepository(repository);
+  return `${base}/${owner}/${repo}.git`;
+}
 /** A token is minted again once it has this long left: a push started with it must not outlive it. */
 export const REFRESH_BEFORE_EXPIRY_MS = 5 * 60 * 1000;
 /** The script git runs to ask for a credential (libexec/git-askpass.sh). */
@@ -38,17 +65,17 @@ export const GIT_ASKPASS = fileURLToPath(new URL('../../libexec/git-askpass.sh',
  * One of builder-app's tokens, after every check; revoked and refused when it already expires within
  * REFRESH_BEFORE_EXPIRY_MS, or its expiry cannot be read, since the cache could not hold it.
  *
- * @param {{ env: { appId: number, installationId: number, keyPath: string }, baseUrl?: string,
+ * @param {{ env: { appId: number, installationId: number, keyPath: string }, repository: string, baseUrl?: string,
  *   fetchImpl?: typeof fetch, timeoutMs?: number, uid?: number, now?: () => number,
- *   report?: (line: string) => void }} options
+ *   report?: (line: string) => void }} options `repository` the product's, owner/name, from its adapter
  * @returns {Promise<{ token: string, expiresAt: string, expiresAtMs: number }>}
  */
 export async function mintBuilderToken({
-  env, baseUrl = GITHUB_API, fetchImpl, timeoutMs, uid, now = Date.now, report,
+  env, repository, baseUrl = GITHUB_API, fetchImpl, timeoutMs, uid, now = Date.now, report,
 }) {
   const minted = await mintCheckedToken({
     appId: env.appId, installationId: env.installationId, installationIdFrom: 'BUILDER_APP_INSTALLATION_ID',
-    keyPath: env.keyPath, ...BUILDER_REPOSITORY,
+    keyPath: env.keyPath, ...parseRepository(repository),
     permissions: BUILDER_PERMISSIONS, baseUrl, fetchImpl, timeoutMs, uid, report,
   });
   const expiresAtMs = Date.parse(minted.expiresAt);
@@ -75,6 +102,7 @@ export function createBuilderTokenSource(options) {
   const { baseUrl = GITHUB_API, fetchImpl, timeoutMs, now = Date.now } = options;
   // Refused here, before any key is read or JWT made, as well as in every mint (mintCheckedToken).
   checkApiUrl(baseUrl);
+  parseRepository(options.repository);
   let held = null;
   let inFlight = null;
   let closed = false;
@@ -114,11 +142,32 @@ export function createBuilderTokenSource(options) {
 
 /**
  * What of the dispatcher's environment a push inherits: the search path, HOME, and the proxy variables (a VM may
- * reach GitHub through one). Nothing else, so a variable the dispatcher holds (a secret of a later step included)
- * reaches neither git nor any child of git: an allowlist, not a denylist over process.env.
+ * reach GitHub through one). Nothing else (process/child-env.mjs), so a variable the dispatcher holds (a secret of a
+ * later step included) reaches neither git nor any child of git.
  */
 export const PUSH_ENV_ALLOWED = Object.freeze(['PATH', 'HOME', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy',
   'http_proxy', 'no_proxy']);
+
+/** Where a task's branch is pushed: under refs/heads/factory/, the only refs the product's ruleset lets builder-app write. */
+export const PUSH_REF_PREFIX = 'refs/heads/factory/';
+
+/** A task's branch: <type>/<name>, as the CLI's --resume has it, each segment a valid ref segment. */
+const TASK_BRANCH = /^[a-z]+\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+
+/**
+ * Refuses a task's branch unless it is <type>/<name> of letters, digits, dots, dashes and underscores (so no +, :, a
+ * space, ~, ^, ?, * or [), with no .. anywhere, and no segment starting with a dot or ending with a dot or .lock
+ * (git check-ref-format's rules for these characters).
+ *
+ * @param {string} branch
+ */
+export function checkTaskBranch(branch) {
+  if (typeof branch !== 'string' || !TASK_BRANCH.test(branch) || branch.includes('..')
+    || branch.split('/').some((segment) => segment.startsWith('.') || segment.endsWith('.') || segment.endsWith('.lock'))) {
+    throw new TypeError('a task\'s branch must be <type>/<name>, a valid ref with no "+", ":" or ".."');
+  }
+  return branch;
+}
 
 /** An explicit https:// URL, or http:// to a loopback address (the tests' fake GitHub), with no user or password. */
 function checkPushUrl(url) {
@@ -130,70 +179,48 @@ function checkPushUrl(url) {
 }
 
 /**
- * The command that pushes `refspecs` to `url` with builder-app's `token`: what to pass to `spawn(command, args,
- * { env, cwd })`. The token is in `env` alone, as FACTORY_PUSH_TOKEN, which libexec/git-askpass.sh prints when git
- * asks for the password of `url`'s origin (FACTORY_PUSH_ORIGIN) and of no other; it is in no URL, no argument, no
- * file, and not in process.env, so no other child of the dispatcher inherits it.
+ * The push of a task's commit `sha` to its branch, with builder-app's `token`: what to hand to run-git.mjs's runGit
+ * (`args`, `allow`, `set`), in the push repository the dispatcher made (push.mjs), which is where the rule of the token
+ * is kept: **the token goes only to a git run in a repository the dispatcher made, whose config is a reference
+ * `git init --bare`'s** (config-allowlist.mjs). The refspec is built here, `<sha>:refs/heads/factory/<branch>`: no
+ * `+` (no force push: a task's fix is a new commit), no `:<ref>` (no delete), and the caller names neither.
  *
- * The rule: **the token goes only to a git run in a repository whose configuration the dispatcher trusts.** A
- * repository whose .git/config an agent wrote is not one. The overrides below are a second layer and cover part of
- * what such a config can do:
- * - a URL rewritten by `insteadOf` to another https:// host gets no credential: the askpass script answers only for
- *   the origin of `url`;
- * - a URL rewritten to another protocol (`ssh://`, whose `core.sshCommand` would run with this environment, token
- *   included; `ext::`, `file://`) is refused by git itself: GIT_ALLOW_PROTOCOL allows `allowProtocols` only, `https`,
- *   and it wins over any `protocol.<name>.allow` of the config;
- * - no hook (`core.hooksPath`, `--no-verify`), no fsmonitor command, no credential helper (one would be handed the
- *   token on `store`), no system or global config, no terminal prompt; the environment is PUSH_ENV_ALLOWED and what
- *   is set here (LC_ALL=C among it, so git's messages are English for 4.3/4.5 to parse), nothing else of the
- *   dispatcher's.
- * The rest of .git/config can still send the token elsewhere or let it be read on the way: `http.proxy`,
- * `http.<url>.sslVerify`, `http.sslCAInfo`, `http.curloptResolve`, `include.path` (which brings in any of them). Hence
- * the rule, which stage 4.3 turns into a check: pushing from the dispatcher's own clone, with the agent's work
- * fetched into it, is 4.3/4.5's.
+ * The token is in the environment alone, as FACTORY_PUSH_TOKEN, which libexec/git-askpass.sh prints when git asks for
+ * the password of `url`'s origin (FACTORY_PUSH_ORIGIN) and of no other; it is in no URL, no argument, no file, and not
+ * in process.env, so no other child of the dispatcher inherits it. Behind the allowlist, a second layer: a URL
+ * rewritten by `insteadOf` to another https:// host gets no credential (the askpass answers one origin), one rewritten
+ * to another protocol is refused by git (GIT_ALLOW_PROTOCOL, `allowProtocols`, wins over any protocol.<name>.allow);
+ * runGit adds no hook, no fsmonitor, no credential helper, no system or global config and no prompt.
  *
- * @param {{ token: string, refspecs: string[], url?: string, allowProtocols?: string,
- *   baseEnv?: Record<string, string | undefined> }} options `url` is PUSH_URL but in tests; `allowProtocols` the
- *   value of GIT_ALLOW_PROTOCOL, `https` but in tests (`http:https`, to a loopback server), and it must allow `url`'s
- *   own; `baseEnv` the environment the allowed variables are taken from, process.env by default, not changed.
- * @returns {{ command: 'git', args: string[], env: Record<string, string> }}
+ * @param {{ token: string, sha: string, branch: string, url: string, allowProtocols?: string }} options `url` from
+ *   pushUrl(repository); `allowProtocols` the value of GIT_ALLOW_PROTOCOL, `https` but in tests (`http:https`, to a
+ *   loopback server), and it must allow `url`'s own
+ * @returns {{ args: string[], allow: readonly string[], set: Record<string, string>, ref: string }}
  */
-export function gitPushCommand({ token, refspecs, url = PUSH_URL, allowProtocols = 'https', baseEnv = process.env }) {
+export function gitPushCommand({ token, sha, branch, url, allowProtocols = 'https' }) {
   if (typeof token !== 'string' || token === '') {
     throw new Error('gitPushCommand: a token is required');
   }
+  if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) {
+    throw new TypeError('gitPushCommand: sha must be a commit\'s 40 hex digits');
+  }
+  checkTaskBranch(branch);
   const parsed = checkPushUrl(url);
   const scheme = parsed.protocol.replace(/:$/, '');
   if (!/^[a-z]+(:[a-z]+)*$/.test(allowProtocols)
     || !allowProtocols.split(':').includes(scheme)) {
     throw new Error(`gitPushCommand: allowProtocols must be protocols joined by ":", ${scheme} among them`);
   }
-  if (!Array.isArray(refspecs) || refspecs.length === 0
-    || refspecs.some((refspec) => typeof refspec !== 'string' || refspec === '' || refspec.startsWith('-'))) {
-    throw new Error('gitPushCommand: refspecs must be one or more, none starting with "-"');
-  }
-  const env = Object.fromEntries(PUSH_ENV_ALLOWED
-    .filter((name) => typeof baseEnv[name] === 'string')
-    .map((name) => [name, baseEnv[name]]));
-  Object.assign(env, {
-    GIT_ASKPASS,
-    GIT_ALLOW_PROTOCOL: allowProtocols,
-    // git's messages in English whatever the dispatcher's locale: 4.3/4.5 parse them. Set here, never inherited.
-    LC_ALL: 'C',
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    FACTORY_PUSH_ORIGIN: parsed.origin,
-    FACTORY_PUSH_TOKEN: token,
-  });
+  const ref = `${PUSH_REF_PREFIX}${branch}`;
   return {
-    command: 'git',
-    args: [
-      '-c', 'core.hooksPath=/dev/null',
-      '-c', 'core.fsmonitor=',
-      '-c', 'credential.helper=',
-      'push', '--no-verify', '--porcelain', url, ...refspecs,
-    ],
-    env,
+    args: ['push', '--no-verify', '--porcelain', url, `${sha}:${ref}`],
+    allow: PUSH_ENV_ALLOWED,
+    set: {
+      GIT_ASKPASS,
+      GIT_ALLOW_PROTOCOL: allowProtocols,
+      FACTORY_PUSH_ORIGIN: parsed.origin,
+      FACTORY_PUSH_TOKEN: token,
+    },
+    ref,
   };
 }

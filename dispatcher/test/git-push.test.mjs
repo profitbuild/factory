@@ -1,52 +1,29 @@
-// builder-app's push (incident-platform backlog #0-271, AC2): a real `git push`, built by gitPushCommand, to a fake
-// git smart-HTTP server on a loopback address. The token reaches the server through libexec/git-askpass.sh, and no
-// argument, no file, no hook, no credential helper, no ssh command and no other child; control runs without the
-// overrides show that the hook, the helper and the ssh command planted here would have had it. A URL rewritten to
-// another host gets no credential, one rewritten to ssh:// is refused by git. The tests push over http:// to
-// loopback, so they pass allowProtocols 'http:https' explicitly; the default is 'https' alone.
+// builder-app's push, its second layer (incident-platform backlog #0-271 AC2, kept by #0-276): a real `git push`, the
+// command of gitPushCommand run by runGit, to a fake git smart-HTTP server on a loopback address. Since #0-276 the
+// dispatcher pushes only from a push repository it made, whose config is a reference `git init --bare`'s (push.test);
+// these tests run the same command in a repository holding what an agent could plant (a hook, a credential helper, an
+// insteadOf, an ssh command), to show what still holds behind that check: the token reaches the server through
+// libexec/git-askpass.sh and no argument, file, hook, helper, ssh command or other host; control runs without the
+// overrides show that what is planted here would have had it. The tests push over http:// to loopback, so they pass
+// allowProtocols 'http:https' explicitly; the default is 'https' alone.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { GIT_ASKPASS, PUSH_ENV_ALLOWED, PUSH_URL, gitPushCommand } from '../src/github/builder-token.mjs';
-import { startFakeGitHub } from '../testing/fake-github.mjs';
+import { GIT_OVERRIDES, runGit } from '../src/git/run-git.mjs';
+import {
+  GIT_ASKPASS, PUSH_ENV_ALLOWED, PUSH_REF_PREFIX, checkTaskBranch, gitPushCommand, pushUrl,
+} from '../src/github/builder-token.mjs';
 import { filesContaining, makeRoot } from '../testing/builder-github.mjs';
+import { basic, startGitServer } from '../testing/git-server.mjs';
 
 const TOKEN = 'ghs_BuilderFakePushToken_end';
 const REAL_GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-const REPO_PATH = '/profitbuild/incident-platform.git';
 
-const pkt = (line) => `${(Buffer.byteLength(line) + 4).toString(16).padStart(4, '0')}${line}`;
-const basic = (user, password) => `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
-
-/** A fake git server: the receive-pack advertisement of an empty repository, then a report that accepts the push. */
-async function startGitServer() {
-  const authorizations = [];
-  const authorized = ({ headers }) => {
-    authorizations.push(headers.authorization);
-    return headers.authorization === basic('x-access-token', TOKEN);
-  };
-  const challenge = { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="fake"' }, body: '' };
-  const server = await startFakeGitHub({
-    [`GET ${REPO_PATH}/info/refs`]: (request) => (authorized(request) ? {
-      status: 200,
-      headers: { 'Content-Type': 'application/x-git-receive-pack-advertisement', 'Cache-Control': 'no-cache' },
-      body: `${pkt('# service=git-receive-pack\n')}0000`
-        + `${pkt(`${'0'.repeat(40)} capabilities^{}\0report-status delete-refs ofs-delta\n`)}0000`,
-    } : challenge),
-    [`POST ${REPO_PATH}/git-receive-pack`]: (request) => (authorized(request) ? {
-      status: 200,
-      headers: { 'Content-Type': 'application/x-git-receive-pack-result' },
-      body: `${pkt('unpack ok\n')}${pkt('ok refs/heads/feat/x\n')}0000`,
-    } : challenge),
-  });
-  return { ...server, authorizations, url: `${server.baseUrl}${REPO_PATH}` };
-}
-
-const git = await startGitServer();
-const other = await startGitServer();
+const git = await startGitServer({ token: TOKEN });
+const other = await startGitServer({ token: TOKEN });
 const root = await makeRoot('git-push-test');
 after(async () => {
   await git.close();
@@ -58,10 +35,9 @@ const exists = (path) => stat(path).then(() => true, () => false);
 
 /**
  * A repository with one commit, holding what an agent could plant in .git: a pre-push hook and a credential helper,
- * each of which writes what it is given (its environment, its stdin) to `dumps/`. (An fsmonitor command is not
- * planted: git 2.39's push runs none, as the control run showed, so the test could not fail; `core.fsmonitor=` is
- * held by the command's test.) A `git` on PATH ahead of the real one logs its arguments. HOME is the run's own, so
- * whatever git writes there is scanned.
+ * each of which writes what it is given (its environment, its stdin) to `dumps/`. A `git` on PATH ahead of the real
+ * one logs its arguments and the names of its environment. HOME is the run's own, so whatever git writes there is
+ * scanned.
  */
 async function setUp(name) {
   const dir = join(root, name);
@@ -72,8 +48,8 @@ async function setUp(name) {
   for (const path of [repo, dumps, bin, home]) {
     await mkdir(path, { recursive: true });
   }
-  const run = (...args) => execFileSync(REAL_GIT, args, { cwd: repo, env: { PATH: process.env.PATH, HOME: home,
-    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+  const run = (...args) => execFileSync(REAL_GIT, args, { cwd: repo, encoding: 'utf8', env: { PATH: process.env.PATH,
+    HOME: home, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
   run('init', '-q', '-b', 'main');
   run('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'a commit');
   const dumper = (file) => `#!/bin/sh\n{ echo "args: $*"; env; cat; } >> ${join(dumps, file)} 2>/dev/null\nexit 0\n`;
@@ -89,30 +65,27 @@ async function setUp(name) {
   await chmod(join(bin, 'git'), 0o755);
   const baseEnv = { PATH: `${bin}:${process.env.PATH}`, HOME: home, LANG: 'pl_PL.UTF-8',
     SECRET_X: 'a-secret-of-the-parent' };
-  return { dir, repo, dumps, home, baseEnv, run };
+  return { dir, repo, dumps, home, baseEnv, run, sha: run('rev-parse', 'HEAD') };
 }
 
-/** Runs `command args` in `cwd` with `env`; resolves its exit code and output. */
-const spawnRun = ({ command, args, env }, cwd) => new Promise((resolve) => {
-  const child = spawn(command, args, { cwd, env });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', (chunk) => { stdout += chunk; });
-  child.stderr.on('data', (chunk) => { stderr += chunk; });
-  child.on('exit', (code) => resolve({ code, stdout, stderr }));
-});
+/** The command of gitPushCommand, run by runGit in `repo` (a test's repository, standing for an agent's). */
+function pushFrom({ repo, sha, baseEnv }, { url = git.url, set = {} } = {}) {
+  const command = gitPushCommand({ token: TOKEN, sha, branch: 'feat/x', url, allowProtocols: 'http:https' });
+  return runGit({ cwd: repo, gitDir: join(repo, '.git'), args: command.args, allow: command.allow,
+    set: { ...command.set, ...set }, baseEnv }).then((result) => ({ ...result, stdout: result.stdout.toString() }));
+}
 
 test('the push reaches the server with the token, in no argument, file, hook, helper or other env', async () => {
-  const { dir, repo, dumps, baseEnv } = await setUp('push');
+  const setup = await setUp('push');
+  const { dir, dumps, baseEnv, sha } = setup;
   const before = structuredClone(baseEnv);
-  const command = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url,
-    allowProtocols: 'http:https', baseEnv });
-  const { code, stdout, stderr } = await spawnRun(command, repo);
+  const start = git.updates.length;
+  const { code, stdout, stderr } = await pushFrom(setup);
   assert.equal(code, 0, stderr);
+  assert.deepEqual(git.updates.slice(start), [{ old: '0'.repeat(40), new: sha, ref: 'refs/heads/factory/feat/x' }]);
   assert.ok(git.authorizations.includes(basic('x-access-token', TOKEN)), 'the server got the token');
   assert.doesNotMatch(stdout + stderr, new RegExp(TOKEN));
   assert.deepEqual(baseEnv, before, 'the environment given is not changed');
-  assert.equal(command.args.some((arg) => arg.includes(TOKEN)), false);
   const argv = await readFile(join(dumps, 'argv'), 'utf8');
   assert.match(argv, /^push$/m, 'the PATH wrapper saw the push');
   assert.equal(argv.includes(TOKEN), false, 'not in git\'s arguments');
@@ -123,30 +96,31 @@ test('the push reaches the server with the token, in no argument, file, hook, he
   assert.ok(names.includes('FACTORY_PUSH_TOKEN'), 'the wrapper saw git\'s environment');
   assert.equal(names.includes('SECRET_X'), false, 'a variable of the parent outside the allowlist does not reach git');
   assert.equal(names.includes('LANG'), false);
-  assert.deepEqual(names.filter((n) => ![...PUSH_ENV_ALLOWED, 'LC_ALL', 'PWD', 'SHLVL', '_'].includes(n)
-    && !n.startsWith('GIT_') && !n.startsWith('FACTORY_PUSH_')), [], 'git sees nothing but the allowlist and ours');
+  assert.deepEqual(names.filter((name) => ![...PUSH_ENV_ALLOWED, 'LC_ALL', 'PWD', 'SHLVL', '_'].includes(name)
+    && !name.startsWith('GIT_') && !name.startsWith('FACTORY_PUSH_')), [], 'git sees nothing but the allowlist and ours');
   assert.equal(Object.values(process.env).some((value) => value?.includes(TOKEN)), false, 'not in process.env');
 });
 
 test('control: without the overrides, the hook and the helper planted here are handed the token', async () => {
   const { repo, dumps, baseEnv } = await setUp('control');
-  const { code, stderr } = await spawnRun({
-    command: 'git', args: ['push', git.url, 'HEAD:refs/heads/feat/x'],
-    env: { ...baseEnv, GIT_ASKPASS, FACTORY_PUSH_ORIGIN: git.baseUrl, FACTORY_PUSH_TOKEN: TOKEN,
-      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
-  }, repo);
+  const { code, stderr } = await new Promise((resolve) => {
+    const child = spawn('git', ['push', git.url, 'HEAD:refs/heads/feat/x'], { cwd: repo,
+      env: { ...baseEnv, GIT_ASKPASS, FACTORY_PUSH_ORIGIN: git.baseUrl, FACTORY_PUSH_TOKEN: TOKEN,
+        GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+    let err = '';
+    child.stderr.on('data', (chunk) => { err += chunk; });
+    child.on('exit', (exit) => resolve({ code: exit, stderr: err }));
+  });
   assert.equal(code, 0, stderr);
   assert.match(await readFile(join(dumps, 'hook'), 'utf8'), new RegExp(`FACTORY_PUSH_TOKEN=${TOKEN}`));
   assert.match(await readFile(join(dumps, 'helper'), 'utf8'), new RegExp(`password=${TOKEN}`));
 });
 
 test('a push URL rewritten by insteadOf to another host gets no credential, and fails', async () => {
-  const { repo, run, baseEnv } = await setUp('insteadof');
-  run('config', `url.${other.baseUrl}/.insteadOf`, `${git.baseUrl}/`);
+  const setup = await setUp('insteadof');
+  setup.run('config', `url.${other.baseUrl}/.insteadOf`, `${git.baseUrl}/`);
   const start = other.requests.length;
-  const command = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url,
-    allowProtocols: 'http:https', baseEnv });
-  const { code, stderr } = await spawnRun(command, repo);
+  const { code, stderr } = await pushFrom(setup);
   assert.notEqual(code, 0);
   assert.ok(other.requests.length > start, 'git went to the other host');
   assert.deepEqual(other.requests.slice(start).map((r) => r.headers.authorization), [undefined],
@@ -155,39 +129,43 @@ test('a push URL rewritten by insteadOf to another host gets no credential, and 
   assert.doesNotMatch(stderr, new RegExp(TOKEN));
 });
 
-test('the command: the token in its env alone, the overrides, an explicit URL, only the allowed variables', () => {
-  const baseEnv = { PATH: '/usr/bin', HOME: '/home/x', GIT_SSL_NO_VERIFY: '1', GIT_ASKPASS: '/evil',
-    GIT_CONFIG_PARAMETERS: "'core.hooksPath'='/evil'", FACTORY_PUSH_ORIGIN: 'https://evil.example', SSH_ASKPASS: '/e',
-    SECRET_X: 's', LANG: 'pl_PL.UTF-8', LC_ALL: 'pl_PL.UTF-8', LC_MESSAGES: 'pl_PL.UTF-8', LD_PRELOAD: '/evil.so',
-    HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'localhost',
-    GIT_ALLOW_PROTOCOL: 'ssh:https' };
-  const { command, args, env } = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], baseEnv });
-  assert.equal(command, 'git');
-  assert.deepEqual(args, ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', '-c', 'credential.helper=',
-    'push', '--no-verify', '--porcelain', PUSH_URL, 'HEAD:refs/heads/feat/x']);
-  assert.equal(PUSH_URL, 'https://github.com/profitbuild/incident-platform.git');
-  assert.deepEqual(env, {
-    PATH: '/usr/bin', HOME: '/home/x', HTTPS_PROXY: 'http://proxy:3128', no_proxy: 'localhost', GIT_ASKPASS,
-    GIT_ALLOW_PROTOCOL: 'https', LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    FACTORY_PUSH_ORIGIN: 'https://github.com', FACTORY_PUSH_TOKEN: TOKEN,
-  });
+const SHA = 'a'.repeat(40);
+
+test('the command: the refspec built from { sha, branch }, the token in its env alone, an explicit URL', () => {
+  const url = pushUrl('profitbuild/incident-platform');
+  const command = gitPushCommand({ token: TOKEN, sha: SHA, branch: 'feat/0-276-trusted-push', url });
+  assert.deepEqual(command.args, ['push', '--no-verify', '--porcelain', url,
+    `${SHA}:refs/heads/factory/feat/0-276-trusted-push`]);
+  assert.equal(command.ref, 'refs/heads/factory/feat/0-276-trusted-push');
+  assert.equal(PUSH_REF_PREFIX, 'refs/heads/factory/');
+  assert.equal(command.args.some((arg) => arg.startsWith('+') || arg.includes(TOKEN)), false);
+  assert.deepEqual(command.set, { GIT_ASKPASS, GIT_ALLOW_PROTOCOL: 'https', FACTORY_PUSH_ORIGIN: 'https://github.com',
+    FACTORY_PUSH_TOKEN: TOKEN });
+  assert.equal(command.allow, PUSH_ENV_ALLOWED);
   assert.deepEqual(PUSH_ENV_ALLOWED, ['PATH', 'HOME', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy',
     'http_proxy', 'no_proxy']);
+  assert.deepEqual(GIT_OVERRIDES, ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', '-c', 'credential.helper=',
+    '-c', 'protocol.allow=never']);
 });
 
-test('the command refuses a URL with credentials or not HTTPS, a refspec that is an option, and no token', () => {
-  const ok = { token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'] };
+test('the command refuses a bad sha or branch, a URL with credentials or not HTTPS, and no token', () => {
+  const ok = { token: TOKEN, sha: SHA, branch: 'feat/x', url: pushUrl('profitbuild/incident-platform') };
   assert.throws(() => gitPushCommand({ ...ok, url: 'https://x:y@github.com/profitbuild/incident-platform.git' }),
     /no user or password/);
   assert.throws(() => gitPushCommand({ ...ok, url: 'http://github.com/profitbuild/incident-platform.git' }),
     /must be an https:\/\/ URL/);
-  assert.throws(() => gitPushCommand({ ...ok, refspecs: ['--force'] }), /none starting with "-"/);
-  assert.throws(() => gitPushCommand({ ...ok, refspecs: [] }), /one or more/);
+  for (const sha of ['HEAD', SHA.toUpperCase(), SHA.slice(1), `+${SHA}`]) {
+    assert.throws(() => gitPushCommand({ ...ok, sha }), /40 hex digits/);
+  }
+  for (const branch of ['+feat/x', 'feat/x:x', 'feat/..', '--force', 'x', 'feat/a.lock', undefined]) {
+    assert.throws(() => gitPushCommand({ ...ok, branch }), /a valid ref with no/);
+    assert.throws(() => checkTaskBranch(branch), TypeError);
+  }
   assert.throws(() => gitPushCommand({ ...ok, token: '' }), /a token is required/);
   assert.throws(() => gitPushCommand({ ...ok, url: 'http://127.0.0.1:1/x.git' }), /http among them/,
     'http:// to loopback needs http allowed explicitly');
   assert.throws(() => gitPushCommand({ ...ok, allowProtocols: 'https ssh' }), /protocols joined by ":"/);
+  assert.throws(() => pushUrl('incident-platform'), /owner\/name/);
 });
 
 /** Runs the askpass script as git does, the question in $1. */
@@ -217,7 +195,7 @@ test('askpass: the user and the token for the origin, nothing for another host, 
 
 /**
  * A repository whose config rewrites the push URL to ssh:// and names a core.sshCommand that dumps its environment,
- * as an agent could write it (the hole round 1 of the review found).
+ * as an agent could write it (the hole round 1 of #0-271's review found).
  */
 async function setUpSsh(name) {
   const setup = await setUp(name);
@@ -231,24 +209,24 @@ async function setUpSsh(name) {
 }
 
 test('a push URL rewritten by insteadOf to ssh:// is refused by git: the ssh command never runs', async () => {
-  const { dir, repo, dumps, baseEnv } = await setUpSsh('ssh');
+  const setup = await setUpSsh('ssh');
   const start = git.requests.length;
-  const command = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url,
-    allowProtocols: 'http:https', baseEnv });
-  const { code, stderr } = await spawnRun(command, repo);
+  const { code, stderr } = await pushFrom(setup);
   assert.notEqual(code, 0);
   assert.match(stderr, /transport 'ssh' not allowed/);
-  assert.equal(await exists(join(dumps, 'ssh')), false, 'the ssh command did not run');
+  assert.equal(await exists(join(setup.dumps, 'ssh')), false, 'the ssh command did not run');
   assert.equal(git.requests.length, start);
-  assert.deepEqual(await filesContaining(dir, TOKEN), []);
+  assert.deepEqual(await filesContaining(setup.dir, TOKEN), []);
 });
 
 test('control: without GIT_ALLOW_PROTOCOL, the ssh command of the config gets the token', async () => {
-  const { repo, dumps, baseEnv } = await setUpSsh('ssh-control');
-  const { env, args } = gitPushCommand({ token: TOKEN, refspecs: ['HEAD:refs/heads/feat/x'], url: git.url,
-    allowProtocols: 'http:https', baseEnv });
-  delete env.GIT_ALLOW_PROTOCOL;
-  const { code } = await spawnRun({ command: 'git', args, env }, repo);
+  const setup = await setUpSsh('ssh-control');
+  const command = gitPushCommand({ token: TOKEN, sha: setup.sha, branch: 'feat/x', url: git.url,
+    allowProtocols: 'http:https' });
+  const set = { ...command.set };
+  delete set.GIT_ALLOW_PROTOCOL;
+  const { code } = await runGit({ cwd: setup.repo, gitDir: join(setup.repo, '.git'), args: command.args,
+    allow: command.allow, set, baseEnv: setup.baseEnv });
   assert.notEqual(code, 0);
-  assert.match(await readFile(join(dumps, 'ssh'), 'utf8'), new RegExp(`FACTORY_PUSH_TOKEN=${TOKEN}`));
+  assert.match(await readFile(join(setup.dumps, 'ssh'), 'utf8'), new RegExp(`FACTORY_PUSH_TOKEN=${TOKEN}`));
 });

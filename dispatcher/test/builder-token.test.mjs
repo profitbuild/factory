@@ -32,6 +32,8 @@ beforeEach(() => {
 });
 
 const MINUTE = 60 * 1000;
+/** The adapter's `repository` of these tests (incident-platform backlog #0-276: no product in the code). */
+const REPOSITORY = 'profitbuild/incident-platform';
 const requestsSince = (start) => fake.requests.slice(start);
 const posts = (requests) => requests.filter((r) => r.method === 'POST');
 
@@ -40,7 +42,7 @@ async function source({ keyMode, uid, env } = {}) {
   const files = await writeAppFiles(root, fake.privateKey, { keyMode });
   return {
     files,
-    tokens: createBuilderTokenSource({
+    tokens: createBuilderTokenSource({ repository: REPOSITORY,
       env: { ...files.env, ...env }, baseUrl: fake.baseUrl, uid, now: () => clock.now,
     }),
   };
@@ -98,7 +100,7 @@ test('a key that is a symlink, even to a file of mode 600, is refused', async ()
   const files = await writeAppFiles(root, fake.privateKey);
   const link = join(files.dir, 'link.pem');
   await symlink(files.keyPath, link);
-  const tokens = createBuilderTokenSource({ env: { ...files.env, keyPath: link }, baseUrl: fake.baseUrl,
+  const tokens = createBuilderTokenSource({ repository: REPOSITORY, env: { ...files.env, keyPath: link }, baseUrl: fake.baseUrl,
     now: () => clock.now });
   await assertRefused(tokens, /the key .*link\.pem is not a regular file \(a symlink/);
   assert.equal(fake.state.minted.length, 0);
@@ -106,7 +108,7 @@ test('a key that is a symlink, even to a file of mode 600, is refused', async ()
 
 test('a key that is a directory is refused as not a regular file', async () => {
   const files = await writeAppFiles(root, fake.privateKey);
-  const tokens = createBuilderTokenSource({ env: { ...files.env, keyPath: files.dir }, baseUrl: fake.baseUrl,
+  const tokens = createBuilderTokenSource({ repository: REPOSITORY, env: { ...files.env, keyPath: files.dir }, baseUrl: fake.baseUrl,
     now: () => clock.now, uid: process.getuid() });
   await chmod(files.dir, 0o700);
   await assertRefused(tokens, /the key .* is not a regular file/);
@@ -223,7 +225,7 @@ test('a token missing one of the three is revoked and refused', async () => {
 test('a token whose expiry is within 5 minutes is revoked and not returned', async () => {
   const files = await writeAppFiles(root, fake.privateKey);
   fake.state.expiresInMs = 5 * MINUTE;
-  await assert.rejects(mintBuilderToken({ env: files.env, baseUrl: fake.baseUrl, now: () => clock.now }),
+  await assert.rejects(mintBuilderToken({ repository: REPOSITORY, env: files.env, baseUrl: fake.baseUrl, now: () => clock.now }),
     /less than 5 minutes from now: refused/);
   assert.deepEqual(fake.state.revoked, [tokenNumber(1)]);
 });
@@ -308,13 +310,13 @@ test('an API that is neither HTTPS nor loopback is refused before the key is rea
   const files = await writeAppFiles(root, fake.privateKey);
   const start = fake.requests.length;
   for (const baseUrl of ['http://api.example.com', 'ftp://127.0.0.1']) {
-    assert.throws(() => createBuilderTokenSource({ env: files.env, baseUrl }), /the API must be an https:\/\/ URL/);
+    assert.throws(() => createBuilderTokenSource({ repository: REPOSITORY, env: files.env, baseUrl }), /the API must be an https:\/\/ URL/);
     let jwtMade = false;
-    await assert.rejects(mintBuilderToken({ env: files.env, baseUrl, fetchImpl: () => { jwtMade = true; } }),
+    await assert.rejects(mintBuilderToken({ repository: REPOSITORY, env: files.env, baseUrl, fetchImpl: () => { jwtMade = true; } }),
       /the API must be an https:\/\/ URL/);
     assert.equal(jwtMade, false);
   }
-  await assert.rejects(mintBuilderToken({ env: { ...files.env, keyPath: '/nonexistent' },
+  await assert.rejects(mintBuilderToken({ repository: REPOSITORY, env: { ...files.env, keyPath: '/nonexistent' },
     baseUrl: 'http://x.example' }),
     /the API must be/, 'refused before the key is read: no ENOENT');
   assert.equal(fake.requests.length, start);
@@ -328,4 +330,26 @@ test('a caller of the installation check that does not name the source of the ex
     TypeError);
   await assert.rejects(mintCheckedToken({ appId: 2, installationId: 1, keyPath: '/nonexistent', owner: 'o', repo: 'r',
     permissions: {}, baseUrl: 'http://127.0.0.1:1' }), TypeError);
+});
+
+test('AC3 (#0-276): the token is minted for the adapter\'s repository: another product\'s, narrowed to it', async () => {
+  const files = await writeAppFiles(root, fake.privateKey);
+  fake.state.repositories = ['profitbuild/other-product'];
+  const start = fake.requests.length;
+  const minted = await mintBuilderToken({ repository: 'profitbuild/other-product', env: files.env,
+    baseUrl: fake.baseUrl, now: () => clock.now });
+  assert.equal(minted.token, tokenNumber(1));
+  const asked = fake.requests.slice(start);
+  assert.ok(asked.some((r) => r.path === '/repos/profitbuild/other-product/installation'));
+  assert.equal(asked.some((r) => r.path.includes('incident-platform')), false);
+  assert.deepEqual(posts(asked).map((r) => r.body.repositories), [['other-product']]);
+  await assert.rejects(mintBuilderToken({ repository: REPOSITORY, env: files.env, baseUrl: fake.baseUrl,
+    now: () => clock.now }), RefusedError, 'a token reaching only the other product is refused for incident-platform');
+});
+
+test('a token source refuses a repository not in the adapter\'s shape, before any key is read', () => {
+  for (const repository of [undefined, 'incident-platform', 'profitbuild/..', './x', 'a/b/c']) {
+    assert.throws(() => createBuilderTokenSource({ repository, env: { appId: 1, installationId: 2, keyPath: '/x' },
+      baseUrl: fake.baseUrl }), /a repository must be owner\/name, as the adapter has it/);
+  }
 });
