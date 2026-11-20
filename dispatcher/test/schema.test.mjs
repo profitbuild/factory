@@ -99,10 +99,17 @@ test('sec-4a81: a path is refused when a line break, a control character or a li
     }
   });
 
-test('a command\'s first argument is the product\'s script: a path, not absolute, not leaving it, not an option', () => {
-  for (const script of ['/usr/bin/env', '../x', '-x', '--help', 'a/../../x', '\n/../x']) {
+test('a command\'s first argument is the product\'s script: a path with a /, not absolute, not leaving it, not a'
+  + ' directory, not an option', () => {
+  for (const script of ['/usr/bin/env', '../x', '-x', '--help', '-x/run.sh', '--opt/x', 'a/../../x', '\n/../x']) {
     refused(withField(ADAPTER, 'gate/command', [script]), /\/gate\/command\/0: must match/);
     refused(withField(ADAPTER, 'changedPaths/command', [script, 'arg']), /\/changedPaths\/command\/0: must match/);
+  }
+  for (const script of ['bash', 'env', 'node', '.', './', 'run-tests.sh', 'scripts/', 'scripts/factory/']) {
+    refused(withField(ADAPTER, 'gate/command', [script, 'x']), /\/gate\/command\/0: must match/);
+  }
+  for (const script of ['scripts/factory/run-tests.sh', './run-tests.sh', 'bin/gate']) {
+    checkAdapter(withField(ADAPTER, 'gate/command', [script]));
   }
   checkAdapter(withField(ADAPTER, 'gate/command', ['scripts/factory/run-tests.sh', '--working-tree', '/abs']));
   refused(withField(ADAPTER, 'gate/command', ['scripts/x.sh', '']), /\/gate\/command\/1: must have at least 1/);

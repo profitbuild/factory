@@ -81,9 +81,9 @@
       "pattern": "^(?!/)(?![\\s\\S]*(?:^|/)\\.\\.(?:/|$))[^\\\\\\u0000-\\u001f\\u007f\\u2028\\u2029]+$"
     },
     "script": {
-      "description": "The product's script a command runs: a path, which does not start with - (it would read as an option).",
+      "description": "The product's script a command runs: a path with at least one / (so never a program found on PATH, such as bash, env or node, however the command is run), not ending with / (a directory), and not starting with - (it would read as an option).",
       "$ref": "#/$defs/path",
-      "pattern": "^[^-]"
+      "pattern": "^(?!-)(?!.*/$).*/"
     },
     "command": {
       "description": "A command as its arguments, run without a shell: the first is the product's script, a path; the others any non-empty strings.",
