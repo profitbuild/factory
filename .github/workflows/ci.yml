@@ -51,6 +51,10 @@ jobs:
     timeout-minutes: 10
     # Ubuntu 24.04's own git, 2.43.0: the build VM's (incident-platform backlog #0-276, AC6). The runner's git is newer.
     container: ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+    # In a container a run step's default shell is sh (dash, no pipefail); the image has bash.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Install git
         run: |
