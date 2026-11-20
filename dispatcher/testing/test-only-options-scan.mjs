@@ -1,8 +1,10 @@
 // Not a test file. The scan of test/child-process-static.test.mjs for the options only a test gives (incident-platform
-// backlog #0-276, review rounds 2 and 3): pushTask's `gitBase` and `hooks`, the `git` of runGit and of the helpers that
-// run git, runGit's `maxOutput`, mainObjects' `lstatOf`, and the `uid` a test names as the owner. No module of src/ or
-// bin/ gives one a value: in production git is /usr/bin/git, the host GitHub's, no hook, the bound GIT_MAX_OUTPUT,
-// the lstat of node:fs, the owner the process's own user.
+// backlog #0-276, review rounds 2 and 3; #0-277): pushTask's `gitBase` and `hooks`, the `git` of runGit and of the
+// helpers that run git, runGit's `maxOutput`, mainObjects' `lstatOf`, the `uid` a test names as the owner, and the
+// `sudo` of the container starter and of everything that runs a container command (#0-277: the fake daemon). No
+// module of src/ or bin/ gives one a value: in production git is /usr/bin/git, sudo /usr/bin/sudo, the host GitHub's,
+// no hook, the bound GIT_MAX_OUTPUT (or GIT_MAX_LARGE_OUTPUT, runGit's `large`), the lstat of node:fs, the owner the
+// process's own user.
 //
 // The rule, on the source masked as child-process-scan.mjs masks it (comments, strings, templates and regex literals
 // blanked, offsets kept), with its closing() and argumentsOf():
@@ -19,12 +21,28 @@
 // seen. The review reads those.
 import { argumentsOf, closing, mask } from './child-process-scan.mjs';
 
-export const OPTIONS = Object.freeze(['git', 'gitBase', 'hooks', 'maxOutput', 'lstatOf', 'uid']);
+export const OPTIONS = Object.freeze(['git', 'gitBase', 'hooks', 'maxOutput', 'lstatOf', 'uid', 'sudo']);
 export const FUNCTIONS = Object.freeze(['pushTask', 'runGit', 'initBare', 'readConfig', 'checkPushConfig',
-  'loadBundle', 'mainObjects', 'pushTarget']);
-/** The modules that run git, or push, and forward a test's options to it. */
-export const CHAIN = Object.freeze(['git/run-git.mjs', 'git/bundle.mjs', 'git/config-allowlist.mjs',
-  'github/push.mjs']);
+  'loadBundle', 'mainObjects', 'pushTarget',
+  // #0-277: the container starter and everything that runs a container command, or git for the task container.
+  'runContainerCommand', 'mustRun', 'helper', 'makeWorkDir', 'writeOverride', 'removeWorkDir', 'removeAllWorkDirs',
+  'docker', 'containers', 'networks', 'volumes', 'runningRollbacks', 'refuseWhileRollback', 'sweepDaemon', 'checkSwept',
+  'createTaskNetwork', 'createTaskVolumes', 'removeOwnObjects', 'killTask', 'readTaskConfig', 'treeEntry', 'blobOf',
+  'upContainer', 'inspectJson', 'execInTask', 'callInTask', 'probeTimeout', 'bundleFromTask', 'setUpTaskContainer',
+  'inTaskEnvironment', 'mainCommit', 'makeBaseBundle', 'inRepo', 'sweep', 'main']);
+/**
+ * The modules that run git, push, or run a container command, and the options of a test's each may forward: all but
+ * `sudo` for #0-276's, `git` and `sudo` for #0-277's (the task container's), and `sudo` alone for the CLI's main, which a
+ * test calls with the fake daemon.
+ */
+const ALL = Object.freeze(OPTIONS.filter((option) => option !== 'sudo'));
+const TASK = Object.freeze(['git', 'sudo']);
+export const CHAIN = Object.freeze({
+  'git/run-git.mjs': ALL, 'git/bundle.mjs': ALL, 'git/config-allowlist.mjs': ALL, 'github/push.mjs': ALL,
+  'git/base-bundle.mjs': TASK, 'container/run-container.mjs': TASK, 'container/work-dir.mjs': TASK,
+  'container/daemon.mjs': TASK, 'container/task-container.mjs': TASK, 'container/task-bundle.mjs': TASK,
+  'container/environment.mjs': TASK, 'cli.mjs': Object.freeze(['sudo']),
+});
 
 /**
  * Where `source`, the module at `path` under src/, gives a test's option: a list of messages, empty when it does not.
@@ -49,7 +67,7 @@ export function testOnlyOptions(path, source) {
       for (const key of args.matchAll(new RegExp(`(?:[{,]\\s*)(${OPTIONS.join('|')})\\s*([:,}])`, 'g'))) {
         if (key[2] === ':') {
           found.push(`${path}: ${name}( gives ${key[1]} a value`);
-        } else if (!CHAIN.includes(path)) {
+        } else if (!(CHAIN[path] ?? []).includes(key[1])) {
           found.push(`${path}: ${name}( forwards ${key[1]}, which only the modules that run git may`);
         } else if (declaresLocal(key[1])) {
           found.push(`${path}: ${name}( forwards ${key[1]}, a local of the module's, not its caller's`);

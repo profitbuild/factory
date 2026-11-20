@@ -38,20 +38,23 @@ export const GIT_OVERRIDES = Object.freeze(['-c', 'core.hooksPath=/dev/null', '-
 export const GIT_TIMEOUT_MS = 2 * 60 * 1000;
 /** The most of stdout, and of stderr, kept; a call that writes more is ended and fails. */
 export const GIT_MAX_OUTPUT = 4 * 1024 * 1024;
+/** The bound of a call that writes a bundle to its stdout (`large`): a product's whole history (#0-277). */
+export const GIT_MAX_LARGE_OUTPUT = 256 * 1024 * 1024;
 
 /** git could not be run, ran too long, or wrote too much. */
 export class GitRunError extends Error {}
 
 /**
  * @param {{ cwd: string, gitDir?: string, args: string[], input?: Buffer | string, allow?: readonly string[],
- *   set?: Record<string, string>, baseEnv?: Record<string, string | undefined>, timeoutMs?: number, git?: string,
- *   maxOutput?: number }} options `allow` replaces GIT_ENV_ALLOWED (a push passes its own list); `set` adds to what is
- *   set here; `git` and `maxOutput` for the tests only
+ *   set?: Record<string, string>, baseEnv?: Record<string, string | undefined>, timeoutMs?: number, large?: boolean,
+ *   git?: string, maxOutput?: number }} options `allow` replaces GIT_ENV_ALLOWED (a push passes its own list); `set`
+ *   adds to what is set here; `large` bounds the output by GIT_MAX_LARGE_OUTPUT, for a bundle written to stdout
+ *   (base-bundle.mjs), a choice between two bounds and never a number; `git` and `maxOutput` for the tests only
  * @returns {Promise<{ code: number, stdout: Buffer, stderr: string }>}
  */
 export function runGit({
   cwd, gitDir, args, input, allow = GIT_ENV_ALLOWED, set = {}, baseEnv = process.env, timeoutMs = GIT_TIMEOUT_MS,
-  git = GIT, maxOutput = GIT_MAX_OUTPUT,
+  large = false, git = GIT, maxOutput = large === true ? GIT_MAX_LARGE_OUTPUT : GIT_MAX_OUTPUT,
 }) {
   if (typeof cwd !== 'string' || cwd === '') {
     throw new TypeError('runGit: cwd, a directory of the dispatcher\'s own, is required');

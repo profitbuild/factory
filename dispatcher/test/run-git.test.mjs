@@ -72,3 +72,16 @@ test('a call is git by its full path, the overrides first, GIT_DIR when named, a
   assert.equal(GIT, '/usr/bin/git');
   assert.throws(() => runGit({ args: ['status'] }), /cwd, a directory of the dispatcher's own, is required/);
 });
+
+test('#0-277: `large` bounds a call by GIT_MAX_LARGE_OUTPUT, a bundle\'s bound, and nothing else does', async () => {
+  const { GIT_MAX_LARGE_OUTPUT, GIT_MAX_OUTPUT } = await import('../src/git/run-git.mjs');
+  const { MAX_BUNDLE_BYTES } = await import('../src/git/bundle.mjs');
+  assert.equal(GIT_MAX_LARGE_OUTPUT, MAX_BUNDLE_BYTES);
+  const big = await fakeGit('big', `head -c ${GIT_MAX_OUTPUT + 1} /dev/zero`);
+  await assert.rejects(runGit({ cwd: root.dir, git: big, args: ['bundle'] }),
+    refused(new RegExp(`^git bundle wrote more than ${GIT_MAX_OUTPUT} bytes to its stdout: stopped$`)));
+  assert.equal((await runGit({ cwd: root.dir, git: big, args: ['bundle'], large: true })).stdout.length,
+    GIT_MAX_OUTPUT + 1);
+  await assert.rejects(runGit({ cwd: root.dir, git: big, args: ['bundle'], large: 'yes' }), GitRunError,
+    'only true chooses the larger bound');
+});

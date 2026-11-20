@@ -41,7 +41,7 @@ test('newRunId: the UTC second and six hex digits; createTask writes the task be
   t.after(state.remove);
   const task = await createTask(state.dir, { runId: RUN_ID, item: '0-275' });
   assert.deepEqual(task, { version: 1, runId: RUN_ID, item: '0-275', branch: null, baseSha: null, phase: null,
-    round: 0, calls: [], status: 'running', reason: null, pr: null });
+    round: 0, calls: [], status: 'running', reason: null, pr: null, imageId: null });
   assert.deepEqual(await loadTask(state.dir, RUN_ID), task);
   assert.equal((await stat(join(state.dir, 'tasks'))).mode & 0o777, 0o700);
   assert.equal((await stat(join(state.dir, 'tasks', RUN_ID))).mode & 0o777, 0o700);
@@ -152,4 +152,18 @@ test('a task.json edited out of its schema is refused when it is loaded', async 
   await writeJsonAtomic(taskFile(state.dir), { ...task, status: 'done', baseSha: 'short' });
   await assert.rejects(loadTask(state.dir, RUN_ID),
     /is not a task's state: \/baseSha: must match .*; \/status: must be one of "running", "blocked", "stopped", "shipped"/);
+});
+
+test('#0-277: updateTask records the base and the image, and never what the runner sets', async (t) => {
+  const state = await makeStateDir();
+  t.after(state.remove);
+  const { updateTask } = await import('../src/state/tasks.mjs');
+  const task = await createTask(state.dir, { runId: RUN_ID });
+  const imageId = `sha256:${'e'.repeat(64)}`;
+  const updated = await updateTask(state.dir, task, { baseSha: 'a'.repeat(40), imageId });
+  assert.deepEqual(await loadTask(state.dir, RUN_ID), updated);
+  for (const field of ['version', 'runId', 'phase']) {
+    await assert.rejects(updateTask(state.dir, task, { [field]: 'x' }), TypeError);
+  }
+  await assert.rejects(updateTask(state.dir, task, { imageId: 'ubuntu:24.04' }), /imageId: must match/);
 });

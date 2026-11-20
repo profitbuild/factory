@@ -2,7 +2,11 @@
  * A task's state, $FACTORY_STATE_DIR/tasks/<runId>/task.json (incident-platform backlog #0-275 AC3, #0-261), and the
  * runner of its phases.
  *
- *   { "version": 1, "runId", "item", "branch", "baseSha", "phase", "round", "calls": [], "status", "reason", "pr" }
+ *   { "version": 1, "runId", "item", "branch", "baseSha", "phase", "round", "calls": [], "status", "reason", "pr",
+ *     "imageId" }
+ *
+ * `imageId` is the task image's ID (sha256:<64 hex>), recorded once `devcontainer up` has built it (incident-platform
+ * backlog #0-277 AC5): every container of the task runs from it.
  *
  * `phase` is the last phase completed. runPhases runs the phases after it, one at a time, and writes the task
  * (atomically, files.mjs) after each: a run killed between two phases resumes at the next one; a run killed inside a
@@ -67,7 +71,7 @@ export async function createTask(stateDir, { runId, item = null }) {
   await ensureOwnDirectory(join(tasksDir(stateDir), runId), { exclusive: true });
   return writeTask(stateDir, {
     version: 1, runId, item, branch: null, baseSha: null, phase: null, round: 0, calls: [], status: 'running',
-    reason: null, pr: null,
+    reason: null, pr: null, imageId: null,
   });
 }
 
@@ -123,6 +127,18 @@ export async function findTaskByBranch(stateDir, branch) {
     throw new StateError(`the task ${task.runId} on ${branch} is ${task.status}: there is nothing to resume`);
   }
   return task;
+}
+
+/**
+ * Writes the task with `changes`, which may not touch what the runner sets (the identity, the phase): the task's
+ * container records its base and its image this way (container/environment.mjs).
+ */
+export async function updateTask(stateDir, task, changes) {
+  const set = RUNNER_FIELDS.filter((field) => Object.hasOwn(changes, field));
+  if (set.length > 0) {
+    throw new TypeError(`updateTask: ${set.join(', ')} are the runner's to set`);
+  }
+  return writeTask(stateDir, { ...task, ...changes });
 }
 
 /** Ends the task as BLOCKED, with the reason. */

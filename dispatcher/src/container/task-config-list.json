@@ -1,0 +1,49 @@
+{
+  "$comment": "The closed list of a task configuration (incident-platform ADR-0062 point 4, backlog #0-277): what the dispatcher carries from a product's task configuration into the task container's, beyond the fields task-config.mjs carries by rule (build.dockerfile, build.context, remoteUser, postCreateCommand, postStartCommand). It is the dispatcher's, not a product's: a product cannot widen it. Widening it is a pull request to this repository, reviewed by the code owner, and a product gets it with the factory's next tag (its adapter's factoryVersion). An entry is generic: what a kind of product needs (Testcontainers, the Docker socket for it), never one product's name or setting (ADR-0055, ADR-0060). capAdd: the capabilities a configuration may add; runArgs: the only arguments of `docker run` it may give, each whole; containerEnv: the keys it may set, to literal values; features: by id with its major tag, as devcontainer-lock.json keys it, with the options and values it may give, and, for each digest a product's lockfile may pin, the image metadata the feature declares at that digest, value by value: the built image's devcontainer.metadata entry for the feature must equal it exactly, or the task is refused (a Dockerfile's LABEL or a poisoned build cache can write an entry under the feature's id). An entry's metadata is the fields devcontainer up copies from the feature's devcontainer-feature.json into the image's label (securityOpt, entrypoint, mounts, customizations, and init, privileged, capAdd and the lifecycle commands when the feature has them), taken from the feature's artifact at that digest, never from a measurement: docker-outside-of-docker 1.10.1's from devcontainer-feature.json in the layer sha256:86e5644893ee2b5e08d7897c93b8b47cc6fa4c14e9056c09c5b99d8a8b572101 of the OCI manifest sha256:698f5900fac471e046c6e9d4333fec88c0e8d952c713494fa0712dce80baeca0 (ghcr.io, read 2026-11-20; the trial of #0-282 on the VM read the same entry from a real label). Its customizations (a VS Code extension and a setting) do nothing for devcontainer up and are taken as declared; its Docker socket mount is accepted here, by name, as ADR-0057's boundary.",
+  "capAdd": ["NET_ADMIN", "NET_RAW"],
+  "runArgs": [
+    "--add-host=host.docker.internal:host-gateway"
+  ],
+  "containerEnv": ["TESTCONTAINERS_HOST_OVERRIDE", "TESTCONTAINERS_RYUK_DISABLED"],
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "options": {
+        "moby": [
+          false
+        ]
+      },
+      "digests": {
+        "sha256:698f5900fac471e046c6e9d4333fec88c0e8d952c713494fa0712dce80baeca0": {
+          "version": "1.10.1",
+          "metadata": {
+            "securityOpt": [
+              "label=disable"
+            ],
+            "entrypoint": "/usr/local/share/docker-init.sh",
+            "mounts": [
+              {
+                "source": "/var/run/docker.sock",
+                "target": "/var/run/docker-host.sock",
+                "type": "bind"
+              }
+            ],
+            "customizations": {
+              "vscode": {
+                "extensions": [
+                  "ms-azuretools.vscode-containers"
+                ],
+                "settings": {
+                  "github.copilot.chat.codeGeneration.instructions": [
+                    {
+                      "text": "This dev container includes the Docker CLI (`docker`) pre-installed and available on the `PATH` for running and managing containers using the Docker daemon on the host machine."
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
