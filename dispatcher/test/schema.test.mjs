@@ -78,12 +78,22 @@ test('the adapter\'s fields are checked: commands as argv, paths that stay in th
     ['profile', 'Spring Boot', /\/profile: must match/],
     ['factoryVersion', 'main', /\/factoryVersion: must match/],
     ['factoryVersion', 'v1.2', /\/factoryVersion: must match/],
-    ['taskImage', '', /\/taskImage: must have at least 1 character/],
+    ['taskImage', '', /\/taskImage: must match/],
+    // #0-277 AC5: the task configuration's path in the product, never an option, never leaving it, a .json.
+    ['taskImage', '-x.json', /\/taskImage: must match \^\(\?!-\)/],
+    ['taskImage', '--config=/etc/x.json', /\/taskImage: must match \^\(\?!-\)/],
+    ['taskImage', '../other/devcontainer.json', /\/taskImage: must match \^\(\?!\/\)/],
+    ['taskImage', '.devcontainer/../../x.json', /\/taskImage: must match \^\(\?!\/\)/],
+    ['taskImage', '/etc/devcontainer.json', /\/taskImage: must match \^\(\?!\/\)/],
+    ['taskImage', '.devcontainer/Dockerfile', /\/taskImage: must match \^\(\?!-\)/],
+    ['taskImage', '.devcontainer/task.json\n', /\/taskImage: must match/],
   ];
   for (const [path, value, pattern] of cases) {
     refused(withField(ADAPTER, path, value), pattern);
   }
   checkAdapter(withField(ADAPTER, 'trustedPaths', ['scripts/factory/', 'a..b/c']));
+  checkAdapter(withField(ADAPTER, 'taskImage', '.devcontainer/task.json'));
+  checkAdapter(withField(ADAPTER, 'taskImage', 'a-b/.devcontainer.json'));
   refused([], /^the adapter breaks its schema: \/: must be object$/);
 });
 

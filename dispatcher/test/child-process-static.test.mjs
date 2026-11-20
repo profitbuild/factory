@@ -76,8 +76,12 @@ test('AC7: what the rule allows passes, and what only looks like a call does not
     + "const re = /spawn\\(/; const t = `exec(${'x'})`;\n"), []);
 });
 
-/** Which module may start which program: git from run-git.mjs alone, as its variable `git` (GIT, /usr/bin/git). */
-const STARTS = { 'git/run-git.mjs': 'git', 'state/lock.mjs': 'flock' };
+/**
+ * Which module may start which program: git from run-git.mjs alone, as its variable `git` (GIT, /usr/bin/git); sudo
+ * from the container starter alone, as its variable `sudo` (SUDO, /usr/bin/sudo), and through it docker and the
+ * devcontainer CLI (#0-277 AC9).
+ */
+const STARTS = { 'git/run-git.mjs': 'git', 'state/lock.mjs': 'flock', 'container/run-container.mjs': 'sudo' };
 
 /** Where the calls of `source`, a module at `path` under src/, break that rule. */
 function wrongStarts(path, source) {
@@ -99,10 +103,82 @@ test('review round 1: git is started by src/git/run-git.mjs alone, and flock(1) 
   assert.notDeepEqual(wrongStarts('git/run-git.mjs', planted("spawn('sh', ['-c', 'git push'], { env: childEnv() });")), []);
   assert.notDeepEqual(wrongStarts('state/lock.mjs', planted("spawnSync('git', [], { env: childEnv() });")), []);
   assert.deepEqual(wrongStarts('git/run-git.mjs', planted('spawn(git, [...GIT_OVERRIDES], { env: childEnv() });')), []);
+  // #0-277 AC9: docker and devcontainer never but through the starter's sudo, whatever module tries.
+  for (const [path, code] of [
+    ['container/daemon.mjs', "spawn('/usr/bin/docker', ['ps'], { env: childEnv() });"],
+    ['container/task-container.mjs', "execFile('devcontainer', ['up'], { env: childEnv() });"],
+    ['container/run-container.mjs', "spawn('/usr/bin/docker', ['ps'], { env: childEnv() });"],
+    ['container/run-container.mjs', "spawn(docker, ['ps'], { env: childEnv() });"],
+    ['cli.mjs', "spawnSync('sudo', ['-u', 'factory', 'docker'], { env: childEnv() });"],
+  ]) {
+    assert.notDeepEqual(wrongStarts(path, planted(code)), [], `${path}: ${code}`);
+  }
+  assert.deepEqual(wrongStarts('container/run-container.mjs',
+    planted('spawn(sudo, [...SUDO_OPTIONS, PROGRAMS[program], ...args], { env: childEnv() });')), []);
 });
 
-test('review rounds 2 and 3: no module of src/ or bin/ gives a test\'s option (git, gitBase, hooks, maxOutput, '
-  + 'lstatOf, uid)', async () => {
+/** The full paths of sudo, docker and the devcontainer CLI: named by the starter alone. */
+const PROGRAM_PATHS = ['/usr/bin/sudo', '/usr/bin/docker', '/usr/local/bin/devcontainer'];
+
+test('#0-277 AC9: no module of src/ but the starter names sudo, docker or the devcontainer CLI by its path', async () => {
+  const found = [];
+  for (const file of await modules()) {
+    const path = file.slice(SRC.length);
+    const source = await readFile(file, 'utf8');
+    for (const program of PROGRAM_PATHS.filter((p) => source.includes(p))) {
+      if (path !== 'container/run-container.mjs') {
+        found.push(`${path} names ${program}`);
+      }
+    }
+  }
+  assert.deepEqual(found, []);
+  const starter = await readFile(join(SRC, 'container', 'run-container.mjs'), 'utf8');
+  assert.ok(PROGRAM_PATHS.every((p) => starter.includes(`'${p}'`)), 'the starter names all three');
+});
+
+/**
+ * #0-277 AC10: the dispatcher writes nothing in a directory of factory's. A module that names factory's paths (it
+ * imports TASKS_ROOT, HELPER_TASKS or taskPaths from container/paths.mjs) touches no file: it imports neither node:fs
+ * nor node:fs/promises, nor a module of the dispatcher's that writes files (state/files.mjs); what it puts there goes
+ * through a helper's stdin (work-dir.mjs).
+ */
+function writesWhereFactoryIs(path, source) {
+  const imports = [...source.matchAll(/^import\s[\s\S]*?from\s+'([^']+)';$/gm)].map((m) => [m[0], m[1]]);
+  const namesPaths = imports.some(([text, from]) => /(?:^|\/)paths\.mjs$/.test(from)
+    && /\b(?:TASKS_ROOT|HELPER_TASKS|taskPaths)\b/.test(text));
+  const touchesFiles = imports.some(([, from]) => /^(?:node:)?fs(?:\/promises)?$/.test(from)
+    || /(?:^|\/)state\/files\.mjs$/.test(from) || /(?:^|\/)files\.mjs$/.test(from))
+    || /\bimport\s*\(\s*['"](?:node:)?fs(?:\/promises)?['"]/.test(source);
+  return namesPaths && touchesFiles ? [`${path} names factory's paths and touches files`] : [];
+}
+
+test('#0-277 AC10: no module of src/ both names factory\'s paths and touches a file', async () => {
+  const found = [];
+  let naming = 0;
+  for (const file of await modules()) {
+    const source = await readFile(file, 'utf8');
+    if (/\b(?:TASKS_ROOT|taskPaths)\b/.test(source)) {
+      naming += 1;
+    }
+    found.push(...writesWhereFactoryIs(file.slice(SRC.length), source));
+  }
+  assert.deepEqual(found, []);
+  assert.ok(naming >= 4, 'the scan saw the modules that name the paths');
+  const paths = "import { taskPaths } from './paths.mjs';\n";
+  for (const planted of [
+    `${paths}import { writeFile } from 'node:fs/promises';\n`,
+    `${paths}import fs from 'node:fs';\n`,
+    "import { TASKS_ROOT } from '../container/paths.mjs';\nimport { writeJsonAtomic } from '../state/files.mjs';\n",
+    `${paths}const fs = await import('node:fs');\n`,
+  ]) {
+    assert.notDeepEqual(writesWhereFactoryIs('container/x.mjs', planted), [], planted);
+  }
+  assert.deepEqual(writesWhereFactoryIs('container/x.mjs', "import { M2_VOLUME } from './paths.mjs';\n"
+    + "import { open } from 'node:fs/promises';\n"), []);
+});
+
+test('review rounds 2 and 3, #0-277: no module of src/ or bin/ gives a test\'s option (git, gitBase, hooks, maxOutput, '
+  + 'lstatOf, uid, sudo)', async () => {
   const found = [];
   for (const file of await modules()) {
     found.push(...testOnlyOptions(file.slice(SRC.length), await readFile(file, 'utf8')));
@@ -132,6 +208,13 @@ test('review rounds 2 and 3: no module of src/ or bin/ gives a test\'s option (g
     ['cli.mjs', 'pushTask({ stateDir, uid: 0 });'],
     ['cli.mjs', 'mainObjects(repoDir, { uid });'],
     ['github/push.mjs', "const git = '/tmp/git';\nrunGit({ cwd, args, git });"],
+    ['container/daemon.mjs', "mustRun({ program: 'docker', args, sudo: '/tmp/sudo' });"],
+    ['cli.mjs', "sweepDaemon({ runId, helperImage, sudo: fake });"],
+    ['container/environment.mjs', "const sudo = '/tmp/sudo';\nupContainer({ runId, carried, sudo });"],
+    ['github/push.mjs', 'runContainerCommand({ program, args, sudo });'],
+    ['bin/check-app.mjs', "main(['sweep'], { sudo: '/tmp/x' });"],
+    ['cli.mjs', 'pushTask({ stateDir, gitBase });'],
+    ['container/daemon.mjs', 'pushTask({ stateDir, hooks });'],
     ['git/bundle.mjs', "let { git } = other;\nrunGit({ cwd, args, git });"],
   ]) {
     assert.notDeepEqual(testOnlyOptions(path, `${code}\n`), [], `${path}: ${code}`);

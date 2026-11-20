@@ -59,9 +59,9 @@
       "items": { "$ref": "#/$defs/path" }
     },
     "taskImage": {
-      "description": "The task container's image: the product's devcontainer.",
-      "type": "string",
-      "minLength": 1
+      "description": "The product's task configuration, the devcontainer configuration written for the task container (incident-platform ADR-0062 points 4 and 6, backlog #0-277 AC5): a path in the product that never leaves it, not starting with - (it would read as an option), a .json. The dispatcher reads it from the base, checks it against its closed list, and builds the task image from it.",
+      "$ref": "#/$defs/path",
+      "pattern": "^(?!-)[\\s\\S]*\\.json$"
     },
     "profile": {
       "description": "The factory's profile for the product's stack (e.g. spring-boot).",

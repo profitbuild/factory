@@ -10,6 +10,7 @@ import { ConfigError, readSettings, refuseSecretShaped } from '../src/config/set
 const VALID = {
   FACTORY_STATE_DIR: '/srv/factory/state', FACTORY_REPO_DIR: '/srv/factory/product', FACTORY_MAX_BLOCKED: '3',
   FACTORY_AUDIT_EVERY: '10', FACTORY_MAX_MERGES_PER_DAY: '5',
+  FACTORY_HELPER_IMAGE: `buildpack-deps:noble-scm@sha256:${'0f'.repeat(32)}`,
 };
 const NAMES = Object.keys(VALID);
 
@@ -28,8 +29,20 @@ function refused(read, pattern, values = []) {
 test('the settings are read from the env object; other variables are left alone', () => {
   assert.deepEqual(readFactoryEnv({ ...VALID, PATH: '/bin', BUILDER_APP_ID: '1' }), {
     stateDir: '/srv/factory/state', repoDir: '/srv/factory/product', maxBlocked: 3, auditEvery: 10,
-    maxMergesPerDay: 5,
+    maxMergesPerDay: 5, helperImage: VALID.FACTORY_HELPER_IMAGE,
   });
+});
+
+test('#0-277: FACTORY_HELPER_IMAGE is an image pinned by its digest; a tag alone, or a malformed one, is refused', () => {
+  const digest = `sha256:${'0f'.repeat(32)}`;
+  for (const value of [`buildpack-deps@${digest}`, `docker.io/library/buildpack-deps:noble-scm@${digest}`]) {
+    assert.equal(readFactoryEnv({ ...VALID, FACTORY_HELPER_IMAGE: value }).helperImage, value);
+  }
+  for (const value of ['buildpack-deps:noble-scm', `buildpack-deps:noble-scm@sha256:${'0f'.repeat(31)}`,
+    `-x@${digest}`, `Buildpack@${digest}`, `buildpack-deps:noble-scm@${digest}\n`, `buildpack-deps @${digest}`]) {
+    refused(() => readFactoryEnv({ ...VALID, FACTORY_HELPER_IMAGE: value }),
+      /^FACTORY_HELPER_IMAGE must be an image pinned by its digest, <name>\[:tag\]@sha256:<64 hex>$/, [value]);
+  }
 });
 
 test('AC1: each setting is required, with no default (ADR-0052 point 5)', () => {

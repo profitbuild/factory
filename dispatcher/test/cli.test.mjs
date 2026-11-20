@@ -1,16 +1,22 @@
-// `node dispatcher/src/cli.mjs run` end to end, in a child process with the environment it is given (incident-platform
-// backlog #0-275): v0's run sets up the adapter and the state and stops (its phases are 4.4's); every refusal is a
-// line on stderr and the exit code 1, naming the variable and never its value (AC1, AC7); a second run while one holds
-// the lock is refused, and a killed run's lock is free again (AC2); the breaker refuses a run (tripped, or unreadable).
+// `node dispatcher/src/cli.mjs` end to end, in a child process with the environment it is given (incident-platform
+// backlog #0-275): every refusal is a line on stderr and the exit code 1, naming the variable and never its value
+// (AC1, AC7); a second run while one holds the lock is refused, and a killed run's lock is free again (AC2); the
+// breaker refuses a run (tripped, or unreadable). A run that gets as far as factory's daemon (#0-277) runs in this
+// process, through main(), with the fake daemon as its sudo (CI has no factory and no sudo rule): v0's run sets up
+// the adapter, the state, the daemon and the task container, and stops (its phases are 4.4's); `sweep` is the sweep
+// alone, refused while a rollback runs, but with --force.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { main } from '../src/cli.mjs';
 import { writeJsonAtomic } from '../src/state/files.mjs';
 import { kill, run, startUntil } from '../testing/children.mjs';
+import { makeFakeDaemon, plantedContainer } from '../testing/fake-daemon.mjs';
 import { makeStateDir, validEnv } from '../testing/state-dir.mjs';
+import { CONFIG_PATH, makeTaskProduct } from '../testing/task-product.mjs';
 
 const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 const HOLD_LOCK = fileURLToPath(new URL('../testing/hold-lock.mjs', import.meta.url));
@@ -26,6 +32,22 @@ async function setUp(t) {
 
 const cli = (args, env) => run(CLI, args, { env });
 
+/** A state, a product whose main holds a task configuration, its adapter, and the fake daemon, for main(). */
+async function setUpDaemon(t, initial) {
+  const state = await makeStateDir();
+  const scratch = await makeStateDir();
+  t.after(state.remove);
+  t.after(scratch.remove);
+  const product = await makeTaskProduct(scratch.dir);
+  const adapter = join(scratch.dir, 'adapter.json');
+  await writeFile(adapter, JSON.stringify({ ...JSON.parse(await readFile(ADAPTER, 'utf8')), taskImage: CONFIG_PATH }));
+  const fake = makeFakeDaemon(scratch.dir, initial);
+  const env = validEnv(state.dir, product.repoDir);
+  const lines = [];
+  const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) }, sudo: fake.sudo });
+  return { stateDir: state.dir, env, product, adapter, fake, call, lines };
+}
+
 function refusedWith({ code, stdout, stderr }, pattern, values = []) {
   assert.equal(code, 1, stderr);
   assert.equal(stdout, '');
@@ -35,11 +57,16 @@ function refusedWith({ code, stdout, stderr }, pattern, values = []) {
   }
 }
 
-test('run sets up the state and a new task, prints it, and stops with no phase run (v0)', async (t) => {
-  const { stateDir, env } = await setUp(t);
-  const result = await cli(['run', '--item', '0-275', '--adapter', ADAPTER], env);
-  assert.equal(result.code, 0, result.stderr);
-  const printed = JSON.parse(result.stdout);
+test('run sets up the state, the daemon, a new task and its container, prints it, and stops with no phase run (v0)',
+  async (t) => {
+  const { stateDir, adapter, fake, call, lines, product } = await setUpDaemon(t);
+  const left = await call(['run', '--item', '0-275', '--adapter', adapter]);
+  assert.equal(left.status, 'running', left.reason);
+  assert.equal(left.baseSha, product.base);
+  assert.match(left.imageId, /^sha256:[0-9a-f]{64}$/);
+  assert.ok(fake.calls().some((c) => c.program === 'devcontainer' && c.args[0] === 'up'));
+  assert.deepEqual(fake.read().containers, [], 'the daemon swept at the end');
+  const printed = JSON.parse(lines.join(''));
   assert.match(printed.runId, /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$/);
   assert.deepEqual({ ...printed, runId: undefined }, { runId: undefined, item: '0-275', branch: null, phase: null,
     status: 'running', reason: null });
@@ -47,18 +74,20 @@ test('run sets up the state and a new task, prints it, and stops with no phase r
   assert.deepEqual(await readdir(join(stateDir, 'tasks')), [printed.runId]);
   const task = JSON.parse(await readFile(join(stateDir, 'tasks', printed.runId, 'task.json'), 'utf8'));
   assert.equal(task.item, '0-275');
-  const again = await cli(['run', '--adapter', ADAPTER], env);
-  assert.equal(again.code, 0, `the lock was released: ${again.stderr}`);
-  assert.equal(JSON.parse(again.stdout).item, null, 'without --item, the pick (4.4) fills the item');
+  const again = await call(['run', '--adapter', adapter]);
+  assert.equal(again.item, null, 'the lock was released; without --item, the pick (4.4) fills the item');
 });
 
 test('the command line is checked before anything else', async (t) => {
   const { stateDir, env } = await setUp(t);
-  const usage = /^dispatcher: .*usage: cli\.mjs run \[--item 0-N \| --resume <branch>\] --adapter <path>\n$/;
+  const usage = /^dispatcher: .*usage: cli\.mjs run \[--item 0-N \| --resume <branch>\] --adapter <path> \| cli\.mjs sweep \[--force\]\n$/;
   refusedWith(await cli([], env), usage);
   refusedWith(await cli(['go', '--adapter', ADAPTER], env), usage);
   refusedWith(await cli(['run'], env), /--adapter is required/);
-  refusedWith(await cli(['run', '--adapter', ADAPTER, '--force'], env), /Unknown option '--force'/);
+  refusedWith(await cli(['run', '--adapter', ADAPTER, '--forse'], env), /Unknown option '--forse'/);
+  refusedWith(await cli(['run', '--adapter', ADAPTER, '--force'], env), /--force is sweep's/);
+  refusedWith(await cli(['sweep', '--adapter', ADAPTER], env), /sweep takes --force alone/);
+  refusedWith(await cli(['sweep', '--item', '0-1'], env), /sweep takes --force alone/);
   refusedWith(await cli(['run', '--adapter', ADAPTER, '--item', '0-1', '--resume', 'factory/x'], env),
     /--item and --resume exclude each other/);
   refusedWith(await cli(['run', '--adapter', ADAPTER, '--item', '275'], env), /--item must be a backlog item, 0-N/);
@@ -115,17 +144,17 @@ test('FACTORY_STATE_DIR open to others is refused, and left as it is', async (t)
 
 test('AC2: a second run while one holds the lock is refused; once that run is killed, a run goes ahead',
   async (t) => {
-    const { stateDir, env } = await setUp(t);
+    const { stateDir, env, adapter, call } = await setUpDaemon(t);
     const holder = await startUntil(HOLD_LOCK, [stateDir], 'locked');
     try {
-      refusedWith(await cli(['run', '--adapter', ADAPTER], env),
+      refusedWith(await cli(['run', '--adapter', adapter], env),
         /^dispatcher: another run holds the dispatcher's lock \(.*\): one task at a time in v0\n$/);
+      refusedWith(await cli(['sweep', '--force'], env), /^dispatcher: another run holds the dispatcher's lock/);
       assert.deepEqual(await readdir(stateDir), ['lock'], 'the refused run wrote no state');
     } finally {
       await kill(holder);
     }
-    const result = await cli(['run', '--adapter', ADAPTER], env);
-    assert.equal(result.code, 0, result.stderr);
+    assert.equal((await call(['run', '--adapter', adapter])).status, 'running');
   });
 
 test('an adapter that breaks its schema is refused, and no task is made', async (t) => {
@@ -153,15 +182,46 @@ test('the breaker tripped refuses the run; state.json unreadable tells the owner
   assert.deepEqual((await readdir(stateDir)).sort(), ['lock', 'state.json'], 'no task is made');
 });
 
-test('--resume <branch> takes the running task on it; with no phase left, it is printed as it was', async (t) => {
-  const { stateDir, env } = await setUp(t);
-  const first = JSON.parse((await cli(['run', '--item', '0-9', '--adapter', ADAPTER], env)).stdout);
+test('--resume <branch> takes the running task on it, in a container of the image it recorded', async (t) => {
+  const { stateDir, adapter, fake, call } = await setUpDaemon(t);
+  const first = await call(['run', '--item', '0-9', '--adapter', adapter]);
   const path = join(stateDir, 'tasks', first.runId, 'task.json');
   const task = JSON.parse(await readFile(path, 'utf8'));
   await writeJsonAtomic(path, { ...task, branch: 'factory/0-9-resumed' });
-  const result = await cli(['run', '--resume', 'factory/0-9-resumed', '--adapter', ADAPTER], env);
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).runId, first.runId);
-  refusedWith(await cli(['run', '--resume', 'factory/none', '--adapter', ADAPTER], env),
+  const resumed = await call(['run', '--resume', 'factory/0-9-resumed', '--adapter', adapter]);
+  assert.equal(resumed.runId, first.runId);
+  assert.equal(resumed.status, 'running', resumed.reason);
+  assert.equal(resumed.imageId, first.imageId);
+  const ups = fake.calls().filter((c) => c.program === 'devcontainer');
+  assert.equal(ups.length, 2);
+  await assert.rejects(call(['run', '--resume', 'factory/none', '--adapter', adapter]),
     /no task is on the branch factory\/none/);
+});
+
+test('#0-277: sweep removes a killed run\'s leftovers; it refuses while a rollback runs, naming it, and --force sweeps '
+  + 'that too', async (t) => {
+  const rollback = plantedContainer({ name: 'planted-rollback', labels: { 'factory.rollback': '1' } });
+  const { call, lines, fake } = await setUpDaemon(t, { containers: [rollback, plantedContainer({ name: 'leftover' })],
+    volumes: [{ name: 'incident-platform-gh', labels: {} }] });
+  await assert.rejects(call(['sweep']), (error) => {
+    assert.match(error.message, /^the sweep is refused: a running container carries factory\.rollback: planted-rollback \(/);
+    assert.match(error.message, /clear it with `node \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep --force`$/);
+    return true;
+  });
+  assert.equal(fake.read().containers.length, 2, 'nothing removed');
+  const removed = await call(['sweep', '--force']);
+  assert.deepEqual(JSON.parse(lines.at(-1)), { swept: removed });
+  assert.deepEqual([...removed.containers].sort(), ['leftover', 'planted-rollback']);
+  assert.deepEqual(removed.volumes, ['incident-platform-gh']);
+  assert.deepEqual(fake.read().containers, []);
+  assert.deepEqual((await call(['sweep'])).containers, [], 'an empty daemon sweeps to nothing');
+});
+
+test('#0-277: a run refused by a running rollback makes no task and removes nothing', async (t) => {
+  const { stateDir, adapter, call, fake } = await setUpDaemon(t, { containers: [plantedContainer({ name: 'rollback',
+    labels: { 'factory.rollback': '1' } })] });
+  await assert.rejects(call(['run', '--item', '0-1', '--adapter', adapter]),
+    /the run is refused: a running container carries factory\.rollback: rollback/);
+  assert.deepEqual((await readdir(stateDir)).sort(), ['lock', 'state.json']);
+  assert.equal(fake.read().containers.length, 1);
 });
