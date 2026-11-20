@@ -32,7 +32,8 @@ A change is reviewed on a draft pull request:
 5. **Approval and merge.** The owner approves as the code owner, typing `gh pr review --approve` themselves, since
    the denies of `.claude/settings.json` block it for every session: with `!` in their session on the host's clone,
    or in a plain shell on the host (not in the container, whose `gh` holds the app's token). Then they merge with a
-   plain merge, without `--admin`, once the required checks (`Test`, `Lint Workflows`, `Secret Scan`) are green.
+   plain merge, without `--admin`, once the required checks (`Test`, `Test (git 2.43)`, `Lint Workflows`,
+   `Secret Scan`) are green.
    The ruleset of `main` requires the approval of the last push, so a push after the approval needs a new one. The
    admin's bypass is only for the owner's own pull requests, which have no one else to approve them.
 

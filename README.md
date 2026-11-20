@@ -18,7 +18,7 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 | Path | What |
 |---|---|
 | `dispatcher/` | The dispatcher: Node (`.node-version`), built-in modules only, no package from npm (ADR-0060 D2). Its tests: `cd dispatcher && node --test` |
-| `.github/workflows/ci.yml` | CI: the dispatcher's tests (`Test`), the workflow linters at incident-platform's pins (`Lint Workflows`), and the secret scan of every commit a pull request or a push adds (`Secret Scan`, betterleaks) |
+| `.github/workflows/ci.yml` | CI: the dispatcher's tests (`Test`); the same whole suite on git 2.43, the build VM's, in an `ubuntu:24.04` container, run as an ordinary user, not root (`Test (git 2.43)`); the workflow linters at incident-platform's pins (`Lint Workflows`); and the secret scan of every commit a pull request or a push adds (`Secret Scan`, betterleaks) |
 | `.github/scripts/install-pinned-tool.sh` | Installs a CI tool pinned by tag and SHA-256; a copy of incident-platform's until stage T makes one template |
 | `.github/scripts/secret-scan.sh`, `test-secret-scan.sh` | The secret scan and its cases; copies of incident-platform's, which its CI keeps equal to the originals but for their notice |
 | `.devcontainer/` | Where a session writes this repository's code, as the app `profitbuild-factory-dev` (see "Changes") |
@@ -38,8 +38,8 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 ## Changes
 
 `main` changes only by pull requests the owner merges: the ruleset requires a pull request and the code owner's
-review, and refuses force pushes and deletion; its required checks are the CI jobs `Test`, `Lint Workflows` and
-`Secret Scan`; a tag can be neither moved nor deleted, since products load the factory at one, and only an admin
+review, and refuses force pushes and deletion; its required checks are the CI jobs `Test`, `Test (git 2.43)`,
+`Lint Workflows` and `Secret Scan`; a tag can be neither moved nor deleted, since products load the factory at one, and only an admin
 creates one (today the owner alone).
 
 The code is written by a session holding the token of the GitHub App `profitbuild-factory-dev`, and no other GitHub
