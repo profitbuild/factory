@@ -79,10 +79,16 @@ jobs:
       - name: Set up Node
         uses: ./.github/actions/setup-node
 
-      # The whole suite, not a list of files: a test that runs git, now or later, runs on the VM's git too.
+      # The whole suite, not a list of files: a test that runs git, now or later, runs on the VM's git too. As a user
+      # that is not root, as the dispatcher runs on the VM (`dispatcher`, uid 1001): root ignores a directory's mode,
+      # so a test that makes a file impossible to delete would pass for the wrong reason, or fail.
       - name: The dispatcher's tests on git 2.43
-        working-directory: dispatcher
-        run: node --test
+        run: |
+          set -euo pipefail
+          useradd --create-home --uid 1001 tester
+          chown -R tester: "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE/dispatcher"
+          runuser -u tester -- env PATH="$PATH" HOME=/home/tester node --test
 
   lint:
     name: Lint Workflows
