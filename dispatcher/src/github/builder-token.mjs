@@ -47,7 +47,8 @@ export async function mintBuilderToken({
   env, baseUrl = GITHUB_API, fetchImpl, timeoutMs, uid, now = Date.now, report,
 }) {
   const minted = await mintCheckedToken({
-    appId: env.appId, installationId: env.installationId, keyPath: env.keyPath, ...BUILDER_REPOSITORY,
+    appId: env.appId, installationId: env.installationId, installationIdFrom: 'BUILDER_APP_INSTALLATION_ID',
+    keyPath: env.keyPath, ...BUILDER_REPOSITORY,
     permissions: BUILDER_PERMISSIONS, baseUrl, fetchImpl, timeoutMs, uid, report,
   });
   const expiresAtMs = Date.parse(minted.expiresAt);

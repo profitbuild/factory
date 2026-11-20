@@ -52,6 +52,13 @@ The session runs in `.devcontainer/`, on the owner's Mac:
 1. On the host, from a clone on `main`: `node dispatcher/bin/dev-token.mjs --watch`. It reads the app's key
    (`~/.config/profitbuild-factory-dev/app.pem`, mode 600), checks the installation and the token against GitHub,
    and keeps `~/.local/state/profitbuild-factory-dev/token` fresh; Ctrl-C revokes the token and deletes the file.
+   Its checks are builder-app's (`dispatcher/src/github/checked-token.mjs`, incident-platform backlog #0-273): the
+   key must be a regular file of the user running it, not a symlink nor a FIFO, readable by no one else; the
+   installation on this repository must be the app's (`app_id`), have the id `INSTALLATION_ID` of
+   `dev-token.mjs`, and hold exactly the three permissions; the token must reach this repository alone and hold the
+   same three. Installing the app again gives it a new installation id: dev-token then refuses every token until
+   `INSTALLATION_ID` is changed (or `--installation-id` names the new one), on purpose. After a change to
+   dev-token or to the code it imports, `git pull` the host's clone: the host runs it from there.
 2. `devcontainer up --workspace-folder .`, then `devcontainer exec --workspace-folder . bash`: the devcontainer CLI,
    not VS Code's "Reopen in Container", which forwards the host's git credential helper (the owner's admin token) and
    SSH agent into the container (`credential-check.sh` refuses such a container loudly; it is a tripwire, not a

@@ -152,7 +152,8 @@ export async function mint(opts, fetchImpl) {
     baseUrl: opts.api, jwt, owner: opts.owner, repo: opts.repo, fetchImpl,
   });
   checkInstallation(installation, {
-    appId: opts.appId, installationId: opts.installationId, permissions: EXPECTED_PERMISSIONS, repository,
+    appId: opts.appId, installationId: opts.installationId, installationIdFrom: 'INSTALLATION_ID / --installation-id',
+    permissions: EXPECTED_PERMISSIONS, repository,
   });
   const answer = await createInstallationToken({
     baseUrl: opts.api, jwt, installationId: opts.installationId, permissions: { ...EXPECTED_PERMISSIONS }, fetchImpl,

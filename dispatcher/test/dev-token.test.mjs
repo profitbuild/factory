@@ -356,7 +356,9 @@ test('an installation other than INSTALLATION_ID (the app installed again) is re
     state.installationId = INSTALLATION_ID + 1;
     const { code, stderr } = await exec();
     assert.equal(code, 1);
-    assert.match(stderr, new RegExp(`is ${INSTALLATION_ID + 1}, not ${INSTALLATION_ID}`));
+    assert.match(stderr,
+      new RegExp(`is ${INSTALLATION_ID + 1}, not ${INSTALLATION_ID} as INSTALLATION_ID / --installation-id says`));
+    assert.doesNotMatch(stderr, /BUILDER_APP/, 'builder-app\'s variable is not named to the dev app\'s owner');
     assert.equal(requests().some((r) => r.method === 'POST'), false);
     await assert.rejects(stat(out), { code: 'ENOENT' });
   });
