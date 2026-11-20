@@ -10,9 +10,11 @@
  *                                                SIGTERM or SIGHUP (the terminal closed) waits for a token being
  *                                                minted, then revokes the current one and deletes the file
  *
- * Before writing a token it checks what GitHub says, and refuses otherwise:
- * - the key file is readable by its owner only;
- * - the installation holds exactly Contents write, Pull requests write and Metadata read;
+ * Before writing a token it checks what GitHub says, and refuses otherwise, with the checks builder-app's token passes
+ * (src/github/checked-token.mjs and url-policy.mjs, incident-platform backlog #0-273), given the dev app's values:
+ * - the key is a regular file of this process's user (not a symlink, not a FIFO), readable by its owner only;
+ * - the installation on profitbuild/factory is INSTALLATION_ID, of the app APP_ID, and holds exactly Contents write,
+ *   Pull requests write and Metadata read;
  * - the token reaches exactly one repository, profitbuild/factory (the installation's scope, proven on every token
  *   rather than once by eye: a token is not narrowed to the repository for that reason, since a narrowed one would
  *   always list one);
@@ -28,27 +30,34 @@
  * before a refresh; the tests shorten it.
  */
 import { realpathSync } from 'node:fs';
-import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isDeepStrictEqual, parseArgs } from 'node:util';
+import { parseArgs } from 'node:util';
 
 import {
   GITHUB_API, createAppJwt, createInstallationToken, findRepositoryInstallation, listInstallationRepositories,
   revokeInstallationToken,
 } from '../src/github/app-token.mjs';
+import {
+  RefusedError, checkInstallation, checkTokenPermissions, checkTokenRepositories, readAppKey,
+} from '../src/github/checked-token.mjs';
+import { requireHttpsOrLoopback } from '../src/github/url-policy.mjs';
 
 /** The app `profitbuild-factory-dev` (an id, not a secret). */
 const APP_ID = 5822112;
+/**
+ * The app's installation on profitbuild/factory (an id, not a secret; read from GET /orgs/profitbuild/installations on
+ * 2026-11-20). Should the app be installed again, its installation gets another id, and every token is refused until
+ * this constant (or --installation-id) names the new one: fail-closed, on purpose.
+ */
+const INSTALLATION_ID = 183439507;
 /** What the app holds, and the only thing its token may hold (ADR-0060 D5 as amended). */
 export const EXPECTED_PERMISSIONS = Object.freeze({ contents: 'write', metadata: 'read', pull_requests: 'write' });
 
 const REFRESH_BEFORE_EXPIRY_MS = 10 * 60 * 1000;
 const DEFAULT_RETRY_SECONDS = 60;
-
-/** A check against GitHub's answers failed: no token may stand on it (as opposed to GitHub not being reached). */
-export class RefusedError extends Error {}
 
 const log = (message) => process.stderr.write(`dev-token: ${message}\n`);
 // A terminal that hung up (SIGHUP) makes a write to stderr fail; unhandled, that error would end the process before
@@ -58,16 +67,6 @@ process.stderr.on('error', () => {});
 /** When the next token is minted: 10 minutes before `expiresAt`, and never sooner than `floorMs` from now. */
 export function refreshDelayMs(expiresAt, now = Date.now(), floorMs = DEFAULT_RETRY_SECONDS * 1000) {
   return Math.max(new Date(expiresAt).getTime() - REFRESH_BEFORE_EXPIRY_MS - now, floorMs);
-}
-
-/** HTTPS, or plain HTTP to a loopback address (the tests' fake GitHub); anything else would get the app's JWT. */
-function checkApi(api) {
-  const url = new URL(api);
-  const loopback = ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
-    throw new Error(`--api must be an https:// URL, not ${url.protocol}//${url.host}`);
-  }
-  return api;
 }
 
 /** The real path of `path`, or of its nearest existing ancestor with the rest appended (a directory not made yet). */
@@ -82,7 +81,14 @@ async function realPathOf(path) {
   }
 }
 
-const sortedEntries = (permissions) => Object.fromEntries(Object.entries(permissions ?? {}).sort());
+/** The option `name` of `values`, as a positive integer; throws otherwise. */
+function positiveInteger(values, name) {
+  const value = Number(values[name]);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`--${name} must be a positive integer, not ${values[name]}`);
+  }
+  return value;
+}
 
 async function options(argv) {
   const { values } = parseArgs({
@@ -90,6 +96,7 @@ async function options(argv) {
     options: {
       watch: { type: 'boolean', default: false },
       'app-id': { type: 'string', default: String(APP_ID) },
+      'installation-id': { type: 'string', default: String(INSTALLATION_ID) },
       owner: { type: 'string', default: 'profitbuild' },
       repo: { type: 'string', default: 'factory' },
       key: { type: 'string', default: join(homedir(), '.config', 'profitbuild-factory-dev', 'app.pem') },
@@ -100,30 +107,25 @@ async function options(argv) {
     strict: true,
     allowPositionals: false,
   });
-  const appId = Number(values['app-id']);
-  if (!Number.isInteger(appId) || appId <= 0) {
-    throw new Error(`--app-id must be a positive integer, not ${values['app-id']}`);
-  }
+  const appId = positiveInteger(values, 'app-id');
+  const installationId = positiveInteger(values, 'installation-id');
   const retrySeconds = Number(values['retry-seconds']);
   if (!(retrySeconds > 0)) {
     throw new Error(`--retry-seconds must be a positive number, not ${values['retry-seconds']}`);
   }
-  checkApi(values.api);
-  const key = await realPathOf(resolve(values.key));
+  requireHttpsOrLoopback(values.api, '--api');
+  // The key is read at the path given, not at its real path: readAppKey's lstat must see a symlink to refuse it. The
+  // real path serves only the check that <out> does not hold the key.
+  const key = resolve(values.key);
+  const keyReal = await realPathOf(key);
   const out = await realPathOf(resolve(values.out));
-  const fromOut = relative(out, dirname(key));
+  const fromOut = relative(out, dirname(keyReal));
   if (fromOut === '' || (!fromOut.startsWith('..') && !isAbsolute(fromOut))) {
-    throw new Error(`--out ${out} holds the key ${key}, and it is mounted into the container: choose another directory`);
+    throw new Error(`--out ${out} holds the key ${keyReal}, and it is mounted into the container: `
+      + 'choose another directory');
   }
-  return { ...values, appId, key, out, retryMs: retrySeconds * 1000 };
-}
-
-async function readKey(path) {
-  const { mode } = await stat(path);
-  if ((mode & 0o077) !== 0) {
-    throw new RefusedError(`the key ${path} is readable by others (mode ${(mode & 0o777).toString(8)}): chmod 600 it`);
-  }
-  return readFile(path, 'utf8');
+  // No uid, from an option or the environment: readAppKey then requires the key to be this process's user's own.
+  return { ...values, appId, installationId, key, out, retryMs: retrySeconds * 1000 };
 }
 
 async function writeToken(out, token) {
@@ -134,31 +136,37 @@ async function writeToken(out, token) {
   await rename(temporary, join(out, 'token'));
 }
 
-/** One token: checked against GitHub's answers as the header says, then written. Returns it for the watch loop. */
+/**
+ * One token: checked against GitHub's answers as the header says, then written. Returns it for the watch loop.
+ *
+ * The checks are checked-token.mjs's, called one by one rather than through mintCheckedToken, which narrows its token
+ * to the repository: this one is not narrowed, on purpose (the header says why). `opts.uid`, the key's owner required,
+ * is set by no option of the command line and by no environment variable, only by a test calling mint; unset, it is
+ * this process's user.
+ */
 export async function mint(opts, fetchImpl) {
-  const privateKey = await readKey(opts.key);
+  const repository = `${opts.owner}/${opts.repo}`;
+  const privateKey = await readAppKey(opts.key, { uid: opts.uid });
   const jwt = createAppJwt({ appId: opts.appId, privateKey });
   const installation = await findRepositoryInstallation({
     baseUrl: opts.api, jwt, owner: opts.owner, repo: opts.repo, fetchImpl,
   });
-  if (!isDeepStrictEqual(sortedEntries(installation.permissions), EXPECTED_PERMISSIONS)) {
-    throw new RefusedError(`the installation holds ${JSON.stringify(sortedEntries(installation.permissions))}, `
-      + `not exactly ${JSON.stringify(EXPECTED_PERMISSIONS)}: no token written`);
-  }
+  checkInstallation(installation, {
+    appId: opts.appId, installationId: opts.installationId, permissions: EXPECTED_PERMISSIONS, repository,
+  });
   const answer = await createInstallationToken({
-    baseUrl: opts.api, jwt, installationId: installation.id, permissions: { ...EXPECTED_PERMISSIONS }, fetchImpl,
+    baseUrl: opts.api, jwt, installationId: opts.installationId, permissions: { ...EXPECTED_PERMISSIONS }, fetchImpl,
   });
   const { token } = answer;
   try {
     const repositories = await listInstallationRepositories({ baseUrl: opts.api, token, fetchImpl });
-    const expected = [`${opts.owner}/${opts.repo}`];
-    if (!isDeepStrictEqual(repositories, expected)) {
-      throw new RefusedError(`the token reaches ${JSON.stringify(repositories)}, not only ${expected[0]}: `
-        + 'the app is installed on more than this repository; no token written');
+    try {
+      checkTokenRepositories(repositories, repository);
+    } catch (error) {
+      // The token is not narrowed, so a second repository means the app is installed on it: say so to the owner.
+      throw new RefusedError(`${error.message}: the app is installed on more than this repository; no token written`);
     }
-    if (!isDeepStrictEqual(sortedEntries(answer.permissions), EXPECTED_PERMISSIONS)) {
-      throw new RefusedError(`the token holds ${JSON.stringify(sortedEntries(answer.permissions))}: no token written`);
-    }
+    checkTokenPermissions(answer.permissions, EXPECTED_PERMISSIONS);
     await writeToken(opts.out, token);
   } catch (error) {
     await revokeQuietly(opts, token, fetchImpl);

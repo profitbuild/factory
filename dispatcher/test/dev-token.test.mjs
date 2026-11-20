@@ -2,24 +2,29 @@
 // fake GitHub: what it writes, where, with which modes, what it refuses, and that the token is in none of its output.
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createVerify } from 'node:crypto';
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { EXPECTED_PERMISSIONS, refreshDelayMs } from '../bin/dev-token.mjs';
+import { EXPECTED_PERMISSIONS, mint, refreshDelayMs } from '../bin/dev-token.mjs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { appKeyPair, decodeJwt, startFakeGitHub } from '../testing/fake-github.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../bin/dev-token.mjs', import.meta.url));
 const TOKEN = 'ghs_TheFakeTokenOfThisTest0123456789';
 const { publicKey, privateKey } = appKeyPair();
+// The dev app's ids, as dev-token.mjs has them by default (APP_ID, INSTALLATION_ID).
+const APP_ID = 5822112;
+const INSTALLATION_ID = 183439507;
 
 // Each test sets what the fake answers.
 const state = {};
 const reset = () => Object.assign(state, {
+  installationId: INSTALLATION_ID,
+  installationAppId: APP_ID,
   installationPermissions: { ...EXPECTED_PERMISSIONS },
   tokenPermissions: { ...EXPECTED_PERMISSIONS },
   repositories: ['profitbuild/factory'],
@@ -31,14 +36,15 @@ const reset = () => Object.assign(state, {
 
 const jwtVerifies = (authorization) => {
   const { signed, signature, payload } = decodeJwt(authorization.replace(/^Bearer /, ''));
-  return payload.iss === 5822112 && createVerify('RSA-SHA256').update(signed).verify(publicKey, signature);
+  return payload.iss === APP_ID && createVerify('RSA-SHA256').update(signed).verify(publicKey, signature);
 };
 
 const fake = await startFakeGitHub({
   'GET /repos/profitbuild/factory/installation': ({ headers }) => (jwtVerifies(headers.authorization)
-    ? { status: 200, body: { id: 99, repository_selection: 'selected', permissions: state.installationPermissions } }
+    ? { status: 200, body: { id: state.installationId, app_id: state.installationAppId, repository_selection: 'selected',
+      permissions: state.installationPermissions } }
     : { status: 401, body: { message: 'A JSON web token could not be decoded' } }),
-  'POST /app/installations/99/access_tokens': ({ headers }) => {
+  [`POST /app/installations/${INSTALLATION_ID}/access_tokens`]: ({ headers }) => {
     if (!jwtVerifies(headers.authorization)) {
       return { status: 401, body: { message: 'Bad credentials' } };
     }
@@ -150,7 +156,7 @@ test('a key readable by others is refused before any request', async () => {
   const { exec, requests } = await setUp({ keyMode: 0o644 });
   const { code, stderr } = await exec();
   assert.equal(code, 1);
-  assert.match(stderr, /readable by others \(mode 644\)/);
+  assert.match(stderr, /has mode 644.*chmod 600/);
   assert.equal(requests().length, 0);
 });
 
@@ -296,4 +302,77 @@ test('--watch: a token file that cannot be deleted is still revoked, and the sto
   }
   assert.ok(revoked(requests(), TOKEN), 'the token is revoked all the same');
   assert.match(stderr(), /could not delete .*token \(EACCES\): delete it by hand/);
+});
+
+test('a key that is a symlink, even to a file of mode 600, is refused before any request', async () => {
+  const { key, keyDir, exec, requests } = await setUp();
+  const link = join(keyDir, 'link.pem');
+  await symlink(key, link);
+  const { code, stderr } = await exec(['--key', link]);
+  assert.equal(code, 1);
+  assert.match(stderr, /the key .*link\.pem is not a regular file \(a symlink/);
+  assert.equal(requests().length, 0);
+});
+
+// O_NONBLOCK makes the open return at once; without it the child would wait on the FIFO for a writer, and the test
+// fails on the timeout instead of hanging the run.
+test('a key that is a FIFO is refused at once, not waited on, before any request', async () => {
+  const { keyDir, exec, requests } = await setUp();
+  const fifo = join(keyDir, 'fifo.pem');
+  execFileSync('mkfifo', ['-m', '600', fifo]);
+  const outcome = await Promise.race([exec(['--key', fifo]), sleep(5000, 'blocked', { ref: false })]);
+  assert.notEqual(outcome, 'blocked', 'the read of the key waited on a FIFO');
+  assert.equal(outcome.code, 1);
+  assert.match(outcome.stderr, /the key .*fifo\.pem is not a regular file/);
+  assert.equal(requests().length, 0);
+});
+
+// Without root, a test cannot give a file another owner; mint is called in this process with another uid required,
+// which no option of the command line can set.
+test('a key owned by another user is refused before any request (the owner required set to another uid)', async () => {
+  const { key, out, exec, requests } = await setUp();
+  const opts = { key, out, api: fake.baseUrl, appId: APP_ID, installationId: INSTALLATION_ID, owner: 'profitbuild',
+    repo: 'factory', uid: process.getuid() + 1 };
+  await assert.rejects(mint(opts), /the key .* is owned by uid \d+, not by this process's/);
+  assert.equal(requests().length, 0);
+  const { code, stderr } = await exec(['--uid', String(process.getuid() + 1)]);
+  assert.equal(code, 1);
+  assert.match(stderr, /Unknown option '--uid'/, 'the owner required is not an option');
+});
+
+test('an installation of another app is refused, and no token is asked for', async () => {
+  const { out, exec, requests } = await setUp();
+  state.installationAppId = APP_ID + 1;
+  const { code, stderr } = await exec();
+  assert.equal(code, 1);
+  assert.match(stderr, new RegExp(`the app ${APP_ID + 1}'s, not ${APP_ID}'s`));
+  assert.equal(requests().some((r) => r.method === 'POST'), false);
+  await assert.rejects(stat(out), { code: 'ENOENT' });
+});
+
+test('an installation other than INSTALLATION_ID (the app installed again) is refused, and no token is asked for',
+  async () => {
+    const { out, exec, requests } = await setUp();
+    state.installationId = INSTALLATION_ID + 1;
+    const { code, stderr } = await exec();
+    assert.equal(code, 1);
+    assert.match(stderr, new RegExp(`is ${INSTALLATION_ID + 1}, not ${INSTALLATION_ID}`));
+    assert.equal(requests().some((r) => r.method === 'POST'), false);
+    await assert.rejects(stat(out), { code: 'ENOENT' });
+  });
+
+test('--installation-id names the installation, and must be a positive integer', async () => {
+  const { out, exec, requests } = await setUp();
+  state.installationId = INSTALLATION_ID + 1;
+  const { code, stderr } = await exec(['--installation-id', String(INSTALLATION_ID + 1)]);
+  assert.equal(code, 1, 'the installation matches; the token request goes to its id, which the fake does not serve');
+  assert.match(stderr, new RegExp(`POST /app/installations/${INSTALLATION_ID + 1}/access_tokens: 404`));
+  await assert.rejects(stat(out), { code: 'ENOENT' });
+  for (const bad of ['0', '-1', '1.5', 'x']) {
+    const refused = await exec([`--installation-id=${bad}`]);
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /--installation-id must be a positive integer/);
+  }
+  assert.ok(requests().some((r) => r.method === 'POST'
+    && r.path === `/app/installations/${INSTALLATION_ID + 1}/access_tokens`), 'the token is asked of that installation');
 });

@@ -4,9 +4,11 @@
  * no one else; the installation is the one expected, of the app expected, and holds exactly the permissions expected;
  * the token is narrowed to one repository, reaches exactly it, and holds the same permissions.
  *
- * Parametrized by the repository and the permissions, for builder-app today (builder-token.mjs). dispatcher/bin/
- * dev-token.mjs keeps its own copy of these checks for now (#0-271 AC4): it does not narrow its token, on purpose, and
- * its permissions and builder-app's part at stage 4.5; moving it onto this module is incident-platform backlog #0-273.
+ * Parametrized by the app, the installation, the repository and the permissions, for two callers:
+ * - builder-token.mjs (builder-app), through mintCheckedToken, whose token is narrowed to one repository;
+ * - dispatcher/bin/dev-token.mjs (the dev app, on the owner's host), through readAppKey and the check* functions one by
+ *   one, since its token is not narrowed, on purpose: that the token reaches only profitbuild/factory proves the
+ *   installation's scope on every token. Its permissions are not builder-app's either.
  *
  * Nothing here writes to the disk or prints; a refusal's message names what GitHub answered (permissions, repository
  * names, ids), never a token, the JWT or the key.
