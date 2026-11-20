@@ -16,7 +16,7 @@ export const GITHUB_API = 'https://api.github.com';
 
 /**
  * How long one call waits for GitHub's answer. fetch's own limits are minutes long, and a caller that stops (the
- * dev-token watch loop revoking its token on Ctrl-C) waits for a call in flight. 4.3's GitHub helper (#0-261) adds
+ * dev-token watch loop revoking its token on Ctrl-C) waits for a call in flight. retry.mjs's githubCall (#0-261) adds
  * the retries; this bound stays.
  */
 export const REQUEST_TIMEOUT_MS = 30 * 1000;
@@ -65,12 +65,31 @@ function failedCall(message, kind, cause) {
 }
 
 /**
+ * An answer's Retry-After (seconds, or an HTTP date), in milliseconds from now; 0 when the header is there but
+ * cannot be read (it still marks a rate limit), undefined when it is not there.
+ */
+function retryAfterMs(header, now = Date.now()) {
+  if (header === null) {
+    return undefined;
+  }
+  if (/^[0-9]+$/.test(header.trim())) {
+    return Number(header.trim()) * 1000;
+  }
+  const at = Date.parse(header);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - now);
+}
+
+/**
  * One call to GitHub's REST API, bounded by `timeoutMs` (the answer's body included). A non-2xx answer throws with the
  * method, the path, the status and GitHub's own `message`; never with a header or a body sent, which carry the
  * credential, nor with the answer's text, which may. That error carries the answer's status as `status` too, for a
- * caller that expects one (check-app expects 404, #0-271); an error with no answer has none.
+ * caller that expects one (check-app expects 404, #0-271); an error with no answer has none. It also carries what
+ * tells a rate limit (retry.mjs, #0-275): `retryAfterMs` when the answer has a Retry-After header, and
+ * `rateLimitRemaining` when it has x-ratelimit-remaining.
+ *
+ * Exported for retry.mjs's githubCall, the one way the dispatcher's flow calls GitHub (#0-261).
  */
-async function githubRequest({
+export async function githubRequest({
   baseUrl, method, path, bearer, body, fetchImpl = fetch, timeoutMs = REQUEST_TIMEOUT_MS,
 }) {
   let response;
@@ -114,8 +133,12 @@ async function githubRequest({
   }
   if (!response.ok) {
     const message = typeof answer?.message === 'string' ? answer.message : '(no JSON message in the answer)';
-    throw Object.assign(new Error(`GitHub ${method} ${path}: ${response.status} ${message}`),
-      { status: response.status });
+    const remaining = response.headers.get('x-ratelimit-remaining');
+    throw Object.assign(new Error(`GitHub ${method} ${path}: ${response.status} ${message}`), {
+      status: response.status,
+      retryAfterMs: retryAfterMs(response.headers.get('retry-after')),
+      rateLimitRemaining: remaining !== null && /^[0-9]+$/.test(remaining.trim()) ? Number(remaining) : undefined,
+    });
   }
   if (answer === undefined) {
     throw new Error(`GitHub ${method} ${path}: ${response.status}, the answer is not JSON`);

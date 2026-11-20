@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "A task's state, $FACTORY_STATE_DIR/tasks/<runId>/task.json",
+  "description": "The dispatcher's own (incident-platform backlog #0-275), not a product's: phase is the last phase completed (null before the first); a restart resumes at the phase after it. No field holds a time, so a phase run twice writes the same file.",
+  "type": "object",
+  "required": ["version", "runId", "item", "branch", "baseSha", "phase", "round", "calls", "status", "reason", "pr"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "runId": { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$" },
+    "item": { "type": ["string", "null"], "pattern": "^[0-9]+-[0-9]+$" },
+    "branch": { "type": ["string", "null"], "minLength": 1 },
+    "baseSha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+    "phase": { "type": ["string", "null"], "minLength": 1 },
+    "round": { "type": "integer", "minimum": 0 },
+    "calls": { "type": "array" },
+    "status": { "enum": ["running", "blocked", "stopped", "shipped"] },
+    "reason": { "type": ["string", "null"] },
+    "pr": { "type": ["string", "null"] }
+  }
+}
