@@ -7,6 +7,7 @@
 // commits leave as a bundle on stdout into the dispatcher's own directory.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -144,6 +145,27 @@ test('AC13: a running rollback refuses the run at its start, and nothing is remo
   assert.equal(fake.read().containers.length, 2);
 });
 
+/**
+ * Whether `pid` runs: a zombie does not (in a container whose PID 1 reaps no orphan, as CI's ubuntu:24.04 job, a
+ * killed process stays one), so /proc's state is read where there is one.
+ */
+function running(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return !['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3));
+  } catch (error) {
+    if (error.code === 'ENOENT' && existsSync('/proc/self/stat')) {
+      return false;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** A run whose container cannot be set up: the task BLOCKED with `reason`, and the daemon swept at the end. */
 async function blocked(setup, pattern, change = () => {}) {
   const { stateDir, fake, options } = setup;
@@ -258,7 +280,7 @@ test('AC11: a call that ignores SIGTERM is killed after its grace, leaves no pro
     assert.match(left.task.reason, /^the call sh in the task container ran past 1 s \(timeout's exit 137\): its processes were ended$/);
     assert.deepEqual(await loadTask(stateDir, RUN_ID), left.task);
     const pid = Number((await readFile(join(work, 'pid'), 'utf8')).trim());
-    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'no process is left');
+    assert.equal(running(pid), false, 'no process is left');
     assert.ok(fake.calls().some((c) => c.args[0] === 'kill'), 'the task\'s containers killed by their label');
     const exec = fake.calls().find((c) => c.args[0] === 'exec' && c.args.includes('sh'));
     assert.deepEqual(exec.args.slice(0, 6), ['exec', '-i', '--user', 'dev', '-w', '/workspace']);
