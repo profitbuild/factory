@@ -62,18 +62,17 @@ test('AC4: a marker in process.env reaches no git of a push, nor flock(1); PATH 
   const server = await startGitServer({ token });
   const stateDir = join(root.dir, 'state');
   await mkdir(stateDir, { mode: 0o700 });
-  const saved = { PATH: process.env.PATH, MARKER: process.env.FACTORY_TEST_MARKER_276 };
-  process.env.PATH = `${bin}:${process.env.PATH}`;
+  const saved = { MARKER: process.env.FACTORY_TEST_MARKER_276 };
   process.env.FACTORY_TEST_MARKER_276 = 'marker-value-of-the-parent';
   try {
     acquireLock(stateDir, { flock: join(root.dir, 'flock') }).release();
     await pushTask({
       stateDir, repoDir: product.dir, task: { runId: '20261120T101500Z-000276', branch: 'feat/x', baseSha: product.base },
       bundle: task.bundle, sha: task.sha, branch: 'feat/x', repository: 'profitbuild/incident-platform',
-      getToken: async () => token, url: server.url, allowProtocols: 'http:https',
+      tokens: { repository: 'profitbuild/incident-platform', getToken: async () => token }, gitBase: server.baseUrl,
+      git: join(bin, 'git'),
     });
   } finally {
-    process.env.PATH = saved.PATH;
     if (saved.MARKER === undefined) {
       delete process.env.FACTORY_TEST_MARKER_276;
     } else {

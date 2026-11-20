@@ -5,17 +5,21 @@
  * dispatcher from its task repository: 4.4), never by a fetch from the task's clone.
  *
  * pushTask, in order, each step refusing before the next, and no token asked for before the last check:
- *  1. `sha` is 40 hex digits, `branch` the task's own and a valid branch (no +, :, ..), the task's base recorded;
+ *  1. the token source is the repository's; `sha` is 40 hex digits, `branch` the task's own and a valid branch (no +,
+ *     :, ..), the task's base recorded;
  *  2. $FACTORY_STATE_DIR/tasks/<runId>/push/, 700, made fresh: one left by a killed run is removed first;
- *  3. FACTORY_REPO_DIR's objects (the dispatcher's clone of main, for the base's objects) are a directory of the
- *     dispatcher's, not a symlink, writable by no one else, with no alternates of their own (alternates chain);
+ *  3. FACTORY_REPO_DIR's objects (the dispatcher's clone of main, for the base's objects), and their info/ and pack/,
+ *     are directories of the dispatcher's, not symlinks, writable by no one else, with no alternates of their own
+ *     (alternates chain);
  *  4. two bare repositories, `git init --bare --template=`: the push repository and a reference, by the same git;
  *  5. the push repository's config is exactly the reference's (config-allowlist.mjs), a first time;
  *  6. its objects/info/alternates names FACTORY_REPO_DIR's objects, and nothing else;
  *  7. the bundle is read in (git/bundle.mjs): its prerequisite the task's base, its one ref refs/heads/<branch> at
  *     `sha`, its own objects strictly checked, `sha` a descendant of the base; no ref written;
  *  8. the config is checked again, right before the token is asked for;
- *  9. the token, and `git push --porcelain <url> <sha>:refs/heads/factory/<branch>`, built by gitPushCommand;
+ *  9. the token, and `git push --porcelain <url> <sha>:refs/heads/factory/<branch>`, built by gitPushCommand, to
+ *     pushUrl(repository) on GitHub: the URL is never the caller's (a test gives another host, `gitBase`, which must
+ *     be HTTPS or plain HTTP to a loopback address, as the API's URL must);
  * 10. the result read from --porcelain: a ref refused is a PushRejectedError naming git's kind of refusal, never the
  *     remote's text (a reason recorded for a task, 4.4, holds no text of GitHub's).
  * The push directory is removed after every push, refused or not: nothing of a push lives on to the next.
@@ -29,7 +33,10 @@ import { checkPushConfig, initBare } from '../git/config-allowlist.mjs';
 import { runGit } from '../git/run-git.mjs';
 import { ensureOwnDirectory } from '../state/files.mjs';
 import { checkTaskBranch, gitPushCommand, pushUrl } from './builder-token.mjs';
+import { requireHttpsOrLoopback } from './url-policy.mjs';
 
+/** Where builder-app pushes: GitHub. */
+export const GIT_HOST = 'https://github.com';
 /** The longest a push may run. */
 export const PUSH_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -43,7 +50,10 @@ const SHA = /^[0-9a-f]{40}$/;
 /** What git itself says of a ref it refused locally: kept, since it is git's and not the remote's. */
 const LOCAL_REASONS = new Set(['non-fast-forward', 'fetch first', 'already exists', 'stale info']);
 
-function checkTarget({ task, sha, branch }) {
+function checkTarget({ task, sha, branch, repository, tokens }) {
+  if (tokens?.repository !== repository || typeof tokens?.getToken !== 'function') {
+    throw new PushRefusedError(`the token source is for ${tokens?.repository ?? 'no repository'}, not ${repository}`);
+  }
   if (typeof sha !== 'string' || !SHA.test(sha)) {
     throw new PushRefusedError('the commit to push must be 40 hex digits');
   }
@@ -85,16 +95,18 @@ export async function mainObjects(repoDir, { uid = process.getuid() } = {}) {
   if (dotGit && !dotGit.isDirectory()) {
     throw new PushRefusedError('FACTORY_REPO_DIR/.git is not a directory (a gitfile or a symlink is refused)');
   }
-  const stats = await lstat(objects).catch(() => null);
-  if (!stats?.isDirectory()) {
-    throw new PushRefusedError('FACTORY_REPO_DIR holds no objects directory (a symlink is refused)');
-  }
-  if (stats.uid !== uid) {
-    throw new PushRefusedError(`FACTORY_REPO_DIR's objects are owned by uid ${stats.uid}, not by this process's`);
-  }
-  if ((stats.mode & 0o022) !== 0) {
-    throw new PushRefusedError(`FACTORY_REPO_DIR's objects have mode ${(stats.mode & 0o777).toString(8)}: no one but `
-      + 'their owner may write them');
+  for (const [path, what] of [[objects, 'objects'], [join(objects, 'info'), 'objects/info'], [join(objects, 'pack'), 'objects/pack']]) {
+    const stats = await lstat(path).catch(() => null);
+    if (!stats?.isDirectory()) {
+      throw new PushRefusedError(`FACTORY_REPO_DIR holds no ${what} directory (a symlink is refused)`);
+    }
+    if (stats.uid !== uid) {
+      throw new PushRefusedError(`${what} of FACTORY_REPO_DIR is owned by uid ${stats.uid}, not by this process's`);
+    }
+    if ((stats.mode & 0o022) !== 0) {
+      throw new PushRefusedError(`${what} of FACTORY_REPO_DIR has mode ${(stats.mode & 0o777).toString(8)}: no one but `
+        + 'its owner may write it');
+    }
   }
   for (const name of ['alternates', 'http-alternates']) {
     if (!await isMissing(join(objects, 'info', name))) {
@@ -102,6 +114,23 @@ export async function mainObjects(repoDir, { uid = process.getuid() } = {}) {
     }
   }
   return objects;
+}
+
+/**
+ * Where a push of `repository` goes: pushUrl(repository) on `gitBase`, GitHub (GIT_HOST) but in tests, and the
+ * protocols git may use for it (GIT_ALLOW_PROTOCOL): https alone, and http too only for a test's loopback host.
+ * `gitBase` is an origin alone, HTTPS, or plain HTTP to a loopback address, as the API's URL must be.
+ *
+ * @param {string} repository
+ * @param {string} [gitBase]
+ * @returns {{ url: string, allowProtocols: string }}
+ */
+export function pushTarget(repository, gitBase = GIT_HOST) {
+  const host = requireHttpsOrLoopback(gitBase, 'the git host');
+  if (host.origin !== gitBase || host.username || host.password) {
+    throw new PushRefusedError('the git host must be an origin alone, with no path, user or password');
+  }
+  return { url: pushUrl(repository, host.origin), allowProtocols: host.protocol === 'http:' ? 'http:https' : 'https' };
 }
 
 /**
@@ -126,18 +155,21 @@ export function readPushResult({ code, stdout }, ref) {
 
 /**
  * @param {{ stateDir: string, repoDir: string, task: { runId: string, branch: string | null, baseSha: string | null },
- *   bundle: Buffer, sha: string, branch: string, repository: string, getToken: () => Promise<string>, url?: string,
- *   allowProtocols?: string, baseEnv?: Record<string, string | undefined>, uid?: number,
+ *   bundle: Buffer, sha: string, branch: string, repository: string,
+ *   tokens: { repository: string, getToken: () => Promise<string> }, baseEnv?: Record<string, string | undefined>,
+ *   uid?: number, gitBase?: string, git?: string,
  *   hooks?: { afterInit?: (gitDir: string) => Promise<void>, beforeToken?: (gitDir: string) => Promise<void> } }}
- *   options `repository` the adapter's, owner/name; `url` pushUrl(repository) but in tests, with `allowProtocols`;
- *   `hooks` for the tests only, where a planted key would come in
+ *   options `repository` the adapter's, owner/name; `tokens` builder-app's token source (createBuilderTokenSource),
+ *   which must be that repository's; `gitBase` (GIT_HOST but in tests: the fake server, over HTTP to loopback), `git`
+ *   and `hooks` (where a planted key would come in) for the tests only
  * @returns {Promise<{ ref: string, flag: string }>}
  */
 export async function pushTask({
-  stateDir, repoDir, task, bundle, sha, branch, repository, getToken, url = pushUrl(repository),
-  allowProtocols = 'https', baseEnv = process.env, uid, hooks = {},
+  stateDir, repoDir, task, bundle, sha, branch, repository, tokens, baseEnv = process.env, uid, hooks = {},
+  gitBase = GIT_HOST, git,
 }) {
-  checkTarget({ task, sha, branch });
+  checkTarget({ task, sha, branch, repository, tokens });
+  const { url, allowProtocols } = pushTarget(repository, gitBase);
   const taskDir = join(stateDir, 'tasks', task.runId);
   const dir = join(taskDir, 'push');
   await ensureOwnDirectory(join(stateDir, 'tasks'), { uid });
@@ -148,19 +180,19 @@ export async function pushTask({
     const objects = await mainObjects(repoDir, { uid });
     const repo = join(dir, 'repo.git');
     const reference = join(dir, 'reference.git');
-    await initBare(dir, repo);
-    await initBare(dir, reference);
+    await initBare(dir, repo, { git });
+    await initBare(dir, reference, { git });
     await hooks.afterInit?.(repo);
-    await checkPushConfig(repo, reference);
+    await checkPushConfig(repo, reference, { git });
     await mkdir(join(repo, 'objects', 'info'), { recursive: true, mode: 0o700 });
     await writeFile(join(repo, 'objects', 'info', 'alternates'), `${objects}\n`,
       { mode: 0o600, flag: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW });
-    await loadBundle({ gitDir: repo, bundle, prerequisite: task.baseSha, ref: { sha, name: `refs/heads/${branch}` } });
+    await loadBundle({ gitDir: repo, bundle, prerequisite: task.baseSha, ref: { sha, name: `refs/heads/${branch}` }, git });
     await hooks.beforeToken?.(repo);
-    await checkPushConfig(repo, reference);
-    const command = gitPushCommand({ token: await getToken(), sha, branch, url, allowProtocols });
+    await checkPushConfig(repo, reference, { git });
+    const command = gitPushCommand({ token: await tokens.getToken(), sha, branch, url, allowProtocols });
     const result = await runGit({
-      cwd: repo, gitDir: repo, args: command.args, allow: command.allow, set: command.set, baseEnv,
+      cwd: repo, gitDir: repo, git, args: command.args, allow: command.allow, set: command.set, baseEnv,
       timeoutMs: PUSH_TIMEOUT_MS,
     });
     return readPushResult(result, command.ref);

@@ -8,7 +8,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { childProcessViolations } from '../testing/child-process-scan.mjs';
+import { childProcessCalls, childProcessViolations } from '../testing/child-process-scan.mjs';
 
 const SRC = fileURLToPath(new URL('../src/', import.meta.url));
 
@@ -72,4 +72,29 @@ test('AC7: what the rule allows passes, and what only looks like a call does not
     + "child.spawn('x'); // spawn('git', [], { env: process.env }) in a comment\n"
     + "const text = \"spawn('git', { env: process.env })\";\n"
     + "const re = /spawn\\(/; const t = `exec(${'x'})`;\n"), []);
+});
+
+/** Which module may start which program: git from run-git.mjs alone, as its variable `git` (GIT, /usr/bin/git). */
+const STARTS = { 'git/run-git.mjs': 'git', 'state/lock.mjs': 'flock' };
+
+/** Where the calls of `source`, a module at `path` under src/, break that rule. */
+function wrongStarts(path, source) {
+  return childProcessCalls(source)
+    .filter(({ first }) => STARTS[path] === undefined || first !== STARTS[path])
+    .map(({ name, first }) => `${path}: ${name}(${first}, ...) is not this module's to start`);
+}
+
+test('review round 1: git is started by src/git/run-git.mjs alone, and flock(1) by src/state/lock.mjs alone', async () => {
+  const found = [];
+  for (const file of await modules()) {
+    found.push(...wrongStarts(file.slice(SRC.length), await readFile(file, 'utf8')));
+  }
+  assert.deepEqual(found, []);
+  const planted = (code) => `${IMPORT}${code}\n`;
+  assert.notDeepEqual(wrongStarts('github/push.mjs', planted("spawn('git', ['push'], { env: childEnv() });")), []);
+  assert.notDeepEqual(wrongStarts('github/push.mjs', planted("execFile('/usr/bin/git', [], { env: childEnv() });")), []);
+  assert.notDeepEqual(wrongStarts('github/push.mjs', planted('spawn(git, [], { env: childEnv() });')), []);
+  assert.notDeepEqual(wrongStarts('git/run-git.mjs', planted("spawn('sh', ['-c', 'git push'], { env: childEnv() });")), []);
+  assert.notDeepEqual(wrongStarts('state/lock.mjs', planted("spawnSync('git', [], { env: childEnv() });")), []);
+  assert.deepEqual(wrongStarts('git/run-git.mjs', planted('spawn(git, [...GIT_OVERRIDES], { env: childEnv() });')), []);
 });

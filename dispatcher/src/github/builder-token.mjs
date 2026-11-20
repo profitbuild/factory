@@ -95,8 +95,10 @@ export async function mintBuilderToken({
  * still be running, and it expires within 5 minutes. `revoke()`, at the dispatcher's stop, revokes the token held and
  * ends the source.
  *
+ * The source names its repository (`repository`), so that a push refuses a source minted for another (push.mjs).
+ *
  * @param {Parameters<typeof mintBuilderToken>[0]} options
- * @returns {{ getToken: () => Promise<string>, revoke: () => Promise<void> }}
+ * @returns {{ repository: string, getToken: () => Promise<string>, revoke: () => Promise<void> }}
  */
 export function createBuilderTokenSource(options) {
   const { baseUrl = GITHUB_API, fetchImpl, timeoutMs, now = Date.now } = options;
@@ -137,7 +139,7 @@ export function createBuilderTokenSource(options) {
       await revokeInstallationToken({ baseUrl, token, fetchImpl, timeoutMs });
     }
   };
-  return { getToken, revoke };
+  return Object.freeze({ repository: options.repository, getToken, revoke });
 }
 
 /**

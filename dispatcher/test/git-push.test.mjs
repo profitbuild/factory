@@ -12,7 +12,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { GIT_OVERRIDES, runGit } from '../src/git/run-git.mjs';
+import { GIT, GIT_OVERRIDES, runGit } from '../src/git/run-git.mjs';
 import {
   GIT_ASKPASS, PUSH_ENV_ALLOWED, PUSH_REF_PREFIX, checkTaskBranch, gitPushCommand, pushUrl,
 } from '../src/github/builder-token.mjs';
@@ -61,17 +61,22 @@ async function setUp(name) {
   // The wrapper is the git process itself (it execs git): the names of its environment are what every child of git
   // inherits. Names only, since one of them is the token's.
   await writeFile(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$@" >> ${join(dumps, 'argv')}\n`
-    + `env | cut -d= -f1 >> ${join(dumps, 'git-env-names')}\nexec ${REAL_GIT} "$@"\n`);
+    + `env | cut -d= -f1 >> ${join(dumps, 'git-env-names')}\n`
+    + `printf 'GIT_ASKPASS=%s\\nGIT_ALLOW_PROTOCOL=%s\\n' "$GIT_ASKPASS" "$GIT_ALLOW_PROTOCOL" >> ${join(dumps, 'git-env-values')}\n`
+    + `exec ${REAL_GIT} "$@"\n`);
   await chmod(join(bin, 'git'), 0o755);
-  const baseEnv = { PATH: `${bin}:${process.env.PATH}`, HOME: home, LANG: 'pl_PL.UTF-8',
-    SECRET_X: 'a-secret-of-the-parent' };
-  return { dir, repo, dumps, home, baseEnv, run, sha: run('rev-parse', 'HEAD') };
+  // What the dispatcher's environment could hold that must reach no git: a secret, a locale, and what would turn git's
+  // checks off or hand the token elsewhere.
+  const baseEnv = { PATH: process.env.PATH, HOME: home, LANG: 'pl_PL.UTF-8', SECRET_X: 'a-secret-of-the-parent',
+    GIT_SSL_NO_VERIFY: '1', GIT_ASKPASS: '/evil-askpass', GIT_CONFIG_PARAMETERS: "'core.hooksPath'='/evil'",
+    SSH_ASKPASS: '/evil-ssh-askpass', LD_PRELOAD: '/evil.so', GIT_ALLOW_PROTOCOL: 'ssh:https' };
+  return { dir, repo, dumps, home, baseEnv, run, sha: run('rev-parse', 'HEAD'), wrapper: join(bin, 'git') };
 }
 
 /** The command of gitPushCommand, run by runGit in `repo` (a test's repository, standing for an agent's). */
-function pushFrom({ repo, sha, baseEnv }, { url = git.url, set = {} } = {}) {
+function pushFrom({ repo, sha, baseEnv, wrapper }, { url = git.url, set = {} } = {}) {
   const command = gitPushCommand({ token: TOKEN, sha, branch: 'feat/x', url, allowProtocols: 'http:https' });
-  return runGit({ cwd: repo, gitDir: join(repo, '.git'), args: command.args, allow: command.allow,
+  return runGit({ cwd: repo, gitDir: join(repo, '.git'), git: wrapper, args: command.args, allow: command.allow,
     set: { ...command.set, ...set }, baseEnv }).then((result) => ({ ...result, stdout: result.stdout.toString() }));
 }
 
@@ -94,10 +99,19 @@ test('the push reaches the server with the token, in no argument, file, hook, he
   assert.deepEqual(await filesContaining(dir, TOKEN), [], 'nowhere on the disk of the run, HOME and .git included');
   const names = (await readFile(join(dumps, 'git-env-names'), 'utf8')).trim().split('\n');
   assert.ok(names.includes('FACTORY_PUSH_TOKEN'), 'the wrapper saw git\'s environment');
-  assert.equal(names.includes('SECRET_X'), false, 'a variable of the parent outside the allowlist does not reach git');
-  assert.equal(names.includes('LANG'), false);
-  assert.deepEqual(names.filter((name) => ![...PUSH_ENV_ALLOWED, 'LC_ALL', 'PWD', 'SHLVL', '_'].includes(name)
-    && !name.startsWith('GIT_') && !name.startsWith('FACTORY_PUSH_')), [], 'git sees nothing but the allowlist and ours');
+  for (const name of ['SECRET_X', 'LANG', 'GIT_SSL_NO_VERIFY', 'GIT_CONFIG_PARAMETERS', 'SSH_ASKPASS', 'LD_PRELOAD']) {
+    assert.equal(names.includes(name), false, `${name} of the parent does not reach git`);
+  }
+  const values = await readFile(join(dumps, 'git-env-values'), 'utf8');
+  assert.match(values, new RegExp(`^GIT_ASKPASS=${GIT_ASKPASS}$`, 'm'), 'the askpass is ours, not the parent\'s');
+  assert.doesNotMatch(values, /evil-askpass/);
+  assert.match(values, /^GIT_ALLOW_PROTOCOL=http:https$/m, 'the protocols are ours, not the parent\'s ssh:https');
+  const OURS = ['GIT_ASKPASS', 'GIT_ALLOW_PROTOCOL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_NO_REPLACE_OBJECTS',
+    'GIT_TERMINAL_PROMPT', 'GIT_DIR', 'LC_ALL', 'FACTORY_PUSH_ORIGIN', 'FACTORY_PUSH_TOKEN', 'PWD', 'SHLVL', '_'];
+  // git sets some of its own for its children (GIT_EXEC_PATH and the like): named here, so a new one shows.
+  const GITS_OWN = ['GIT_EXEC_PATH', 'GIT_PREFIX', 'GIT_INTERNAL_GETTEXT_SH_SCHEME', 'GIT_TEXTDOMAINDIR'];
+  assert.deepEqual([...new Set(names)].filter((name) => ![...PUSH_ENV_ALLOWED, ...OURS, ...GITS_OWN].includes(name)), [],
+    'git sees nothing but the allowlist, ours and git\'s own');
   assert.equal(Object.values(process.env).some((value) => value?.includes(TOKEN)), false, 'not in process.env');
 });
 
@@ -105,7 +119,7 @@ test('control: without the overrides, the hook and the helper planted here are h
   const { repo, dumps, baseEnv } = await setUp('control');
   const { code, stderr } = await new Promise((resolve) => {
     const child = spawn('git', ['push', git.url, 'HEAD:refs/heads/feat/x'], { cwd: repo,
-      env: { ...baseEnv, GIT_ASKPASS, FACTORY_PUSH_ORIGIN: git.baseUrl, FACTORY_PUSH_TOKEN: TOKEN,
+      env: { PATH: baseEnv.PATH, HOME: baseEnv.HOME, GIT_ASKPASS, FACTORY_PUSH_ORIGIN: git.baseUrl, FACTORY_PUSH_TOKEN: TOKEN,
         GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
     let err = '';
     child.stderr.on('data', (chunk) => { err += chunk; });
@@ -145,7 +159,8 @@ test('the command: the refspec built from { sha, branch }, the token in its env 
   assert.deepEqual(PUSH_ENV_ALLOWED, ['PATH', 'HOME', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy',
     'http_proxy', 'no_proxy']);
   assert.deepEqual(GIT_OVERRIDES, ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', '-c', 'credential.helper=',
-    '-c', 'protocol.allow=never']);
+    '-c', 'protocol.allow=never', '-c', 'core.commitGraph=false']);
+  assert.equal(GIT, '/usr/bin/git', 'git by its full path: PATH does not choose the program handed the token');
 });
 
 test('the command refuses a bad sha or branch, a URL with credentials or not HTTPS, and no token', () => {
@@ -225,7 +240,7 @@ test('control: without GIT_ALLOW_PROTOCOL, the ssh command of the config gets th
     allowProtocols: 'http:https' });
   const set = { ...command.set };
   delete set.GIT_ALLOW_PROTOCOL;
-  const { code } = await runGit({ cwd: setup.repo, gitDir: join(setup.repo, '.git'), args: command.args,
+  const { code } = await runGit({ cwd: setup.repo, gitDir: join(setup.repo, '.git'), git: setup.wrapper, args: command.args,
     allow: command.allow, set, baseEnv: setup.baseEnv });
   assert.notEqual(code, 0);
   assert.match(await readFile(join(setup.dumps, 'ssh'), 'utf8'), new RegExp(`FACTORY_PUSH_TOKEN=${TOKEN}`));

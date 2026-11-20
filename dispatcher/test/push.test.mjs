@@ -6,7 +6,7 @@
 import { test, after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { appendFile, chmod, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -14,7 +14,9 @@ import { loadAdapter } from '../src/adapter.mjs';
 import { BundleError, readBundleFile } from '../src/git/bundle.mjs';
 import { ConfigRefusedError, readConfig } from '../src/git/config-allowlist.mjs';
 import { pushUrl } from '../src/github/builder-token.mjs';
-import { PushRefusedError, PushRejectedError, mainObjects, pushTask, readPushResult } from '../src/github/push.mjs';
+import {
+  GIT_HOST, PushRefusedError, PushRejectedError, mainObjects, pushTarget, pushTask, readPushResult,
+} from '../src/github/push.mjs';
 import { GIT_VERSION, REAL_GIT, git, makeProduct, makeTask } from '../testing/git-fixtures.mjs';
 import { startGitServer } from '../testing/git-server.mjs';
 import { makeStateDir } from '../testing/state-dir.mjs';
@@ -48,21 +50,21 @@ test('the git these tests run', (t) => {
   t.diagnostic(GIT_VERSION);
 });
 
-/** A token source that records whether it was asked. */
-function tokens() {
+/** A token source of `repository` that records whether it was asked. */
+function tokens(repository = 'profitbuild/incident-platform') {
   const asked = [];
-  return { asked, getToken: async () => { asked.push(Date.now()); return TOKEN; } };
+  return { repository, asked, getToken: async () => { asked.push(Date.now()); return TOKEN; } };
 }
 
 const theTask = () => ({ runId: RUN_ID, branch: 'feat/x', baseSha: product.base });
 
 /** pushTask with this file's defaults: the task's bundle, commit and branch, the loopback server. */
 function push(overrides = {}) {
-  const source = overrides.source ?? tokens();
+  const repository = overrides.repository ?? 'profitbuild/incident-platform';
+  const source = 'tokens' in overrides ? overrides.tokens : tokens(repository);
   const run = pushTask({
     stateDir, repoDir: product.dir, task: theTask(), bundle: task.bundle, sha: task.sha, branch: 'feat/x',
-    repository: 'profitbuild/incident-platform', getToken: source.getToken, url: server.url, allowProtocols: 'http:https',
-    ...overrides,
+    repository, tokens: source, gitBase: server.baseUrl, ...overrides,
   });
   return { run, source };
 }
@@ -82,7 +84,7 @@ async function refusedWithoutToken(overrides, type, pattern, { values = [] } = {
     }
     return true;
   });
-  assert.deepEqual(source.asked, [], 'the token was never asked for');
+  assert.deepEqual(source?.asked ?? [], [], 'the token was never asked for');
   assert.equal(server.requests.length, start, 'the server got no request');
   assert.ok(await gone(pushDir()), 'the push repository is removed');
 }
@@ -196,7 +198,7 @@ test('AC6: no git runs where the bundle came from: a planted .git/config\'s fsmo
   execFileSync(REAL_GIT, ['status'], { cwd: incoming, stdio: 'ignore',
     env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
   assert.equal(await gone(marker), false, 'the planted fsmonitor runs when git runs in that directory');
-  await (await import('node:fs/promises')).rm(marker);
+  await rm(marker);
   const file = join(incoming, 'task.bundle');
   await writeFile(file, task.bundle, { mode: 0o600 });
   const { run } = push({ bundle: await readBundleFile(file) });
@@ -222,7 +224,7 @@ test('AC8: a push directory left by a killed run is removed first; a push git fa
   assert.ok(await gone(pushDir()));
   const closed = await startGitServer({ token: TOKEN });
   await closed.close();
-  const failed = push({ url: closed.url });
+  const failed = push({ gitBase: closed.baseUrl });
   await assert.rejects(failed.run, PushRejectedError);
   assert.ok(await gone(pushDir()), 'removed after git failed');
 });
@@ -263,33 +265,50 @@ test('AC3: the repository and the push URL come from the adapter: two products, 
   assert.equal(pushUrl(other.repository), 'https://github.com/profitbuild/other-product.git');
   const otherServer = await startGitServer({ token: TOKEN, path: '/profitbuild/other-product.git' });
   try {
-    const { run } = push({ repository: other.repository, url: pushUrl(other.repository, otherServer.baseUrl) });
+    const { run } = push({ repository: other.repository, gitBase: otherServer.baseUrl });
     assert.equal((await run).flag, '*');
     assert.deepEqual(otherServer.updates.map((u) => u.ref), ['refs/heads/factory/feat/x']);
   } finally {
     await otherServer.close();
   }
-  await assert.rejects(push({ repository: 'not-a-repository', url: undefined }).run,
-    /a repository must be owner\/name/);
+  await assert.rejects(push({ repository: 'not-a-repository' }).run, /a repository must be owner\/name/);
 });
 
-test('FACTORY_REPO_DIR\'s objects are the dispatcher\'s own, writable by no one else, with no alternates', async () => {
-  assert.equal(await mainObjects(product.dir), join(product.dir, '.git', 'objects'));
-  await assert.rejects(mainObjects(product.dir, { uid: process.getuid() + 1 }), /owned by uid/);
-  const loose = join(root.dir, `loose-${n}`);
-  await mkdir(join(loose, '.git', 'objects', 'info'), { recursive: true, mode: 0o755 });
-  await chmod(join(loose, '.git', 'objects'), 0o775);
-  await assert.rejects(mainObjects(loose), /have mode 775/);
-  await chmod(join(loose, '.git', 'objects'), 0o755);
-  await writeFile(join(loose, '.git', 'objects', 'info', 'alternates'), '/elsewhere\n');
-  await assert.rejects(mainObjects(loose), /have info\/alternates/);
-  await assert.rejects(mainObjects(join(root.dir, 'nowhere')), /holds no objects directory/);
-  const gitfile = join(root.dir, `gitfile-${n}`);
-  await mkdir(gitfile);
-  await writeFile(join(gitfile, '.git'), 'gitdir: /elsewhere\n');
-  await assert.rejects(mainObjects(gitfile), /\.git is not a directory/);
-  assert.deepEqual((await readdir(stateDir)), []);
-});
+test('FACTORY_REPO_DIR\'s objects, info/ and pack/ are the dispatcher\'s own, writable by no one else, no alternates',
+  async () => {
+    assert.equal(await mainObjects(product.dir), join(product.dir, '.git', 'objects'));
+    await assert.rejects(mainObjects(product.dir, { uid: process.getuid() + 1 }),
+      /objects of FACTORY_REPO_DIR is owned by uid \d+, not by this process's$/);
+    const loose = join(root.dir, `loose-${n}`);
+    const objects = join(loose, '.git', 'objects');
+    await mkdir(join(objects, 'info'), { recursive: true, mode: 0o755 });
+    await mkdir(join(objects, 'pack'), { mode: 0o755 });
+    assert.equal(await mainObjects(loose), objects);
+    for (const [dir, what] of [[objects, 'objects'], [join(objects, 'info'), 'objects/info'],
+      [join(objects, 'pack'), 'objects/pack']]) {
+      for (const mode of [0o775, 0o757, 0o777]) {
+        await chmod(dir, mode);
+        await assert.rejects(mainObjects(loose), new RegExp(`: ${what} of FACTORY_REPO_DIR has mode ${mode.toString(8)}: `));
+      }
+      await chmod(dir, 0o755);
+    }
+    await rm(join(objects, 'pack'), { recursive: true });
+    await mkdir(join(loose, 'elsewhere-pack'));
+    await symlink(join(loose, 'elsewhere-pack'), join(objects, 'pack'));
+    await assert.rejects(mainObjects(loose), /holds no objects\/pack directory \(a symlink is refused\)/);
+    await rm(join(objects, 'pack'));
+    await mkdir(join(objects, 'pack'), { mode: 0o755 });
+    await writeFile(join(objects, 'info', 'alternates'), '/elsewhere\n');
+    await assert.rejects(mainObjects(loose), /have info\/alternates/);
+    await rm(join(objects, 'info', 'alternates'));
+    await writeFile(join(objects, 'info', 'http-alternates'), 'https://elsewhere\n');
+    await assert.rejects(mainObjects(loose), /have info\/http-alternates/);
+    await assert.rejects(mainObjects(join(root.dir, 'nowhere')), /holds no objects directory/);
+    const gitfile = join(root.dir, `gitfile-${n}`);
+    await mkdir(gitfile);
+    await writeFile(join(gitfile, '.git'), 'gitdir: /elsewhere\n');
+    await assert.rejects(mainObjects(gitfile), /\.git is not a directory/);
+  });
 
 test('the token reaches the server only through askpass, and is in no file of the push\'s', async () => {
   const start = server.authorizations.length;
@@ -298,4 +317,34 @@ test('the token reaches the server only through askpass, and is in no file of th
   const seen = server.authorizations.slice(start);
   assert.ok(seen.includes(`Basic ${Buffer.from(`x-access-token:${TOKEN}`).toString('base64')}`));
   assert.equal((await readFile(join(product.dir, '.git', 'config'), 'utf8')).includes(TOKEN), false);
+});
+
+test('a token source for another repository is refused before anything, its token never asked for', async () => {
+  for (const source of [tokens('profitbuild/other-product'), { getToken: async () => TOKEN }, undefined,
+    { repository: 'profitbuild/incident-platform' }]) {
+    await refusedWithoutToken({ tokens: source ?? null }, PushRefusedError,
+      /^the token source is for (profitbuild\/other-product|no repository|profitbuild\/incident-platform), not profitbuild\/incident-platform$/);
+    if (source?.asked) {
+      assert.deepEqual(source.asked, []);
+    }
+  }
+});
+
+test('the git host is GitHub but in tests, and a test\'s is HTTPS or loopback HTTP, an origin alone', async () => {
+  for (const gitBase of ['http://example.com', 'http://github.com', 'ftp://127.0.0.1', `${server.baseUrl}/x`,
+    `${server.baseUrl}/`, server.baseUrl.replace('http://', 'http://u:p@'), 'not a url']) {
+    const { run, source } = push({ gitBase });
+    await assert.rejects(run, /the git host must be|must be an https:\/\/ URL|Invalid URL/, gitBase);
+    assert.deepEqual(source.asked, [], gitBase);
+  }
+});
+
+test('the push goes to pushUrl(repository) on GitHub over https alone; http only to a test\'s loopback host', () => {
+  assert.equal(GIT_HOST, 'https://github.com');
+  assert.deepEqual(pushTarget('profitbuild/incident-platform'),
+    { url: 'https://github.com/profitbuild/incident-platform.git', allowProtocols: 'https' });
+  assert.deepEqual(pushTarget('profitbuild/other-product', 'https://git.example'),
+    { url: 'https://git.example/profitbuild/other-product.git', allowProtocols: 'https' });
+  assert.deepEqual(pushTarget('profitbuild/other-product', 'http://127.0.0.1:8080'),
+    { url: 'http://127.0.0.1:8080/profitbuild/other-product.git', allowProtocols: 'http:https' });
 });

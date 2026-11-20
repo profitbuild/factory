@@ -62,7 +62,7 @@ test('the command line is checked before anything else', async (t) => {
   refusedWith(await cli(['run', '--adapter', ADAPTER, '--item', '0-1', '--resume', 'factory/x'], env),
     /--item and --resume exclude each other/);
   refusedWith(await cli(['run', '--adapter', ADAPTER, '--item', '275'], env), /--item must be a backlog item, 0-N/);
-  for (const branch of ['main', '-x', 'factory/../main', 'factory/a b']) {
+  for (const branch of ['main', '-x', 'factory/../main', 'factory/a b', 'feat/x.lock', 'feat/.x', 'feat/x.']) {
     refusedWith(await cli(['run', '--adapter', ADAPTER, `--resume=${branch}`], env), /--resume must be a branch name/);
   }
   assert.deepEqual(await readdir(stateDir), [], 'a refused run touches no state');

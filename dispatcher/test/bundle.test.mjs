@@ -6,15 +6,15 @@
 // diagnostic names (the dispatcher's container: 2.39; CI's; the 2.43 job: ubuntu:24.04, the VM's).
 import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdir, writeFile, chmod, symlink, mkdir } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
   BundleError, MAX_HEADER_BYTES, loadBundle, parseBundle, readBundleFile,
 } from '../src/git/bundle.mjs';
-import { initBare } from '../src/git/config-allowlist.mjs';
+import { ConfigRefusedError, initBare, readConfig } from '../src/git/config-allowlist.mjs';
 import {
-  GIT_VERSION, bundleOf, git, makeProduct, makeTask, packOf, separateHistory,
+  GIT_VERSION, REAL_GIT, bundleOf, git, makeProduct, makeTask, packOf, separateHistory,
 } from '../testing/git-fixtures.mjs';
 import { makeStateDir } from '../testing/state-dir.mjs';
 
@@ -181,4 +181,40 @@ test('a bundle file is read as the dispatcher\'s files are: its own, 600, no sym
   await assert.rejects(readBundleFile(path, { uid: process.getuid() + 1 }), /owned by uid/);
   await chmod(path, 0o644);
   await assert.rejects(readBundleFile(path), /has mode 644/);
+});
+
+test('a ref that is its prerequisite, or a prerequisite that is not a commit of the repository, is refused', async () => {
+  const pack = packOf(task.dir, [task.sha, `^${product.base}`]);
+  await refused({ bundle: bundleOf({ lines: [`-${product.base}`, `${product.base} refs/heads/feat/x`], pack }),
+    ref: { sha: product.base, name: 'refs/heads/feat/x' } }, /the bundle's ref is its prerequisite: it brings no commit/);
+  const tree = git(product.dir, ['rev-parse', `${product.base}^{tree}`]);
+  for (const prerequisite of [tree, '5'.repeat(40)]) {
+    await refused({ bundle: bundleOf({ lines: [`-${prerequisite}`, `${task.sha} refs/heads/feat/x`], pack }),
+      prerequisite }, new RegExp(`prerequisite ${prerequisite} is not a commit of the repository`));
+  }
+});
+
+test('merge-base answering neither 0 nor 1 is refused as an ancestry that could not be read', async () => {
+  const fake = join(root.dir, 'git-merge-base-fails');
+  await writeFile(fake, '#!/bin/sh\nfor a in "$@"; do [ "$a" = merge-base ] && { echo "fatal: a fake failure" >&2; '
+    + `exit 128; }; done\nexec ${REAL_GIT} "$@"\n`);
+  await chmod(fake, 0o755);
+  await refused({ bundle: task.bundle, git: fake }, /^the bundle's ancestry could not be read: fatal: a fake failure$/);
+});
+
+test('readConfig refuses a config git cannot read', async () => {
+  const gitDir = await freshRepo();
+  await writeFile(join(gitDir, 'config'), '[core\n\tbare = true\n');
+  await assert.rejects(readConfig(gitDir), (error) => error instanceof ConfigRefusedError
+    && /^the config of .* cannot be read: /.test(error.message));
+});
+
+test('readConfig runs with GIT_DIR naming the repository whose config it reads', async () => {
+  const gitDir = await freshRepo();
+  const envFile = join(root.dir, 'read-config-env');
+  const recorder = join(root.dir, 'git-recording-env');
+  await writeFile(recorder, `#!/bin/sh\nenv > ${envFile}\nexec ${REAL_GIT} "$@"\n`);
+  await chmod(recorder, 0o755);
+  assert.ok((await readConfig(gitDir, { git: recorder })).some(([key]) => key === 'core.bare'));
+  assert.match(await readFile(envFile, 'utf8'), new RegExp(`^GIT_DIR=${gitDir}$`, 'm'));
 });

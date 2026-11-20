@@ -7,8 +7,8 @@
  * http.curloptResolve, remote."<url>".pushurl, core.fsmonitor, include.path and any key no list names. A denylist is
  * never complete.
  *
- * The config is read as a file, `git config --file <gitDir>/config --list --null`, with no system or global config
- * (run-git.mjs): with --file, git follows no include.* (--includes is off for a file given), so include.path is a key
+ * The config is read as a file, `git config --file <gitDir>/config --list --null`, run with GIT_DIR naming that
+ * repository and with no system or global config (run-git.mjs): with --file, git follows no include.* (--includes is off for a file given), so include.path is a key
  * like the others, refused; --null splits entries on NUL and a key from its value on its first newline, so a value
  * holding newlines is read whole. Reading a config runs nothing of it. git prints a key normalized (its section and
  * its name in lower case, a subsection as written), so `[CORE] FSMonitor` is core.fsmonitor here. The comparison is
@@ -25,13 +25,15 @@ import { firstLines, runGit } from './run-git.mjs';
 export class ConfigRefusedError extends Error {}
 
 /**
- * Makes a bare repository at `path`, in its parent `cwd` (a directory of the dispatcher's), with no template.
+ * Makes a bare repository at `path`, in its parent `cwd` (a directory of the dispatcher's), with no template. The one
+ * git the dispatcher runs with no GIT_DIR: the repository it would name does not exist yet; `init` is given its path.
  *
  * @param {string} cwd
  * @param {string} path
+ * @param {{ git?: string }} [options] git's path, for the tests only
  */
-export async function initBare(cwd, path) {
-  const { code, stderr } = await runGit({ cwd, args: ['init', '--quiet', '--bare', '--template=', path] });
+export async function initBare(cwd, path, { git } = {}) {
+  const { code, stderr } = await runGit({ cwd, git, args: ['init', '--quiet', '--bare', '--template=', path] });
   if (code !== 0) {
     throw new Error(`git init --bare failed: ${firstLines(stderr)}`);
   }
@@ -42,11 +44,12 @@ export async function initBare(cwd, path) {
  * with no `=`.
  *
  * @param {string} gitDir
+ * @param {{ git?: string }} [options]
  * @returns {Promise<[string, string | null][]>}
  */
-export async function readConfig(gitDir) {
+export async function readConfig(gitDir, { git } = {}) {
   const { code, stdout, stderr } = await runGit({
-    cwd: gitDir, args: ['config', '--file', join(gitDir, 'config'), '--list', '--null'],
+    cwd: gitDir, gitDir, git, args: ['config', '--file', join(gitDir, 'config'), '--list', '--null'],
   });
   if (code !== 0) {
     throw new ConfigRefusedError(`the config of ${gitDir} cannot be read: ${firstLines(stderr)}`);
@@ -96,9 +99,11 @@ export function configDifference(actual, reference) {
  *
  * @param {string} gitDir
  * @param {string} referenceDir
+ * @param {{ git?: string }} [options]
  */
-export async function checkPushConfig(gitDir, referenceDir) {
-  const { unknown, changed } = configDifference(await readConfig(gitDir), await readConfig(referenceDir));
+export async function checkPushConfig(gitDir, referenceDir, options) {
+  const { unknown, changed } = configDifference(await readConfig(gitDir, options),
+    await readConfig(referenceDir, options));
   if (unknown.length + changed.length > 0) {
     const parts = [
       ...(unknown.length ? [`keys a reference git init --bare does not write: ${unknown.join(', ')}`] : []),

@@ -103,8 +103,8 @@ export function readBundleFile(path, { uid } = {}) {
   });
 }
 
-async function objectType(gitDir, sha) {
-  const { code, stdout } = await runGit({ cwd: gitDir, gitDir, args: ['cat-file', '-t', sha] });
+async function objectType(gitDir, sha, git) {
+  const { code, stdout } = await runGit({ cwd: gitDir, gitDir, git, args: ['cat-file', '-t', sha] });
   return code === 0 ? stdout.toString('ascii').trim() : null;
 }
 
@@ -112,10 +112,11 @@ async function objectType(gitDir, sha) {
  * Reads `bundle` into the repository `gitDir`, refused unless its prerequisite is exactly `prerequisite`, its one ref
  * exactly `ref`, its objects pass the strict check and the ref descends from the prerequisite.
  *
- * @param {{ gitDir: string, bundle: Buffer, prerequisite: string, ref: { sha: string, name: string } }} options
+ * @param {{ gitDir: string, bundle: Buffer, prerequisite: string, ref: { sha: string, name: string }, git?: string }}
+ *   options `git`, git's path, for the tests only
  * @returns {Promise<{ sha: string, name: string }>} the ref, as read
  */
-export async function loadBundle({ gitDir, bundle, prerequisite, ref }) {
+export async function loadBundle({ gitDir, bundle, prerequisite, ref, git }) {
   if (!SHA.test(prerequisite ?? '') || !SHA.test(ref?.sha ?? '') || typeof ref?.name !== 'string') {
     throw new TypeError('loadBundle: a prerequisite, and a ref with a sha and a name, are required');
   }
@@ -134,11 +135,11 @@ export async function loadBundle({ gitDir, bundle, prerequisite, ref }) {
   if (only.sha === prerequisite) {
     throw new BundleError('the bundle\'s ref is its prerequisite: it brings no commit');
   }
-  if (await objectType(gitDir, prerequisite) !== 'commit') {
+  if (await objectType(gitDir, prerequisite, git) !== 'commit') {
     throw new BundleError(`the bundle's prerequisite ${prerequisite} is not a commit of the repository`);
   }
   const indexed = await runGit({
-    cwd: gitDir, gitDir, args: ['index-pack', '--strict', '--stdin', '--fix-thin'], input: parsed.pack,
+    cwd: gitDir, gitDir, git, args: ['index-pack', '--strict', '--stdin', '--fix-thin'], input: parsed.pack,
     timeoutMs: 10 * 60 * 1000,
   });
   if (indexed.code !== 0) {
@@ -147,10 +148,12 @@ export async function loadBundle({ gitDir, bundle, prerequisite, ref }) {
   if (!/^pack\t[0-9a-f]{40}\n$/.test(indexed.stdout.toString('latin1'))) {
     throw new BundleError('the bundle holds data after its pack');
   }
-  if (await objectType(gitDir, only.sha) !== 'commit') {
+  if (await objectType(gitDir, only.sha, git) !== 'commit') {
     throw new BundleError(`the bundle's ref ${only.sha} is not a commit`);
   }
-  const ancestry = await runGit({ cwd: gitDir, gitDir, args: ['merge-base', '--is-ancestor', prerequisite, only.sha] });
+  const ancestry = await runGit({
+    cwd: gitDir, gitDir, git, args: ['merge-base', '--is-ancestor', prerequisite, only.sha],
+  });
   if (ancestry.code === 1) {
     throw new BundleError(`the bundle's ref ${only.sha} does not descend from its prerequisite ${prerequisite}`);
   }

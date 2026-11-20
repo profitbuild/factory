@@ -353,3 +353,10 @@ test('a token source refuses a repository not in the adapter\'s shape, before an
       baseUrl: fake.baseUrl }), /a repository must be owner\/name, as the adapter has it/);
   }
 });
+
+test('a token source names its repository, for a push to check (#0-276, review round 1)', () => {
+  const tokens = createBuilderTokenSource({ repository: 'profitbuild/other-product',
+    env: { appId: 1, installationId: 2, keyPath: '/x' }, baseUrl: fake.baseUrl });
+  assert.equal(tokens.repository, 'profitbuild/other-product');
+  assert.ok(Object.isFrozen(tokens));
+});
