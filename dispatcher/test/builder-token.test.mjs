@@ -11,7 +11,7 @@ import { chmod, rm, symlink } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { join } from 'node:path';
 
-import { RefusedError, readAppKey } from '../src/github/checked-token.mjs';
+import { RefusedError, checkInstallation, mintCheckedToken, readAppKey } from '../src/github/checked-token.mjs';
 import {
   BUILDER_PERMISSIONS, createBuilderTokenSource, mintBuilderToken,
 } from '../src/github/builder-token.mjs';
@@ -318,4 +318,14 @@ test('an API that is neither HTTPS nor loopback is refused before the key is rea
     baseUrl: 'http://x.example' }),
     /the API must be/, 'refused before the key is read: no ENOENT');
   assert.equal(fake.requests.length, start);
+});
+
+// installationIdFrom has no default (incident-platform backlog #0-273): a caller that does not say where its expected
+// installation id comes from is a programming error, thrown before any key is read or request made.
+test('a caller of the installation check that does not name the source of the expected id is an error', async () => {
+  const installation = { id: 1, app_id: 2, permissions: {} };
+  assert.throws(() => checkInstallation(installation, { appId: 2, installationId: 1, permissions: {}, repository: 'o/r' }),
+    TypeError);
+  await assert.rejects(mintCheckedToken({ appId: 2, installationId: 1, keyPath: '/nonexistent', owner: 'o', repo: 'r',
+    permissions: {}, baseUrl: 'http://127.0.0.1:1' }), TypeError);
 });

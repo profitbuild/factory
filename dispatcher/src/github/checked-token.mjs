@@ -4,9 +4,11 @@
  * no one else; the installation is the one expected, of the app expected, and holds exactly the permissions expected;
  * the token is narrowed to one repository, reaches exactly it, and holds the same permissions.
  *
- * Parametrized by the repository and the permissions, for builder-app today (builder-token.mjs). dispatcher/bin/
- * dev-token.mjs keeps its own copy of these checks for now (#0-271 AC4): it does not narrow its token, on purpose, and
- * its permissions and builder-app's part at stage 4.5; moving it onto this module is incident-platform backlog #0-273.
+ * Parametrized by the app, the installation, the repository and the permissions, for two callers:
+ * - builder-token.mjs (builder-app), through mintCheckedToken, whose token is narrowed to one repository;
+ * - dispatcher/bin/dev-token.mjs (the dev app, on the owner's host), through readAppKey and the check* functions one by
+ *   one, since its token is not narrowed, on purpose: that the token reaches only profitbuild/factory proves the
+ *   installation's scope on every token. Its permissions are not builder-app's either.
  *
  * Nothing here writes to the disk or prints; a refusal's message names what GitHub answered (permissions, repository
  * names, ids), never a token, the JWT or the key.
@@ -45,11 +47,26 @@ export async function readAppKey(path, { uid, afterLstat } = {}) {
   });
 }
 
-/** The installation GitHub names for the repository is the one expected, of the app expected, holding `permissions`. */
-export function checkInstallation(installation, { appId, installationId, permissions, repository }) {
+/**
+ * `installationIdFrom` names where the caller's expected installation id comes from, for the refusal; it has no
+ * default, so that a new caller must say it (a programming error, thrown as a TypeError, otherwise).
+ */
+function requireInstallationIdFrom(installationIdFrom) {
+  if (typeof installationIdFrom !== 'string' || installationIdFrom === '') {
+    throw new TypeError('installationIdFrom must name where the expected installation id comes from');
+  }
+}
+
+/**
+ * The installation GitHub names for the repository is the one expected, of the app expected, holding `permissions`.
+ * `installationIdFrom` names the source of `installationId` in a refusal: builder-token's
+ * 'BUILDER_APP_INSTALLATION_ID', dev-token's 'INSTALLATION_ID / --installation-id'.
+ */
+export function checkInstallation(installation, { appId, installationId, installationIdFrom, permissions, repository }) {
+  requireInstallationIdFrom(installationIdFrom);
   if (installation.id !== installationId) {
     throw new RefusedError(`the installation on ${repository} is ${installation.id}, not ${installationId} `
-      + 'as BUILDER_APP_INSTALLATION_ID says');
+      + `as ${installationIdFrom} says`);
   }
   if (installation.app_id !== appId) {
     throw new RefusedError(`the installation on ${repository} is the app ${installation.app_id}'s, not ${appId}'s`);
@@ -78,7 +95,8 @@ export function checkTokenPermissions(tokenPermissions, permissions) {
  * Mints a token of `installationId`, narrowed to `owner/repo` and to `permissions`, after the checks above; a token
  * that fails one is revoked before the refusal is thrown, so none is returned.
  *
- * @param {{ appId: number, installationId: number, keyPath: string, owner: string, repo: string,
+ * @param {{ appId: number, installationId: number, installationIdFrom: string, keyPath: string, owner: string,
+ *   repo: string,
  *   permissions: Record<string, string>, baseUrl: string, fetchImpl?: typeof fetch, timeoutMs?: number,
  *   uid?: number, report?: (line: string) => void }} options `report` is told each check that passed (check-app)
  * @returns {Promise<{ token: string, expiresAt: string }>}
@@ -86,8 +104,10 @@ export function checkTokenPermissions(tokenPermissions, permissions) {
  *   read and the JWT made), or GitHub was not reached or answered an error
  */
 export async function mintCheckedToken({
-  appId, installationId, keyPath, owner, repo, permissions, baseUrl, fetchImpl, timeoutMs, uid, report = () => {},
+  appId, installationId, installationIdFrom, keyPath, owner, repo, permissions, baseUrl, fetchImpl, timeoutMs, uid,
+  report = () => {},
 }) {
+  requireInstallationIdFrom(installationIdFrom);
   checkApiUrl(baseUrl);
   const repository = `${owner}/${repo}`;
   const privateKey = await readAppKey(keyPath, { uid });
@@ -95,7 +115,7 @@ export async function mintCheckedToken({
   const jwt = createAppJwt({ appId, privateKey });
   const call = { baseUrl, fetchImpl, timeoutMs };
   const installation = await findRepositoryInstallation({ ...call, jwt, owner, repo });
-  checkInstallation(installation, { appId, installationId, permissions, repository });
+  checkInstallation(installation, { appId, installationId, installationIdFrom, permissions, repository });
   report(`installation ${installationId} of app ${appId} on ${repository} holds ${show(permissions)}: ok`);
   const answer = await createInstallationToken({
     ...call, jwt, installationId, permissions: { ...permissions }, repositories: [repo],

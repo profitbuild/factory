@@ -7,6 +7,10 @@
  * again (the same inode, the same owner and mode), so a file swapped between the two calls is refused, not read: a
  * symlink fails the open, and a FIFO, which a plain open would wait on for a writer for ever, opens at once and fails
  * the check.
+ *
+ * Since incident-platform backlog #0-273 it runs on the owner's host too: dispatcher/bin/dev-token.mjs reads the dev
+ * app's key with it, next to that key. A change here is a change of code that runs on the host, not only in the
+ * dispatcher.
  */
 import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
