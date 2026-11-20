@@ -4,7 +4,8 @@
  *
  * A subset of draft 2020-12, as far as those schemas need and no further: `type` (one or a list), `const`, `enum`;
  * for a string `minLength` (in code points) and `pattern` (a JavaScript regular expression, flag `u`); for a number
- * `minimum`; for an array `items`, `minItems`, `uniqueItems`; for an object `properties`, `required` and
+ * `minimum`; for an array `prefixItems` (a schema for each leading item), `items` (for the items after those),
+ * `minItems`, `uniqueItems`; for an object `properties`, `required` and
  * `additionalProperties` (false, or a schema); `$defs` and a local `$ref` (`#/$defs/<name>`). The annotations
  * `$schema`, `$id`, `title`, `description` and `$comment` are allowed and mean nothing.
  *
@@ -18,7 +19,7 @@ import { isDeepStrictEqual } from 'node:util';
 export class SchemaError extends Error {}
 
 const ANNOTATIONS = ['$schema', '$id', 'title', 'description', '$comment'];
-const KEYWORDS = new Set([...ANNOTATIONS, 'type', 'const', 'enum', 'minLength', 'pattern', 'minimum', 'items',
+const KEYWORDS = new Set([...ANNOTATIONS, 'type', 'const', 'enum', 'minLength', 'pattern', 'minimum', 'prefixItems', 'items',
   'minItems', 'uniqueItems', 'properties', 'required', 'additionalProperties', '$defs', '$ref']);
 const TYPES = new Set(['null', 'boolean', 'object', 'array', 'number', 'integer', 'string']);
 
@@ -69,6 +70,11 @@ export function checkSchema(schema, root = schema, at = '#') {
       resolveRef(root, value);
     } else if (keyword === 'items') {
       checkSchema(value, root, `${at}/items`);
+    } else if (keyword === 'prefixItems') {
+      if (!Array.isArray(value) || value.length === 0) {
+        throw new SchemaError(`${at}: prefixItems must be a list of schemas`);
+      }
+      value.forEach((sub, i) => checkSchema(sub, root, `${at}/prefixItems/${i}`));
     } else if (keyword === 'additionalProperties' && value !== false) {
       checkSchema(value, root, `${at}/additionalProperties`);
     } else if (keyword === 'properties' || keyword === '$defs') {
@@ -131,9 +137,13 @@ function validateAt(schema, value, path, root, errors) {
     if (schema.uniqueItems && value.some((item, i) => value.findIndex((other) => isDeepStrictEqual(item, other)) < i)) {
       errors.push(`${where(path)}: must not repeat an item`);
     }
-    if (schema.items !== undefined) {
-      value.forEach((item, i) => validateAt(schema.items, item, pointer(path, i), root, errors));
-    }
+    const leading = schema.prefixItems ?? [];
+    value.forEach((item, i) => {
+      const sub = i < leading.length ? leading[i] : schema.items;
+      if (sub !== undefined) {
+        validateAt(sub, item, pointer(path, i), root, errors);
+      }
+    });
   }
   if (isObject(value)) {
     for (const name of schema.required ?? []) {

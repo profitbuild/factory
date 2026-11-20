@@ -66,7 +66,7 @@ test('the adapter\'s fields are checked: commands as argv, paths that stay in th
     ['repository', 'incident-platform', /\/repository: must match/],
     ['gate/command', 'scripts/factory/run-tests.sh', /\/gate\/command: must be array/],
     ['gate/command', [], /\/gate\/command: must have at least 1 item/],
-    ['gate/command', [''], /\/gate\/command\/0: must have at least 1 character/],
+    ['gate/command', [''], /\/gate\/command\/0: must match/],
     ['gate/contract', 'other.schema.json', /\/gate\/contract: must be "gate.schema.json"/],
     ['queue/kind', 'projects-v2', /\/queue\/kind: must be "backlog-md"/],
     ['queue/files', [], /\/queue\/files: must have at least 1 item/],
@@ -85,6 +85,44 @@ test('the adapter\'s fields are checked: commands as argv, paths that stay in th
   }
   checkAdapter(withField(ADAPTER, 'trustedPaths', ['scripts/factory/', 'a..b/c']));
   refused([], /^the adapter breaks its schema: \/: must be object$/);
+});
+
+test('sec-4a81: a path is refused when a line break, a control character or a line separator would hide a .. segment',
+  () => {
+    const escapes = ['\n/../../../home/dispatcher/x', '\n/../x', 'a\r/../../x', 'a\u2028/../x', 'a\u2029/../x', 'a/\u0000',
+      'a\tb', 'a\u007fb', 'x\n..'];
+    for (const value of escapes) {
+      for (const path of ['protectedPaths/file', 'queue/files', 'trustedPaths']) {
+        const field = path === 'protectedPaths/file' ? value : [value];
+        refused(withField(ADAPTER, path, field), /must match/);
+      }
+    }
+  });
+
+test('a command\'s first argument is the product\'s script: a path, not absolute, not leaving it, not an option', () => {
+  for (const script of ['/usr/bin/env', '../x', '-x', '--help', 'a/../../x', '\n/../x']) {
+    refused(withField(ADAPTER, 'gate/command', [script]), /\/gate\/command\/0: must match/);
+    refused(withField(ADAPTER, 'changedPaths/command', [script, 'arg']), /\/changedPaths\/command\/0: must match/);
+  }
+  checkAdapter(withField(ADAPTER, 'gate/command', ['scripts/factory/run-tests.sh', '--working-tree', '/abs']));
+  refused(withField(ADAPTER, 'gate/command', ['scripts/x.sh', '']), /\/gate\/command\/1: must have at least 1/);
+});
+
+test('the repository\'s name is neither . nor ..', () => {
+  for (const repository of ['owner/..', 'owner/.', './repo', '../repo', 'owner/', '/repo', 'owner/repo/x']) {
+    refused(withField(ADAPTER, 'repository', repository), /\/repository: must match/);
+  }
+  for (const repository of ['owner/.github', 'owner/a..b', 'o/x.']) {
+    checkAdapter(withField(ADAPTER, 'repository', repository));
+  }
+});
+
+test('prefixItems checks the leading items, and items those after them', () => {
+  const schema = { type: 'array', prefixItems: [{ const: 'a' }], items: { type: 'integer' } };
+  assert.deepEqual(validate(schema, ['a', 1, 2]), []);
+  assert.deepEqual(validate(schema, [1, 'b']), ['/0: must be "a"', '/1: must be integer']);
+  assert.deepEqual(validate(schema, []), []);
+  assert.throws(() => checkSchema({ prefixItems: [] }), /prefixItems must be a list of schemas/);
 });
 
 test('an error names where and what is expected, never the value found there', () => {
@@ -135,7 +173,7 @@ test('AC5: a gate answer missing or adding a field, or out of its contract, is r
 });
 
 test('a schema with a keyword the validator does not check is refused, at any depth', () => {
-  for (const keyword of ['oneOf', 'anyOf', 'if', 'format', 'maxLength', 'prefixItems', 'patternProperties']) {
+  for (const keyword of ['oneOf', 'anyOf', 'if', 'format', 'maxLength', 'contains', 'patternProperties']) {
     assert.throws(() => checkSchema({ type: 'object', properties: { a: { [keyword]: [] } } }), (error) => {
       assert.ok(error instanceof SchemaError);
       assert.match(error.message, new RegExp(`^#/properties/a: the keyword ${keyword} is not one this validator`));

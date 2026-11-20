@@ -9,9 +9,9 @@
   "additionalProperties": false,
   "properties": {
     "repository": {
-      "description": "The product's repository on GitHub, owner/name: where builder-app pushes and opens its pull requests.",
+      "description": "The product's repository on GitHub, owner/name (the name not . nor ..): where builder-app pushes and opens its pull requests.",
       "type": "string",
-      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+$"
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/(?!\\.{1,2}$)[A-Za-z0-9._-]+$"
     },
     "gate": {
       "description": "The product's test gate: the command, and the contract its JSON answer keeps (schemas/gate.schema.json).",
@@ -76,14 +76,20 @@
   },
   "$defs": {
     "path": {
-      "description": "A path relative to the product's root that never leaves it: not absolute, no .. segment, no backslash.",
+      "description": "A path relative to the product's root that never leaves it: not absolute, no .. segment (the lookahead reads across lines, [\\s\\S]), no backslash, and no control character nor line separator (U+0000-U+001F, U+007F, U+2028, U+2029).",
       "type": "string",
-      "pattern": "^(?!/)(?!(?:.*/)?\\.\\.(?:/|$))[^\\\\\\u0000]+$"
+      "pattern": "^(?!/)(?![\\s\\S]*(?:^|/)\\.\\.(?:/|$))[^\\\\\\u0000-\\u001f\\u007f\\u2028\\u2029]+$"
+    },
+    "script": {
+      "description": "The product's script a command runs: a path, which does not start with - (it would read as an option).",
+      "$ref": "#/$defs/path",
+      "pattern": "^[^-]"
     },
     "command": {
-      "description": "A command as its arguments, run without a shell: the first is the product's script, a path.",
+      "description": "A command as its arguments, run without a shell: the first is the product's script, a path; the others any non-empty strings.",
       "type": "array",
       "minItems": 1,
+      "prefixItems": [{ "$ref": "#/$defs/script" }],
       "items": { "type": "string", "minLength": 1 }
     }
   }
