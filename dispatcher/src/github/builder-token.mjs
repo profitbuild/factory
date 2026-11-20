@@ -46,13 +46,16 @@ export function parseRepository(repository) {
   return Object.freeze({ owner, repo });
 }
 
+/** Where builder-app pushes: GitHub. The one place the host is named (push.mjs's pushTarget refuses any other). */
+export const GIT_HOST = 'https://github.com';
+
 /**
  * Where builder-app pushes the product's branches: an explicit URL, never a remote's name, which a config could
- * redefine. `base` is GitHub but in tests.
+ * redefine. `base` is GIT_HOST but in tests (a loopback server, which pushTarget alone lets through).
  *
  * @param {string} repository owner/name
  */
-export function pushUrl(repository, base = 'https://github.com') {
+export function pushUrl(repository, base = GIT_HOST) {
   const { owner, repo } = parseRepository(repository);
   return `${base}/${owner}/${repo}.git`;
 }

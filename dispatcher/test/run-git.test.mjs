@@ -40,11 +40,10 @@ test('a call writing more than the bound to stdout, or to stderr, is ended and r
 });
 
 test('a call that runs past its time is ended and refused', async () => {
+  // A sleep it would finish: without the timeout the call resolves, and the expected refusal is missing.
   const sleeper = await fakeGit('sleeper', 'exec sleep 5');
-  const started = Date.now();
   await assert.rejects(runGit({ cwd: root.dir, git: sleeper, args: ['push'], timeoutMs: 100 }),
     refused(/^git push was ended by SIGKILL, after at most 100 ms$/));
-  assert.ok(Date.now() - started < 4_000, 'ended, not waited for');
 });
 
 test('a git that is not there cannot be run, and says so', async () => {

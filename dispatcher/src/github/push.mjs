@@ -18,8 +18,8 @@
  *     `sha`, its own objects strictly checked, `sha` a descendant of the base; no ref written;
  *  8. the config is checked again, right before the token is asked for;
  *  9. the token, and `git push --porcelain <url> <sha>:refs/heads/factory/<branch>`, built by gitPushCommand, to
- *     pushUrl(repository) on GitHub: the URL is never the caller's (a test gives another host, `gitBase`, which must
- *     be HTTPS or plain HTTP to a loopback address, as the API's URL must);
+ *     pushUrl(repository) on GitHub: the URL is never the caller's (a test gives its loopback server, `gitBase`, over
+ *     http; no other host is taken, pushTarget);
  * 10. the result read from --porcelain: a ref refused is a PushRejectedError naming git's kind of refusal, never the
  *     remote's text (a reason recorded for a task, 4.4, holds no text of GitHub's).
  * The push directory is removed after every push, refused or not: nothing of a push lives on to the next.
@@ -32,11 +32,9 @@ import { loadBundle } from '../git/bundle.mjs';
 import { checkPushConfig, initBare } from '../git/config-allowlist.mjs';
 import { runGit } from '../git/run-git.mjs';
 import { ensureOwnDirectory } from '../state/files.mjs';
-import { checkTaskBranch, gitPushCommand, pushUrl } from './builder-token.mjs';
-import { requireHttpsOrLoopback } from './url-policy.mjs';
+import { GIT_HOST, checkTaskBranch, gitPushCommand, pushUrl } from './builder-token.mjs';
+import { LOOPBACK_HOSTS } from './url-policy.mjs';
 
-/** Where builder-app pushes: GitHub. */
-export const GIT_HOST = 'https://github.com';
 /** The longest a push may run. */
 export const PUSH_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -87,16 +85,17 @@ async function isMissing(path) {
  * clone's objects), refused unless it is the dispatcher's own and holds no alternates of its own.
  *
  * @param {string} repoDir
- * @param {{ uid?: number }} [options]
+ * @param {{ uid?: number, lstatOf?: typeof lstat }} [options] `lstatOf` for the tests only: one directory's owner
+ *   given apart from another's, which a test cannot `chown`
  */
-export async function mainObjects(repoDir, { uid = process.getuid() } = {}) {
-  const dotGit = await lstat(join(repoDir, '.git')).catch(() => null);
+export async function mainObjects(repoDir, { uid = process.getuid(), lstatOf = lstat } = {}) {
+  const dotGit = await lstatOf(join(repoDir, '.git')).catch(() => null);
   const objects = dotGit?.isDirectory() ? join(repoDir, '.git', 'objects') : join(repoDir, 'objects');
   if (dotGit && !dotGit.isDirectory()) {
     throw new PushRefusedError('FACTORY_REPO_DIR/.git is not a directory (a gitfile or a symlink is refused)');
   }
   for (const [path, what] of [[objects, 'objects'], [join(objects, 'info'), 'objects/info'], [join(objects, 'pack'), 'objects/pack']]) {
-    const stats = await lstat(path).catch(() => null);
+    const stats = await lstatOf(path).catch(() => null);
     if (!stats?.isDirectory()) {
       throw new PushRefusedError(`FACTORY_REPO_DIR holds no ${what} directory (a symlink is refused)`);
     }
@@ -117,20 +116,28 @@ export async function mainObjects(repoDir, { uid = process.getuid() } = {}) {
 }
 
 /**
- * Where a push of `repository` goes: pushUrl(repository) on `gitBase`, GitHub (GIT_HOST) but in tests, and the
- * protocols git may use for it (GIT_ALLOW_PROTOCOL): https alone, and http too only for a test's loopback host.
- * `gitBase` is an origin alone, HTTPS, or plain HTTP to a loopback address, as the API's URL must be.
+ * Where a push of `repository` goes, and the protocols git may use for it (GIT_ALLOW_PROTOCOL): on GitHub
+ * (GIT_HOST), https://github.com/<repository>.git over https alone; on a test's server, http://<loopback>:<port>, an
+ * origin alone, over http too. No other host is taken, HTTPS or not: the URL of a push is always GitHub's.
  *
  * @param {string} repository
  * @param {string} [gitBase]
  * @returns {{ url: string, allowProtocols: string }}
  */
 export function pushTarget(repository, gitBase = GIT_HOST) {
-  const host = requireHttpsOrLoopback(gitBase, 'the git host');
-  if (host.origin !== gitBase || host.username || host.password) {
-    throw new PushRefusedError('the git host must be an origin alone, with no path, user or password');
+  if (gitBase === GIT_HOST) {
+    return { url: pushUrl(repository, GIT_HOST), allowProtocols: 'https' };
   }
-  return { url: pushUrl(repository, host.origin), allowProtocols: host.protocol === 'http:' ? 'http:https' : 'https' };
+  let host;
+  try {
+    host = new URL(gitBase);
+  } catch {
+    host = null;
+  }
+  if (!host || host.protocol !== 'http:' || !LOOPBACK_HOSTS.includes(host.hostname) || host.origin !== gitBase) {
+    throw new PushRefusedError(`the git host must be ${GIT_HOST}, or a test's http:// origin on a loopback address`);
+  }
+  return { url: pushUrl(repository, host.origin), allowProtocols: 'http:https' };
 }
 
 /**

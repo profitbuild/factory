@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { childProcessCalls, childProcessViolations } from '../testing/child-process-scan.mjs';
+import { testOnlyOptions } from '../testing/test-only-options-scan.mjs';
 
 const SRC = fileURLToPath(new URL('../src/', import.meta.url));
 
@@ -97,4 +98,33 @@ test('review round 1: git is started by src/git/run-git.mjs alone, and flock(1) 
   assert.notDeepEqual(wrongStarts('git/run-git.mjs', planted("spawn('sh', ['-c', 'git push'], { env: childEnv() });")), []);
   assert.notDeepEqual(wrongStarts('state/lock.mjs', planted("spawnSync('git', [], { env: childEnv() });")), []);
   assert.deepEqual(wrongStarts('git/run-git.mjs', planted('spawn(git, [...GIT_OVERRIDES], { env: childEnv() });')), []);
+});
+
+test('review round 2: no module of src/ gives a test\'s option (git, gitBase, hooks, maxOutput, lstatOf)', async () => {
+  const found = [];
+  for (const file of await modules()) {
+    found.push(...testOnlyOptions(file.slice(SRC.length), await readFile(file, 'utf8')));
+  }
+  assert.deepEqual(found, []);
+  for (const [path, code] of [
+    ['cli.mjs', "pushTask({ stateDir, gitBase: 'http://127.0.0.1:1' });"],
+    ['cli.mjs', 'pushTask({ stateDir, hooks: { afterInit } });'],
+    ['cli.mjs', "runGit({ cwd, args, git: '/tmp/git' });"],
+    ['cli.mjs', 'runGit({ cwd, args, maxOutput: 1 });'],
+    ['cli.mjs', "loadBundle({ gitDir, bundle, git: '/tmp/git' });"],
+    ['cli.mjs', "initBare(dir, path, { git: '/tmp/git' });"],
+    ['cli.mjs', 'mainObjects(repoDir, { lstatOf });'],
+    ['cli.mjs', "pushTarget(repository, 'http://127.0.0.1:1');"],
+    ['cli.mjs', 'pushTask({ stateDir, git });'],
+    ['github/push.mjs', "runGit({ cwd, args, git: '/tmp/git' });"],
+    ['github/push.mjs', "pushTarget(repository, 'http://127.0.0.1:1');"],
+    ['git/bundle.mjs', 'runGit({ cwd, args, maxOutput: 10 });'],
+  ]) {
+    assert.notDeepEqual(testOnlyOptions(path, `${code}\n`), [], `${path}: ${code}`);
+  }
+  assert.deepEqual(testOnlyOptions('github/push.mjs',
+    'export async function pushTask({ git, gitBase, hooks = {} }) {\n  initBare(dir, repo, { git });\n'
+    + '  pushTarget(repository, gitBase);\n  runGit({ cwd, gitDir, git, args });\n}\n'), [],
+  'a module that runs git forwards its caller\'s own option');
+  assert.deepEqual(testOnlyOptions('cli.mjs', "pushTask({ stateDir, tokens }); pushTarget(repository);\n"), []);
 });

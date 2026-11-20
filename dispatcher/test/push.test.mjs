@@ -6,16 +6,16 @@
 import { test, after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { appendFile, chmod, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadAdapter } from '../src/adapter.mjs';
 import { BundleError, readBundleFile } from '../src/git/bundle.mjs';
 import { ConfigRefusedError, readConfig } from '../src/git/config-allowlist.mjs';
-import { pushUrl } from '../src/github/builder-token.mjs';
+import { GIT_HOST, pushUrl } from '../src/github/builder-token.mjs';
 import {
-  GIT_HOST, PushRefusedError, PushRejectedError, mainObjects, pushTarget, pushTask, readPushResult,
+  PushRefusedError, PushRejectedError, mainObjects, pushTarget, pushTask, readPushResult,
 } from '../src/github/push.mjs';
 import { GIT_VERSION, REAL_GIT, git, makeProduct, makeTask } from '../testing/git-fixtures.mjs';
 import { startGitServer } from '../testing/git-server.mjs';
@@ -284,6 +284,15 @@ test('FACTORY_REPO_DIR\'s objects, info/ and pack/ are the dispatcher\'s own, wr
     await mkdir(join(objects, 'info'), { recursive: true, mode: 0o755 });
     await mkdir(join(objects, 'pack'), { mode: 0o755 });
     assert.equal(await mainObjects(loose), objects);
+    for (const [dir, what] of [[join(objects, 'info'), 'objects/info'], [join(objects, 'pack'), 'objects/pack']]) {
+      // Only this one directory another user's: the check of its owner is its own, not objects'.
+      const lstatOf = async (path) => {
+        const stats = await lstat(path);
+        return path === dir ? Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { uid: stats.uid + 1 }) : stats;
+      };
+      await assert.rejects(mainObjects(loose, { lstatOf }),
+        new RegExp(`: ${what} of FACTORY_REPO_DIR is owned by uid \\d+, not by this process`));
+    }
     for (const [dir, what] of [[objects, 'objects'], [join(objects, 'info'), 'objects/info'],
       [join(objects, 'pack'), 'objects/pack']]) {
       for (const mode of [0o775, 0o757, 0o777]) {
@@ -334,7 +343,7 @@ test('the git host is GitHub but in tests, and a test\'s is HTTPS or loopback HT
   for (const gitBase of ['http://example.com', 'http://github.com', 'ftp://127.0.0.1', `${server.baseUrl}/x`,
     `${server.baseUrl}/`, server.baseUrl.replace('http://', 'http://u:p@'), 'not a url']) {
     const { run, source } = push({ gitBase });
-    await assert.rejects(run, /the git host must be|must be an https:\/\/ URL|Invalid URL/, gitBase);
+    await assert.rejects(run, /the git host must be https:\/\/github\.com, or a test's http:\/\/ origin/, gitBase);
     assert.deepEqual(source.asked, [], gitBase);
   }
 });
@@ -343,8 +352,12 @@ test('the push goes to pushUrl(repository) on GitHub over https alone; http only
   assert.equal(GIT_HOST, 'https://github.com');
   assert.deepEqual(pushTarget('profitbuild/incident-platform'),
     { url: 'https://github.com/profitbuild/incident-platform.git', allowProtocols: 'https' });
-  assert.deepEqual(pushTarget('profitbuild/other-product', 'https://git.example'),
-    { url: 'https://git.example/profitbuild/other-product.git', allowProtocols: 'https' });
+  for (const gitBase of ['https://git.example', 'https://github.com.evil.example', 'https://github.com/',
+    'https://GITHUB.com', 'http://github.com', 'https://127.0.0.1:8080', 'http://192.0.2.1:8080', 'http://127.0.0.1:8080/x']) {
+    assert.throws(() => pushTarget('profitbuild/other-product', gitBase), (error) => error instanceof PushRefusedError
+      && /^the git host must be https:\/\/github\.com, or a test's http:\/\/ origin on a loopback address$/.test(error.message),
+    gitBase);
+  }
   assert.deepEqual(pushTarget('profitbuild/other-product', 'http://127.0.0.1:8080'),
     { url: 'http://127.0.0.1:8080/profitbuild/other-product.git', allowProtocols: 'http:https' });
 });
