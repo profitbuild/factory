@@ -3,7 +3,9 @@
 # .node-version, the workflow linters at incident-platform's pins, and the secret scan of every commit added
 # (#0-268). The job names, `Test`, `Lint Workflows` and `Secret Scan`, are the required checks of main's ruleset once
 # their first run has registered them (the owner adds each to the ruleset): from then on, renaming a job without
-# changing the ruleset leaves every pull request waiting for ever.
+# changing the ruleset leaves every pull request waiting for ever. `Test (git 2.43)`, the dispatcher's tests on the
+# build VM's git (incident-platform backlog #0-276), joins them once its pull request is merged. Its image (Docker Hub)
+# and its git (Ubuntu's archive, apt's signed index) are sources the owner accepted for this CI (2026-11-20).
 # ============================================================
 
 name: CI
@@ -44,6 +46,49 @@ jobs:
       - name: The dispatcher's tests
         working-directory: dispatcher
         run: node --test
+
+  test-git-2-43:
+    name: Test (git 2.43)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Ubuntu 24.04's own git, 2.43.0: the build VM's (incident-platform backlog #0-276, AC6). The runner's git is newer.
+    container: ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+    # In a container a run step's default shell is sh (dash, no pipefail); the image has bash.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The job's name is a fact, not a hope: any other upstream git than 2.43 fails it.
+      - name: Install git
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+          version=$(git --version)
+          echo "$version"
+          case $version in
+            "git version 2.43."*) ;;
+            *) echo "::error::expected git 2.43 (the build VM's), got: $version"; exit 1 ;;
+          esac
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: ./.github/actions/setup-node
+
+      # The whole suite, not a list of files: a test that runs git, now or later, runs on the VM's git too. As a user
+      # that is not root, as the dispatcher runs on the VM (`dispatcher`, uid 1001): root ignores a directory's mode,
+      # so a test that makes a file impossible to delete would pass for the wrong reason, or fail.
+      - name: The dispatcher's tests on git 2.43
+        run: |
+          set -euo pipefail
+          useradd --create-home --uid 1001 tester
+          chown -R tester: "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE/dispatcher"
+          runuser -u tester -- env PATH="$PATH" HOME=/home/tester node --test
 
   lint:
     name: Lint Workflows

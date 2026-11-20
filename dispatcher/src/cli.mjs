@@ -26,6 +26,7 @@ import { loadAdapter } from './adapter.mjs';
 import { readBuilderEnv } from './config/builder-env.mjs';
 import { readFactoryEnv } from './config/factory-env.mjs';
 import { ConfigError, refuseSecretShaped } from './config/settings.mjs';
+import { checkTaskBranch } from './github/builder-token.mjs';
 import { breakerRefusal, openBreaker } from './state/breaker.mjs';
 import { checkStateDir } from './state/files.mjs';
 import { acquireLock } from './state/lock.mjs';
@@ -39,7 +40,6 @@ export class UsageError extends Error {}
 
 const USAGE = 'usage: cli.mjs run [--item 0-N | --resume <branch>] --adapter <path>';
 const ITEM = /^[0-9]+-[0-9]+$/;
-const BRANCH = /^[a-z]+\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 
 function parse(argv) {
   let parsed;
@@ -66,8 +66,13 @@ function parse(argv) {
   if (values.item !== undefined && !ITEM.test(values.item)) {
     throw new UsageError('--item must be a backlog item, 0-N');
   }
-  if (values.resume !== undefined && (!BRANCH.test(values.resume) || values.resume.split('/').includes('..'))) {
-    throw new UsageError('--resume must be a branch name, <type>/<name>');
+  if (values.resume !== undefined) {
+    // The one rule of a task's branch, the push's own (incident-platform backlog #0-276).
+    try {
+      checkTaskBranch(values.resume);
+    } catch {
+      throw new UsageError('--resume must be a branch name, <type>/<name>');
+    }
   }
   return values;
 }

@@ -5,10 +5,11 @@
 # process's own environment (src/github/builder-token.mjs, gitPushCommand). A question for any other origin, as a URL
 # rewritten by `url.<base>.insteadOf` to another https:// host would ask, gets nothing and fails the push. A URL
 # rewritten to another protocol (ssh://, whose core.sshCommand would see the token in its environment) never gets
-# here: GIT_ALLOW_PROTOCOL, set by gitPushCommand, makes git refuse it. Neither covers the rest of a .git/config
-# (http.proxy, http.<url>.sslVerify, http.sslCAInfo, http.curloptResolve, include.path), which can still send the
-# token elsewhere: hence gitPushCommand's rule, a push only from a repository whose configuration the dispatcher
-# trusts. printf is the shell's builtin, so the token is in no argument of any process; it is in no URL and no file.
+# here: GIT_ALLOW_PROTOCOL, set by gitPushCommand, makes git refuse it. Both are a second layer: the push runs only in
+# a repository the dispatcher made for it, whose config is held to a reference `git init --bare`'s before the token is
+# asked for (src/github/push.mjs, incident-platform backlog #0-276), so no http.proxy, http.<url>.sslVerify,
+# http.sslCAInfo, http.curloptResolve or include.path can send the token elsewhere. printf is the shell's builtin, so
+# the token is in no argument of any process; it is in no URL and no file.
 #
 # Why the devcontainer keeps a credential helper that reads a file (.devcontainer/git-credential-app-token.sh): there
 # the token is minted on the host (dispatcher/bin/dev-token.mjs) and used by a git inside a container, which is no

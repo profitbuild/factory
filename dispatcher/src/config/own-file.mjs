@@ -11,6 +11,9 @@
  * Since incident-platform backlog #0-273 it runs on the owner's host too: dispatcher/bin/dev-token.mjs reads the dev
  * app's key with it, next to that key. A change here is a change of code that runs on the host, not only in the
  * dispatcher.
+ *
+ * Since incident-platform backlog #0-276 it reads a bundle too (git/bundle.mjs, readBundleFile): as bytes
+ * (`encoding: null`), and no larger than `maxBytes`, checked on the handle before the read.
  */
 import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
@@ -18,12 +21,15 @@ import { lstat, open } from 'node:fs/promises';
 /**
  * @param {string} path
  * @param {{ what: string, forbiddenMode: number, uid?: number, refuse: (message: string) => Error,
- *   afterLstat?: () => Promise<void> }} options `what` names the file in a refusal ("the key"); `uid` is the owner
- *   required, the process's by default (a test's other); `afterLstat` runs between the lstat and the open, where a
- *   swap would happen: for the tests only.
- * @returns {Promise<string>} the file's text
+ *   afterLstat?: () => Promise<void>, encoding?: BufferEncoding | null, maxBytes?: number }} options `what` names
+ *   the file in a refusal ("the key"); `uid` is the owner required, the process's by default (a test's other);
+ *   `afterLstat` runs between the lstat and the open, where a swap would happen: for the tests only; `encoding`
+ *   'utf8' by default, null for the bytes; `maxBytes` refuses a larger file without reading it.
+ * @returns {Promise<string | Buffer>} the file's text, or its bytes
  */
-export async function readOwnFile(path, { what, forbiddenMode, uid = process.getuid(), refuse, afterLstat }) {
+export async function readOwnFile(path, {
+  what, forbiddenMode, uid = process.getuid(), refuse, afterLstat, encoding = 'utf8', maxBytes,
+}) {
   const check = (stats) => {
     if (!stats.isFile()) {
       throw refuse(`${what} ${path} is not a regular file (a symlink, a FIFO or a directory is refused)`);
@@ -54,7 +60,10 @@ export async function readOwnFile(path, { what, forbiddenMode, uid = process.get
       throw refuse(`${what} ${path} changed while it was read`);
     }
     check(stats);
-    return await handle.readFile('utf8');
+    if (maxBytes !== undefined && stats.size > maxBytes) {
+      throw refuse(`${what} ${path} is ${stats.size} bytes, more than ${maxBytes}`);
+    }
+    return await handle.readFile(encoding === null ? {} : encoding);
   } finally {
     await handle.close();
   }

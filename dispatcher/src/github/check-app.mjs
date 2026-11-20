@@ -1,5 +1,6 @@
 /**
  * check-app (incident-platform backlog #0-271): proves builder-app against GitHub without using it. Mints a token
+ * for the product's repository (`repository`, owner/name: #0-276 takes it from the caller, not from a constant)
  * after every check of mintBuilderToken, asks GitHub with the app's JWT for its installation on profitbuild/factory
  * and expects 404 (the app is never on factory, ADR-0060 D5), then revokes the token, whatever happened in between.
  * Each step that passed is told to `report`; the first that fails throws. No token, JWT or key is told or thrown.
@@ -15,12 +16,12 @@ export const FORBIDDEN_REPOSITORY = Object.freeze({ owner: 'profitbuild', repo: 
 export class InstalledOnFactoryError extends Error {}
 
 /**
- * @param {{ env: { appId: number, installationId: number, keyPath: string }, baseUrl?: string,
+ * @param {{ env: { appId: number, installationId: number, keyPath: string }, repository: string, baseUrl?: string,
  *   fetchImpl?: typeof fetch, timeoutMs?: number, uid?: number, report: (line: string) => void }} options
  */
-export async function checkApp({ env, baseUrl = GITHUB_API, fetchImpl, timeoutMs, uid, report }) {
+export async function checkApp({ env, repository, baseUrl = GITHUB_API, fetchImpl, timeoutMs, uid, report }) {
   const call = { baseUrl, fetchImpl, timeoutMs };
-  const { token } = await mintBuilderToken({ ...call, env, uid, report });
+  const { token } = await mintBuilderToken({ ...call, env, repository, uid, report });
   let failure = null;
   try {
     await expectNoInstallationOnFactory({ ...call, env, uid });

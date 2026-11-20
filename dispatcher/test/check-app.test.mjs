@@ -20,10 +20,12 @@ after(async () => {
 });
 beforeEach(() => fake.reset());
 
-async function checkApp(extra = [], files = undefined) {
+/** Runs check-app with `extra`; `repository` is the --repository given (null: none), incident-platform by default. */
+async function checkApp(extra = [], files = undefined, { repository = 'profitbuild/incident-platform' } = {}) {
   const { envPath } = files ?? await writeAppFiles(root, fake.privateKey);
   return new Promise((resolve) => {
-    execFile(process.execPath, [`--env-file=${envPath}`, SCRIPT, '--api', fake.baseUrl, ...extra],
+    execFile(process.execPath, [`--env-file=${envPath}`, SCRIPT, '--api', fake.baseUrl,
+      ...(repository === null ? [] : ['--repository', repository]), ...extra],
       { env: { PATH: process.env.PATH } },
       (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr }));
   });
@@ -88,15 +90,19 @@ test('check-app fails when a check fails, with the token revoked and nothing mor
   assert.equal(fake.requests.slice(start).some((r) => r.path === '/repos/profitbuild/factory/installation'), false);
 });
 
-test('check-app refuses an unknown BUILDER_APP_ variable, and an API that is not HTTPS, asking nothing', async () => {
+test('check-app refuses an unknown BUILDER_APP_ variable, and an API not GitHub\'s nor a test\'s, asking nothing', async () => {
   const start = fake.requests.length;
   const typo = await checkApp([], await writeAppFiles(root, fake.privateKey, {
     envText: 'BUILDER_APP_ID=1\nBUILDER_APP_INSTALLATION_ID=2\nBUILDER_APP_KYE=/x\n' }));
   assert.equal(typo.code, 1);
   assert.match(typo.stderr, /^check-app: unknown variable BUILDER_APP_KYE/m);
-  const plain = await checkApp(['--api', 'http://api.example.com']);
-  assert.equal(plain.code, 1);
-  assert.match(plain.stderr, /the API must be an https:\/\/ URL/);
+  for (const api of ['http://api.example.com', 'https://api.example.com', 'https://api.github.com.evil.example',
+    'https://api.github.com:8443', 'https://API.github.com']) {
+    const other = await checkApp(['--api', api]);
+    assert.equal(other.code, 1, api);
+    assert.match(other.stderr, /the API must be https:\/\/api\.github\.com, or a test's http:\/\/ origin on a loopback/, api);
+    assert.equal(other.stdout, '', `${api}: refused before the settings are read, so nothing is printed`);
+  }
   assert.equal(fake.requests.length, start);
 });
 
@@ -118,4 +124,31 @@ test('check-app reports the first failure, not the revoke\'s, when both fail', a
   assert.equal(result.code, 1);
   assert.match(result.stderr, /^check-app: the app is installed on profitbuild\/factory/m);
   assert.doesNotMatch(result.stderr, /could not be revoked/);
+});
+
+test('check-app requires --repository, in the adapter schema\'s shape, and asks nothing without it (#0-276)', async () => {
+  const start = fake.requests.length;
+  const none = await checkApp([], undefined, { repository: null });
+  assert.equal(none.code, 1);
+  assert.match(none.stderr, /^check-app: --repository <owner\/name> is required/);
+  for (const repository of ['incident-platform', 'profitbuild/..', './x', 'a/b/c']) {
+    const bad = await checkApp([], undefined, { repository });
+    assert.equal(bad.code, 1, repository);
+    assert.match(bad.stderr, /a repository must be owner\/name, as the adapter has it/);
+  }
+  assert.equal(fake.requests.length, start, 'no request without a valid repository');
+});
+
+test('check-app checks the repository it is given: another product\'s installation and token (#0-276 AC3)', async () => {
+  fake.state.repositories = ['profitbuild/other-product'];
+  const start = fake.requests.length;
+  const result = await checkApp([], undefined, { repository: 'profitbuild/other-product' });
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(fake.requests.slice(start).some((r) => r.path === '/repos/profitbuild/other-product/installation'));
+  assert.equal(fake.requests.slice(start).some((r) => r.path.includes('incident-platform')), false);
+  const posts = fake.requests.slice(start).filter((r) => r.method === 'POST');
+  assert.deepEqual(posts.map((r) => r.body.repositories), [['other-product']], 'the token narrowed to it');
+  fake.state.repositories = ['profitbuild/incident-platform'];
+  const wrong = await checkApp([], undefined, { repository: 'profitbuild/other-product' });
+  assert.equal(wrong.code, 1, 'a token reaching another repository is refused');
 });

@@ -20,6 +20,8 @@ import { spawnSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { childEnv } from '../process/child-env.mjs';
+
 /** util-linux's flock(1), by its full path: PATH is not trusted to find it. */
 export const FLOCK = '/usr/bin/flock';
 
@@ -43,7 +45,8 @@ export function acquireLock(stateDir, { flock = FLOCK, afterFlock } = {}) {
       throw new Error(`the lock ${path} must be a regular file of this process's user with mode 600`);
     }
     const result = spawnSync(flock, ['--nonblock', '--exclusive', '3'], {
-      stdio: ['ignore', 'ignore', 'pipe', fd], env: {}, encoding: 'utf8', timeout: 10_000,
+      // No variable of the dispatcher's: flock(1) needs none (childEnv, incident-platform backlog #0-276).
+      stdio: ['ignore', 'ignore', 'pipe', fd], env: childEnv(), encoding: 'utf8', timeout: 10_000,
     });
     if (result.error) {
       throw new Error(`flock(1) could not be run (${flock}, util-linux): ${result.error.message}`);

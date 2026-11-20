@@ -11,6 +11,8 @@ import { appKeyPair, decodeJwt, startFakeGitHub } from './fake-github.mjs';
 export const APP_ID = 1001;
 export const INSTALLATION_ID = 2002;
 export const PERMISSIONS = Object.freeze({ contents: 'write', metadata: 'read', pull_requests: 'write' });
+/** The products the fake has builder-app installed on. */
+export const PRODUCTS = Object.freeze(['profitbuild/incident-platform', 'profitbuild/other-product']);
 /** A token the fake mints: short of the 36 characters of GitHub's format, so the secret scan sees no token. */
 export const tokenNumber = (n) => `ghs_BuilderFakeToken_${n}_end`;
 
@@ -43,8 +45,10 @@ export async function startBuilderGitHub({ clock = { get now() { return Date.now
     && !state.revoked.includes(authorization.replace(/^Bearer /, ''));
   const unauthorized = { status: 401, body: { message: 'Bad credentials' } };
   const fake = await startFakeGitHub({
-    'GET /repos/profitbuild/incident-platform/installation': ({ headers }) => (jwtValid(headers.authorization)
-      ? { status: 200, body: { repository_selection: 'selected', ...state.installation } } : unauthorized),
+    // Two products, so that a test shows the repository comes from the adapter (incident-platform backlog #0-276 AC3).
+    ...Object.fromEntries(PRODUCTS.map((product) => [`GET /repos/${product}/installation`, ({ headers }) => (
+      jwtValid(headers.authorization)
+        ? { status: 200, body: { repository_selection: 'selected', ...state.installation } } : unauthorized)])),
     'GET /repos/profitbuild/factory/installation': ({ headers }) => (jwtValid(headers.authorization)
       ? state.factory() : unauthorized),
     [`POST /app/installations/${INSTALLATION_ID}/access_tokens`]: ({ headers }) => {
