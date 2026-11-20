@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/profitbuild/factory/blob/main/schemas/gate.schema.json",
+  "title": "The answer of a product's test gate",
+  "description": "The JSON a gate command prints (incident-platform ADR-0060 D6, stage-4.md \"4.3\", backlog #0-275): today's scripts/factory/run-tests.sh of incident-platform. pass: the build and its tests passed; fixable: they failed, and the implementer gets the summary; stop: the environment failed, and a human looks. Every field is required and no other is allowed. Checked by dispatcher/src/schema/validate.mjs.",
+  "type": "object",
+  "required": ["status", "exitCode", "modules", "log", "head", "artifact", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "status": { "enum": ["pass", "fixable", "stop"] },
+    "exitCode": { "description": "The build's exit code; -1 when the gate stopped before it.", "type": "integer" },
+    "modules": { "description": "The modules built, comma-separated; empty when none.", "type": "string" },
+    "log": { "description": "The build's log file; empty when there is none.", "type": "string" },
+    "head": { "description": "The commit tested; empty when the gate stopped before reading it.", "type": "string" },
+    "artifact": { "description": "The gate's artifact on a pass, null otherwise.", "type": ["string", "null"] },
+    "summary": { "description": "The build's relevant lines.", "type": "array", "items": { "type": "string" } }
+  }
+}
