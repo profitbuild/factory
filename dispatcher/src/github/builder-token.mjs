@@ -13,8 +13,17 @@ import { GITHUB_API, revokeInstallationToken } from './app-token.mjs';
 import { checkApiUrl, mintCheckedToken, revokeQuietly } from './checked-token.mjs';
 import { requireHttpsOrLoopback } from './url-policy.mjs';
 
-/** What builder-app holds, and the only thing its token may hold; Issues waits for stage 4.5. */
-export const BUILDER_PERMISSIONS = Object.freeze({ contents: 'write', metadata: 'read', pull_requests: 'write' });
+import permissions from './builder-permissions.json' with { type: 'json' };
+
+/**
+ * What builder-app holds, and the only thing its token may hold; Issues waits for stage 4.5. The list is a file,
+ * builder-permissions.json, not a literal, as its one source (incident-platform backlog #0-272, G2):
+ * incident-platform's check-factory-copies.rb compares it with the `permissions` of its
+ * .github/repository-settings/apps/profitbuild-builder.json, the installation its repository-settings.rb checks on
+ * GitHub. A change here is a change of what builder-app may hold, checked on both sides. Copied and frozen, since the
+ * JSON module's own object is shared and could be changed.
+ */
+export const BUILDER_PERMISSIONS = Object.freeze({ ...permissions });
 /** The one repository builder-app's token reaches. */
 export const BUILDER_REPOSITORY = Object.freeze({ owner: 'profitbuild', repo: 'incident-platform' });
 /** Where builder-app pushes: an explicit URL, never a remote's name, which the repository's config could redefine. */

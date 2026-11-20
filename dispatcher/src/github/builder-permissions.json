@@ -1,0 +1,5 @@
+{
+  "contents": "write",
+  "metadata": "read",
+  "pull_requests": "write"
+}
