@@ -73,6 +73,8 @@ async () => {
       const state = fake.read();
       const container = state.containers.find((c) => c.labels['factory.task'] === RUN_ID);
       seen = { ready, container, override: JSON.parse(await readFile(join(fake.tasks, RUN_ID, 'devcontainer.json'), 'utf8')),
+        lock: JSON.parse(await readFile(join(fake.tasks, RUN_ID, 'devcontainer-lock.json'), 'utf8')),
+        clone: git(join(fake.tasks, RUN_ID, 'w'), ['status', '--porcelain', '--ignored']),
         head: git(join(fake.tasks, RUN_ID, 'w'), ['rev-parse', 'HEAD']), networks: state.networks.map((x) => x.name),
         volumes: state.volumes.map((v) => v.name) };
       return ready.task;
@@ -86,6 +88,14 @@ async () => {
   assert.deepEqual(await loadTask(stateDir, RUN_ID), result);
   const carried = await readTaskConfig({ repoDir: product.repoDir, base: product.base, path: CONFIG_PATH, git: REAL_GIT });
   assert.deepEqual(seen.override, buildOverride(carried, { runId: RUN_ID }));
+  // `--config` with the task's override, never `--override-config`: the CLI writes its lockfile beside the
+  // configuration file, and `factory` may not write in the clone (the VM's run of 2026-11-20).
+  const [up] = fake.calls().filter((c) => c.program === 'devcontainer');
+  assert.deepEqual(up.args.slice(0, 5), ['up', '--config', `/home/factory/tasks/${RUN_ID}/devcontainer.json`,
+    '--workspace-folder', `/home/factory/tasks/${RUN_ID}/w`]);
+  assert.ok(!up.args.includes('--override-config'), up.args.join(' '));
+  assert.deepEqual(Object.keys(seen.lock.features), [FEATURE_REF], 'the CLI\'s lockfile, beside the override');
+  assert.equal(seen.clone, '', 'the clone is left as it was cloned');
   const mounts = seen.container.mounts.map((m) => `${m.Type} ${m.Name ?? m.Source} ${m.Destination} ${m.RW ? 'rw' : 'ro'}`);
   assert.deepEqual(mounts.sort(), [
     `bind /home/factory/tasks/${RUN_ID}/w /workspace rw`,

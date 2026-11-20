@@ -125,7 +125,9 @@ test('AC12: the work directory is removed whole, dot entries and the directory i
     const { fake } = await setUp();
     const dir = join(fake.tasks, RUN_ID);
     await mkdir(join(dir, 'w', '.git', 'objects'), { recursive: true });
-    for (const name of ['.hidden', '..double', 'w/.git/config', 'w/.env', 'w/x']) {
+    // devcontainer.json and devcontainer-lock.json: the override and the lockfile `devcontainer up --config` writes.
+    for (const name of ['.hidden', '..double', 'devcontainer.json', 'devcontainer-lock.json', 'w/.git/config', 'w/.env',
+      'w/x']) {
       await writeFile(join(dir, name), 'x');
     }
     await symlink('/etc', join(dir, 'w', 'link'));
@@ -135,6 +137,7 @@ test('AC12: the work directory is removed whole, dot entries and the directory i
     for (const name of ['20261120T000000Z-aaaaaa', '.left', '..also']) {
       await mkdir(join(fake.tasks, name, '.git'), { recursive: true });
       await writeFile(join(fake.tasks, name, '.git', 'HEAD'), 'x');
+      await writeFile(join(fake.tasks, name, 'devcontainer-lock.json'), '{}');
     }
     await writeFile(join(fake.tasks, '.dotfile'), 'x');
     await removeAllWorkDirs({ runId: RUN_ID, image: IMAGE, sudo: fake.sudo });

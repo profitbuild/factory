@@ -20,7 +20,12 @@
  * makeWorkDir: `<runId>/`, the bundle from stdin into `<runId>/base.bundle` (git reads no bundle from a pipe),
  * `git clone -b base` into `<runId>/w` with no system or global config and no hooks, the bundle removed, and
  * `chown -R -h 1000:1000 <runId>/w`. writeOverride: `<runId>/devcontainer.json` from stdin, outside the clone the
- * container mounts. removeWorkDir: `rm -rf <runId>`, the directory itself and every entry, dot entries included, and
+ * container mounts: the configuration file `devcontainer up --config` reads. Not `--override-config`: with it the
+ * configuration file is the clone's .devcontainer/devcontainer.json, and the CLI writes the features' lockfile beside
+ * the configuration file, so in the clone, which is `dev`'s (1000:1000, a subuid on the host) and where `factory` may
+ * not write (EACCES, the VM's run of 2026-11-20). With `--config` the lockfile is `<runId>/devcontainer-lock.json`,
+ * `factory`'s, removed with the directory; the CLI reads no devcontainer.json of the product's, and the override's
+ * paths are absolute already. removeWorkDir: `rm -rf <runId>`, the directory itself and every entry, dot entries included, and
  * then nothing is there. removeAllWorkDirs: the same for every entry under /tasks (what a killed run left).
  */
 import { RUN_ID, TASKS_ROOT, HELPER_TASKS, TASK_LABEL, WORK_OWNER } from './paths.mjs';
@@ -104,7 +109,7 @@ export function makeWorkDir({ runId, bundle, image, sudo }) {
 }
 
 /**
- * `<runId>/devcontainer.json`, the override `devcontainer up` reads, from `override` (task-config.mjs's), as JSON.
+ * `<runId>/devcontainer.json`, the override `devcontainer up --config` reads, from `override` (task-config.mjs's), as JSON.
  *
  * @param {{ runId: string, override: object, image: string, sudo?: string }} options
  */

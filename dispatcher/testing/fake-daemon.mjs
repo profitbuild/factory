@@ -12,9 +12,10 @@
 //    not root): the clone is a real git's, the removal a real rm's;
 //  - `docker exec ... <id> <command>` runs the command for real (`timeout` included), in the container's workspace
 //    as mapped, with the -e variables it was given;
-//  - `devcontainer up` reads the override, makes a container from it (mounts from workspaceMount, the `--mount=`
-//    run arguments and those of the image's label) and an image whose devcontainer.metadata label is what the real
-//    CLI would write, the features' entries from their artifacts (feature-artifact.mjs), unless the scenario says
+//  - `devcontainer up` reads the override (`--config`) and, as the real CLI does, writes the features' lockfile
+//    beside the configuration file it was given, failing when that is in the clone or cannot be written; it makes a
+//    container from the override (mounts from workspaceMount, the `--mount=` run arguments and those of the image's
+//    label) and an image whose devcontainer.metadata label is what the real CLI would write, the features' entries from their artifacts (feature-artifact.mjs), unless the scenario says
 //    otherwise.
 // A scenario (state.scenario) changes one thing: an image's labels, extra mounts, a container that appears after a
 // command (a rollback starting while the run builds), an rm that removes nothing, an exec that hangs with an orphan
@@ -22,7 +23,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { labelEntry } from './feature-artifact.mjs';
@@ -410,7 +411,29 @@ function devcontainer(context) {
     fail(typeof state.scenario.upFails === 'string' ? state.scenario.upFails : 'devcontainer up: failed by the scenario');
     return;
   }
-  const override = JSON.parse(readFileSync(host(config, option('--override-config')), 'utf8'));
+  // The configuration file, as the real CLI takes it: `--config`, or else the workspace's .devcontainer/devcontainer.json
+  // (with `--override-config` too, which only replaces what is read from it).
+  const workspace = option('--workspace-folder');
+  const given = args.includes('--config') ? '--config' : '--override-config';
+  const configFile = given === '--config' ? option('--config') : `${workspace}/.devcontainer/devcontainer.json`;
+  const override = JSON.parse(readFileSync(host(config, option(given)), 'utf8'));
+  // The real CLI (0.89.0) writes the features' lockfile beside the configuration file. In the clone, `dev`'s
+  // (1000:1000, a subuid on the host), `factory` may not write, so the CLI fails there (EACCES, the VM's run of
+  // 2026-11-20): the fake fails too, and when the directory cannot be written.
+  const lockName = basename(configFile).startsWith('.') ? '.devcontainer-lock.json' : 'devcontainer-lock.json';
+  const lockFile = join(dirname(configFile), lockName);
+  if (lockFile.startsWith(`${workspace}/`)) {
+    fail(`Error: EACCES: permission denied, open '${lockFile}'`);
+    return;
+  }
+  const lock = { features: Object.fromEntries(Object.keys(override.features ?? {})
+    .map((ref) => [ref, { resolved: ref, integrity: ref.split('@')[1] }])) };
+  try {
+    writeFileSync(host(config, lockFile), `${JSON.stringify(lock, null, 2)}\n`);
+  } catch (error) {
+    fail(`Error: ${error.code}: could not write '${lockFile}'`);
+    return;
+  }
   const [labelKey, labelValue] = option('--id-label').split('=');
   const image = override.image ?? state.scenario.imageId
     ?? `sha256:${createHash('sha256').update(JSON.stringify(override)).digest('hex')}`;
