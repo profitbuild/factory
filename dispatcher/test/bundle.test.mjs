@@ -81,16 +81,27 @@ test('AC6: a commit with no author email is refused by the strict check, before 
     /^the bundle's objects fail git's strict check: .*missingEmail/);
 });
 
-test('AC6 control: git\'s own fetch of that bundle, with fsckObjects set, lets the commit in', async () => {
-  const bad = await makeTask(root.dir, product, { noEmail: true, name: 'task-no-email-fetch' });
-  const file = join(root.dir, 'no-email.bundle');
-  await writeFile(file, bad.bundle);
-  const gitDir = await freshRepo();
-  git(gitDir, ['--git-dir', gitDir, '-c', 'transfer.fsckObjects=true', '-c', 'fetch.fsckObjects=true', 'fetch', '-q',
-    file, 'refs/heads/feat/x:refs/heads/fetched']);
-  assert.equal(git(gitDir, ['--git-dir', gitDir, 'rev-parse', 'refs/heads/fetched']), bad.sha,
-    'why the check never rests on fsckObjects');
-});
+test('AC6 control: what this git\'s own fetch of that bundle does with fsckObjects depends on its version',
+  async (t) => {
+    // git 2.39.5 and 2.43.0 (the VM's) let the commit in; a newer git (CI's 2.56.1) refuses it. The dispatcher's
+    // check is index-pack --strict on every version (the test above), never this setting: hence this control
+    // reports, and holds only that the outcome is one of the two.
+    const bad = await makeTask(root.dir, product, { noEmail: true, name: 'task-no-email-fetch' });
+    const file = join(root.dir, 'no-email.bundle');
+    await writeFile(file, bad.bundle);
+    const gitDir = await freshRepo();
+    let outcome;
+    try {
+      git(gitDir, ['--git-dir', gitDir, '-c', 'transfer.fsckObjects=true', '-c', 'fetch.fsckObjects=true', 'fetch',
+        '-q', file, 'refs/heads/feat/x:refs/heads/fetched']);
+      assert.equal(git(gitDir, ['--git-dir', gitDir, 'rev-parse', 'refs/heads/fetched']), bad.sha);
+      outcome = 'lets the commit with no author email in';
+    } catch (error) {
+      assert.match(String(error.stderr ?? error.message), /missingEmail/, 'refused, if at all, for the missing email');
+      outcome = 'refuses the commit with no author email';
+    }
+    t.diagnostic(`${GIT_VERSION}: fetch <bundle> with fsckObjects ${outcome}`);
+  });
 
 test('AC6: prerequisites not exactly the base are refused before git reads the pack', async () => {
   const pack = packOf(task.dir, [task.sha, `^${product.base}`]);
