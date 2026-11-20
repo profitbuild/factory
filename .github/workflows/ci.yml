@@ -3,7 +3,9 @@
 # .node-version, the workflow linters at incident-platform's pins, and the secret scan of every commit added
 # (#0-268). The job names, `Test`, `Lint Workflows` and `Secret Scan`, are the required checks of main's ruleset once
 # their first run has registered them (the owner adds each to the ruleset): from then on, renaming a job without
-# changing the ruleset leaves every pull request waiting for ever.
+# changing the ruleset leaves every pull request waiting for ever. `Test (git 2.43)`, the dispatcher's tests on the
+# build VM's git (incident-platform backlog #0-276), joins them once its pull request is merged. Its image (Docker Hub)
+# and its git (Ubuntu's archive, apt's signed index) are sources the owner accepted for this CI (2026-11-20).
 # ============================================================
 
 name: CI
@@ -56,12 +58,18 @@ jobs:
       run:
         shell: bash
     steps:
+      # The job's name is a fact, not a hope: any other upstream git than 2.43 fails it.
       - name: Install git
         run: |
           set -euo pipefail
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates
-          git --version
+          version=$(git --version)
+          echo "$version"
+          case $version in
+            "git version 2.43."*) ;;
+            *) echo "::error::expected git 2.43 (the build VM's), got: $version"; exit 1 ;;
+          esac
 
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,12 +79,10 @@ jobs:
       - name: Set up Node
         uses: ./.github/actions/setup-node
 
-      - name: The push's and the bundle's tests on git 2.43
+      # The whole suite, not a list of files: a test that runs git, now or later, runs on the VM's git too.
+      - name: The dispatcher's tests on git 2.43
         working-directory: dispatcher
-        run: |
-          set -euo pipefail
-          git --version
-          node --test test/push.test.mjs test/bundle.test.mjs test/git-push.test.mjs test/child-env.test.mjs
+        run: node --test
 
   lint:
     name: Lint Workflows
