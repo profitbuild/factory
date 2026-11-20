@@ -15,7 +15,7 @@ import { GITHUB_API, revokeInstallationToken } from './app-token.mjs';
 import adapterSchema from '../../../schemas/adapter.schema.json' with { type: 'json' };
 import permissions from './builder-permissions.json' with { type: 'json' };
 import { checkApiUrl, mintCheckedToken, revokeQuietly } from './checked-token.mjs';
-import { LOOPBACK_HOSTS } from './url-policy.mjs';
+import { HostRefusedError, pinnedOrLoopback } from './url-policy.mjs';
 
 /**
  * What builder-app holds, and the only thing its token may hold; Issues waits for stage 4.5. The list is a file,
@@ -49,8 +49,8 @@ export function parseRepository(repository) {
 /** Where builder-app pushes: GitHub. The one place the host is named. */
 export const GIT_HOST = 'https://github.com';
 
-/** A host a push may go to is not one. */
-export class GitHostError extends Error {}
+/** A host a push may go to is not one: url-policy.mjs's refusal, the one rule's. */
+export const GitHostError = HostRefusedError;
 
 /**
  * The one rule of where builder-app's token may be pushed (incident-platform backlog #0-276, review round 3): GIT_HOST,
@@ -61,19 +61,8 @@ export class GitHostError extends Error {}
  * @returns {{ origin: string, allowProtocols: string }} `allowProtocols`, the value of GIT_ALLOW_PROTOCOL
  */
 export function gitHost(base) {
-  if (base === GIT_HOST) {
-    return { origin: GIT_HOST, allowProtocols: 'https' };
-  }
-  let host = null;
-  try {
-    host = new URL(base);
-  } catch {
-    // refused below
-  }
-  if (!host || host.protocol !== 'http:' || !LOOPBACK_HOSTS.includes(host.hostname) || host.origin !== base) {
-    throw new GitHostError(`the git host must be ${GIT_HOST}, or a test's http:// origin on a loopback address`);
-  }
-  return { origin: host.origin, allowProtocols: 'http:https' };
+  const host = pinnedOrLoopback(base, GIT_HOST, 'the git host');
+  return { origin: host.origin, allowProtocols: host.protocol === 'https:' ? 'https' : 'http:https' };
 }
 
 /**

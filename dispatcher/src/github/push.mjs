@@ -115,13 +115,13 @@ export async function mainObjects(repoDir, { uid = process.getuid(), lstatOf = l
 }
 
 /**
- * Where a push of `repository` goes, and the protocols git may use for it (GIT_ALLOW_PROTOCOL): on GitHub
- * (GIT_HOST), https://github.com/<repository>.git over https alone; on a test's server, http://<loopback>:<port>, an
- * origin alone, over http too. No other host is taken, HTTPS or not: the URL of a push is always GitHub's.
+ * Where a push of `repository` goes: on GitHub (GIT_HOST), https://github.com/<repository>.git; on a test's server,
+ * an http:// origin on a loopback address. No other host is taken, HTTPS or not (gitHost, the one rule); the protocols
+ * git may use are gitPushCommand's to set, from the same rule.
  *
  * @param {string} repository
  * @param {string} [gitBase]
- * @returns {{ url: string, allowProtocols: string }}
+ * @returns {{ url: string }}
  */
 export function pushTarget(repository, gitBase = GIT_HOST) {
   let host;
@@ -130,7 +130,7 @@ export function pushTarget(repository, gitBase = GIT_HOST) {
   } catch (error) {
     throw new PushRefusedError(error.message);
   }
-  return { url: pushUrl(repository, host.origin), allowProtocols: host.allowProtocols };
+  return { url: pushUrl(repository, host.origin) };
 }
 
 /**

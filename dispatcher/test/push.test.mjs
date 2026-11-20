@@ -348,10 +348,10 @@ test('the git host is GitHub or loopback http (a test\'s server), an origin alon
   }
 });
 
-test('the push goes to pushUrl(repository) on GitHub over https alone; http only to a test\'s loopback host', () => {
+test('the push goes to pushUrl(repository) on GitHub; to a test\'s loopback host only besides it', () => {
   assert.equal(GIT_HOST, 'https://github.com');
   assert.deepEqual(pushTarget('profitbuild/incident-platform'),
-    { url: 'https://github.com/profitbuild/incident-platform.git', allowProtocols: 'https' });
+    { url: 'https://github.com/profitbuild/incident-platform.git' });
   for (const gitBase of ['https://git.example', 'https://github.com.evil.example', 'https://github.com/',
     'https://GITHUB.com', 'http://github.com', 'https://127.0.0.1:8080', 'http://192.0.2.1:8080', 'http://127.0.0.1:8080/x']) {
     assert.throws(() => pushTarget('profitbuild/other-product', gitBase), (error) => error instanceof PushRefusedError
@@ -359,5 +359,5 @@ test('the push goes to pushUrl(repository) on GitHub over https alone; http only
     gitBase);
   }
   assert.deepEqual(pushTarget('profitbuild/other-product', 'http://127.0.0.1:8080'),
-    { url: 'http://127.0.0.1:8080/profitbuild/other-product.git', allowProtocols: 'http:https' });
+    { url: 'http://127.0.0.1:8080/profitbuild/other-product.git' });
 });

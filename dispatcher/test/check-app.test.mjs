@@ -90,15 +90,19 @@ test('check-app fails when a check fails, with the token revoked and nothing mor
   assert.equal(fake.requests.slice(start).some((r) => r.path === '/repos/profitbuild/factory/installation'), false);
 });
 
-test('check-app refuses an unknown BUILDER_APP_ variable, and an API that is not HTTPS, asking nothing', async () => {
+test('check-app refuses an unknown BUILDER_APP_ variable, and an API not GitHub\'s nor a test\'s, asking nothing', async () => {
   const start = fake.requests.length;
   const typo = await checkApp([], await writeAppFiles(root, fake.privateKey, {
     envText: 'BUILDER_APP_ID=1\nBUILDER_APP_INSTALLATION_ID=2\nBUILDER_APP_KYE=/x\n' }));
   assert.equal(typo.code, 1);
   assert.match(typo.stderr, /^check-app: unknown variable BUILDER_APP_KYE/m);
-  const plain = await checkApp(['--api', 'http://api.example.com']);
-  assert.equal(plain.code, 1);
-  assert.match(plain.stderr, /the API must be an https:\/\/ URL/);
+  for (const api of ['http://api.example.com', 'https://api.example.com', 'https://api.github.com.evil.example',
+    'https://api.github.com:8443', 'https://API.github.com']) {
+    const other = await checkApp(['--api', api]);
+    assert.equal(other.code, 1, api);
+    assert.match(other.stderr, /the API must be https:\/\/api\.github\.com, or a test's http:\/\/ origin on a loopback/, api);
+    assert.equal(other.stdout, '', `${api}: refused before the settings are read, so nothing is printed`);
+  }
   assert.equal(fake.requests.length, start);
 });
 

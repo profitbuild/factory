@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { EXPECTED_PERMISSIONS, mint, refreshDelayMs } from '../bin/dev-token.mjs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { appKeyPair, decodeJwt, startFakeGitHub } from '../testing/fake-github.mjs';
+import { GITHUB_API } from '../src/github/app-token.mjs';
+import { checkApiUrl } from '../src/github/checked-token.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../bin/dev-token.mjs', import.meta.url));
 const TOKEN = 'ghs_TheFakeTokenOfThisTest0123456789';
@@ -236,12 +238,20 @@ test('--watch: a refresh refused by a check revokes the last token and deletes t
   assert.equal(await exited, 0);
 });
 
-test('--api must be HTTPS, or HTTP to a loopback address', async () => {
+test('--api must be GitHub\'s API, or a test\'s HTTP origin on a loopback address: any other host is refused', async () => {
   const { exec, requests } = await setUp();
-  const { code, stderr } = await exec(['--api', 'http://api.example.com']);
-  assert.equal(code, 1);
-  assert.match(stderr, /--api must be an https:\/\/ URL/);
+  for (const api of ['http://api.example.com', 'https://api.example.com', 'https://api.github.com.evil.example',
+    'https://api.github.com:8443', 'https://API.github.com', 'https://api.github.com/']) {
+    const { code, stderr } = await exec(['--api', api]);
+    assert.equal(code, 1, api);
+    assert.match(stderr, /--api must be https:\/\/api\.github\.com, or a test's http:\/\/ origin on a loopback address/, api);
+  }
   assert.equal(requests().length, 0);
+});
+
+test('--api left to its default, GitHub\'s API, passes the rule: dev-token on the host goes on as before', () => {
+  assert.equal(checkApiUrl(GITHUB_API, '--api'), GITHUB_API);
+  assert.equal(GITHUB_API, 'https://api.github.com');
 });
 
 test('an output directory reaching the key through a symlink is refused', async () => {

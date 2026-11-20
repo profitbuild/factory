@@ -21,7 +21,8 @@
  * - the token's permissions are the same three.
  * The token goes to `<out>/token` (directory 700, file 600, written to a temporary file and renamed, so a reader never
  * sees half of one), never to argv, the environment, stdout or stderr. `<out>` must not hold the key, symlinks
- * resolved: it is mounted into the container. `--api` is GitHub's API over HTTPS (or a loopback address, for the tests):
+ * resolved: it is mounted into the container. `--api` is GitHub's API, https://api.github.com, its default, or a test's
+ * http:// origin on a loopback address, and no other host, HTTPS or not (url-policy.mjs, incident-platform #0-276):
  * the app's JWT goes to it.
  *
  * In `--watch`, a refusal (one of the checks above) revokes the last token and deletes the file, so the container is
@@ -41,9 +42,8 @@ import {
   revokeInstallationToken,
 } from '../src/github/app-token.mjs';
 import {
-  RefusedError, checkInstallation, checkTokenPermissions, checkTokenRepositories, readAppKey,
+  RefusedError, checkApiUrl, checkInstallation, checkTokenPermissions, checkTokenRepositories, readAppKey,
 } from '../src/github/checked-token.mjs';
-import { requireHttpsOrLoopback } from '../src/github/url-policy.mjs';
 
 /** The app `profitbuild-factory-dev` (an id, not a secret). */
 const APP_ID = 5822112;
@@ -113,7 +113,7 @@ async function options(argv) {
   if (!(retrySeconds > 0)) {
     throw new Error(`--retry-seconds must be a positive number, not ${values['retry-seconds']}`);
   }
-  requireHttpsOrLoopback(values.api, '--api');
+  checkApiUrl(values.api, '--api');
   // The key is read at the path given, not at its real path: readAppKey's lstat must see a symlink to refuse it. The
   // real path serves only the check that <out> does not hold the key.
   const key = resolve(values.key);

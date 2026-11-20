@@ -16,11 +16,11 @@
 import { isDeepStrictEqual } from 'node:util';
 
 import {
-  createAppJwt, createInstallationToken, findRepositoryInstallation, listInstallationRepositories,
+  GITHUB_API, createAppJwt, createInstallationToken, findRepositoryInstallation, listInstallationRepositories,
   revokeInstallationToken,
 } from './app-token.mjs';
 import { readOwnFile } from '../config/own-file.mjs';
-import { requireHttpsOrLoopback } from './url-policy.mjs';
+import { pinnedOrLoopback } from './url-policy.mjs';
 
 /** A check against GitHub's answers, or of the key's file, failed: no token may stand on it. */
 export class RefusedError extends Error {}
@@ -28,9 +28,12 @@ export class RefusedError extends Error {}
 const sortedEntries = (permissions) => Object.fromEntries(Object.entries(permissions ?? {}).sort());
 const show = (permissions) => JSON.stringify(sortedEntries(permissions));
 
-/** HTTPS, or plain HTTP to a loopback address (a test's fake GitHub); anything else would get the app's JWT. */
-export function checkApiUrl(api) {
-  requireHttpsOrLoopback(api, 'the API');
+/**
+ * GitHub's API (GITHUB_API), or plain HTTP to a loopback origin (a test's fake GitHub); any other host, HTTPS or not,
+ * would get the app's JWT and its tokens (url-policy.mjs, the one rule).
+ */
+export function checkApiUrl(api, what = 'the API') {
+  pinnedOrLoopback(api, GITHUB_API, what);
   return api;
 }
 
@@ -100,8 +103,8 @@ export function checkTokenPermissions(tokenPermissions, permissions) {
  *   permissions: Record<string, string>, baseUrl: string, fetchImpl?: typeof fetch, timeoutMs?: number,
  *   uid?: number, report?: (line: string) => void }} options `report` is told each check that passed (check-app)
  * @returns {Promise<{ token: string, expiresAt: string }>}
- * @throws {RefusedError} a check failed; {Error} `baseUrl` is neither HTTPS nor loopback (checked before the key is
- *   read and the JWT made), or GitHub was not reached or answered an error
+ * @throws {RefusedError} a check failed; {HostRefusedError} `baseUrl` is neither GitHub's API nor a test's loopback
+ *   origin (checked before the key is read and the JWT made); or GitHub was not reached or answered an error
  */
 export async function mintCheckedToken({
   appId, installationId, installationIdFrom, keyPath, owner, repo, permissions, baseUrl, fetchImpl, timeoutMs, uid,

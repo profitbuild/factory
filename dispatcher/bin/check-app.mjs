@@ -18,7 +18,8 @@
  * Contents write, Pull requests write and Metadata read; the token is narrowed to that repository, reaches only it
  * and holds the same three), expects 404 for the app's installation on profitbuild/factory, and revokes the token.
  * Each check passed is a line on stdout; the first that fails is a line on stderr, and the exit code 1. No token is
- * printed. `--api` is GitHub's API over HTTPS (or a loopback address, for the tests): the app's JWT goes to it.
+ * printed. `--api` is GitHub's API, https://api.github.com, or a test's http:// origin on a loopback address, and no
+ * other host, HTTPS or not: the app's JWT goes to it (url-policy.mjs, incident-platform backlog #0-276).
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

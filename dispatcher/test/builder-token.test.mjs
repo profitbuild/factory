@@ -306,14 +306,21 @@ test('a refusal after the token is minted is thrown even when its revoke fails, 
   assert.ok(fake.requests.some((r) => r.method === 'DELETE'), 'the revoke was tried');
 });
 
-test('an API that is neither HTTPS nor loopback is refused before the key is read or a JWT made', async () => {
+// The one rule of the API's host (url-policy.mjs, #0-276 review round 4): GitHub's API, or a test's loopback origin;
+// any other host, HTTPS or not, is refused, since it would be handed the app's JWT and its tokens.
+const API_REFUSED = /the API must be https:\/\/api\.github\.com, or a test's http:\/\/ origin on a loopback address/;
+
+test('an API other than GitHub\'s or a test\'s loopback one is refused before the key is read or a JWT made', async () => {
   const files = await writeAppFiles(root, fake.privateKey);
   const start = fake.requests.length;
-  for (const baseUrl of ['http://api.example.com', 'ftp://127.0.0.1']) {
-    assert.throws(() => createBuilderTokenSource({ repository: REPOSITORY, env: files.env, baseUrl }), /the API must be an https:\/\/ URL/);
+  for (const baseUrl of ['https://api.example.com', 'https://api.github.com.evil.example', 'https://api.github.com:8443',
+    'https://API.github.com', 'https://api.github.com/', 'http://api.github.com', 'http://api.example.com', 'ftp://127.0.0.1',
+    'https://127.0.0.1:8443', 'http://192.0.2.1:8080']) {
+    assert.throws(() => createBuilderTokenSource({ repository: REPOSITORY, env: files.env, baseUrl }), API_REFUSED,
+      baseUrl);
     let jwtMade = false;
     await assert.rejects(mintBuilderToken({ repository: REPOSITORY, env: files.env, baseUrl, fetchImpl: () => { jwtMade = true; } }),
-      /the API must be an https:\/\/ URL/);
+      API_REFUSED, baseUrl);
     assert.equal(jwtMade, false);
   }
   await assert.rejects(mintBuilderToken({ repository: REPOSITORY, env: { ...files.env, keyPath: '/nonexistent' },
