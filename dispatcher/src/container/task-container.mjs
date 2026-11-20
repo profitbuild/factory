@@ -7,8 +7,9 @@
  * symlink, and its build context a directory that is not one (a symlink would point the build outside the clone);
  * parsed by jsonc.mjs and checked by task-config.mjs.
  *
- * upContainer: `devcontainer up --override-config <the override> --workspace-folder <the clone> --id-label
- * factory.task=<runId>` through the starter, as `factory`; then the container is inspected and held to what the
+ * upContainer: `devcontainer up --config <the override> --workspace-folder <the clone> --id-label
+ * factory.task=<runId>` through the starter, as `factory` (`--config`, not `--override-config`: see upContainer and
+ * work-dir.mjs); then the container is inspected and held to what the
  * dispatcher asked for: its label, not privileged, its capabilities the list's, its mounts exactly the dispatcher's
  * and the listed features' (so /opt/factory read-only, and no mount the product or its image chose); its image
  * recorded by its ID (sha256:<64 hex>) in task.json, and a task resumed runs a container of that ID, never a tag; the
@@ -194,7 +195,10 @@ async function inspectJson(args, what, sudo) {
 export async function upContainer({ runId, carried, imageId = null, sudo }) {
   const { work, override } = taskPaths(runId);
   const { stdout } = await mustRun({ program: 'devcontainer', sudo, timeoutMs: UP_TIMEOUT_MS, outputLimit: UP_MAX_OUTPUT,
-    args: ['up', '--override-config', override, '--workspace-folder', work, '--id-label', `${TASK_LABEL}=${runId}`,
+    // `--config`, not `--override-config`: the CLI writes the features' lockfile beside the configuration file, which
+    // with `--override-config` is the clone's .devcontainer/devcontainer.json, and `factory` may not write in the clone
+    // (work-dir.mjs). The override's paths are absolute already, and the product's devcontainer.json is not read.
+    args: ['up', '--config', override, '--workspace-folder', work, '--id-label', `${TASK_LABEL}=${runId}`,
       '--log-format', 'json'] });
   let outcome;
   try {

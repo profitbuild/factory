@@ -15,7 +15,7 @@
  *   `...Basename`): the host's environment and paths;
  * - refused: every other field, `initializeCommand`, `mounts`, `workspaceMount`, `containerUser`, `image`, `name`
  *   among them.
- * buildOverride writes the configuration `devcontainer up --override-config` reads: what was carried, with absolute
+ * buildOverride writes the configuration `devcontainer up --config` reads: what was carried, with absolute
  * paths into the task's clone, the features by digest, and what the dispatcher sets itself (its mounts, given as
  * `docker run` arguments, the workspace, `updateRemoteUserUID: false`, `containerUser: root`). checkImageMetadata
  * holds the built image's `devcontainer.metadata` label to the same list.
@@ -297,7 +297,7 @@ export function dispatcherMounts(runId, user) {
 }
 
 /**
- * The configuration `devcontainer up --override-config` reads, as an object (written as strict JSON): the carried
+ * The configuration `devcontainer up --config` reads, as an object (written as strict JSON): the carried
  * fields, the features by digest, and the dispatcher's own. With `imageId` (a task resumed), the image the task
  * recorded instead of the build: its features are in it already.
  *
