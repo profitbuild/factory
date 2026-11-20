@@ -81,8 +81,8 @@ export function mask(source) {
   return { code: out.join(''), strings };
 }
 
-/** The offset just past the parenthesis that closes the one at `open`, in masked code. */
-function closing(code, open) {
+/** The offset just past the parenthesis that closes the one at `open`, in masked code (its end if none does). */
+export function closing(code, open) {
   let depth = 0;
   for (let i = open; i < code.length; i += 1) {
     if (code[i] === '(') {
@@ -94,22 +94,45 @@ function closing(code, open) {
       }
     }
   }
-  return -1;
+  return code.length;
+}
+
+/** Where each top-level argument of a call lies in `args`, its masked text from ( to ): [from, to) offsets, trimmed. */
+function argumentSpans(args) {
+  const spans = [];
+  let depth = 0;
+  let from = 1;
+  const push = (to) => {
+    const text = args.slice(from, to);
+    const lead = text.length - text.trimStart().length;
+    const body = text.trim();
+    if (body !== '') {
+      spans.push({ from: from + lead, to: from + lead + body.length });
+    }
+  };
+  for (let i = 1; i < args.length - 1; i += 1) {
+    if ('([{'.includes(args[i])) {
+      depth += 1;
+    } else if (')]}'.includes(args[i])) {
+      depth -= 1;
+    } else if (args[i] === ',' && depth === 0) {
+      push(i);
+      from = i + 1;
+    }
+  }
+  push(args.length - 1);
+  return spans;
+}
+
+/** The top-level arguments of a call, `args` its masked text from ( to ), split on its commas and trimmed. */
+export function argumentsOf(args) {
+  return argumentSpans(args).map(({ from, to }) => args.slice(from, to));
 }
 
 /** The first argument of the call whose arguments span [start, end) of the masked code, as the source writes it. */
 function firstArgument(source, code, start, end) {
-  let depth = 0;
-  for (let i = start + 1; i < end - 1; i += 1) {
-    if ('([{'.includes(code[i])) {
-      depth += 1;
-    } else if (')]}'.includes(code[i])) {
-      depth -= 1;
-    } else if (code[i] === ',' && depth === 0) {
-      return source.slice(start + 1, i).trim();
-    }
-  }
-  return source.slice(start + 1, end - 1).trim();
+  const [first] = argumentSpans(code.slice(start, end));
+  return first ? source.slice(start + first.from, start + first.to) : '';
 }
 
 /**

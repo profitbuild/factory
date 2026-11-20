@@ -15,7 +15,7 @@ import { GITHUB_API, revokeInstallationToken } from './app-token.mjs';
 import adapterSchema from '../../../schemas/adapter.schema.json' with { type: 'json' };
 import permissions from './builder-permissions.json' with { type: 'json' };
 import { checkApiUrl, mintCheckedToken, revokeQuietly } from './checked-token.mjs';
-import { requireHttpsOrLoopback } from './url-policy.mjs';
+import { LOOPBACK_HOSTS } from './url-policy.mjs';
 
 /**
  * What builder-app holds, and the only thing its token may hold; Issues waits for stage 4.5. The list is a file,
@@ -46,18 +46,46 @@ export function parseRepository(repository) {
   return Object.freeze({ owner, repo });
 }
 
-/** Where builder-app pushes: GitHub. The one place the host is named (push.mjs's pushTarget refuses any other). */
+/** Where builder-app pushes: GitHub. The one place the host is named. */
 export const GIT_HOST = 'https://github.com';
+
+/** A host a push may go to is not one. */
+export class GitHostError extends Error {}
+
+/**
+ * The one rule of where builder-app's token may be pushed (incident-platform backlog #0-276, review round 3): GIT_HOST,
+ * over https alone; or a test's server, an http:// origin on a loopback address, over http too. No other host, HTTPS
+ * or not. pushUrl, gitPushCommand (where the token is handed over) and push.mjs's pushTarget all ask it.
+ *
+ * @param {string} base an origin: no path, user, password, query or fragment
+ * @returns {{ origin: string, allowProtocols: string }} `allowProtocols`, the value of GIT_ALLOW_PROTOCOL
+ */
+export function gitHost(base) {
+  if (base === GIT_HOST) {
+    return { origin: GIT_HOST, allowProtocols: 'https' };
+  }
+  let host = null;
+  try {
+    host = new URL(base);
+  } catch {
+    // refused below
+  }
+  if (!host || host.protocol !== 'http:' || !LOOPBACK_HOSTS.includes(host.hostname) || host.origin !== base) {
+    throw new GitHostError(`the git host must be ${GIT_HOST}, or a test's http:// origin on a loopback address`);
+  }
+  return { origin: host.origin, allowProtocols: 'http:https' };
+}
 
 /**
  * Where builder-app pushes the product's branches: an explicit URL, never a remote's name, which a config could
- * redefine. `base` is GIT_HOST but in tests (a loopback server, which pushTarget alone lets through).
+ * redefine; on GIT_HOST, or a test's loopback server (gitHost's rule, the only one).
  *
  * @param {string} repository owner/name
+ * @param {string} [base] GIT_HOST but in tests
  */
 export function pushUrl(repository, base = GIT_HOST) {
   const { owner, repo } = parseRepository(repository);
-  return `${base}/${owner}/${repo}.git`;
+  return `${gitHost(base).origin}/${owner}/${repo}.git`;
 }
 /** A token is minted again once it has this long left: a push started with it must not outlive it. */
 export const REFRESH_BEFORE_EXPIRY_MS = 5 * 60 * 1000;
@@ -174,13 +202,36 @@ export function checkTaskBranch(branch) {
   return branch;
 }
 
-/** An explicit https:// URL, or http:// to a loopback address (the tests' fake GitHub), with no user or password. */
+/**
+ * A push URL as pushUrl builds it: an origin gitHost takes, then /<owner>/<name>.git of a repository in the adapter's
+ * shape, with no user, password, query or fragment. The token goes to no other.
+ *
+ * @returns {{ origin: string, allowProtocols: string }}
+ */
 function checkPushUrl(url) {
-  const parsed = requireHttpsOrLoopback(url, 'a push URL');
-  if (parsed.username || parsed.password) {
-    throw new Error('a push URL must carry no user or password');
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new GitHostError('a push URL must be a URL');
   }
-  return parsed;
+  if (parsed.username || parsed.password) {
+    throw new GitHostError('a push URL must carry no user or password');
+  }
+  // The host by gitHost alone; the rest by the repository's shape, each checked once.
+  const host = gitHost(parsed.origin);
+  const path = /^\/([^/]+\/[^/]+)\.git$/.exec(parsed.pathname);
+  let repository = null;
+  try {
+    repository = path ? parseRepository(path[1]) : null;
+  } catch {
+    // not in the adapter's shape: refused below
+  }
+  if (repository === null || parsed.search || parsed.hash
+    || url !== `${host.origin}/${repository.owner}/${repository.repo}.git`) {
+    throw new GitHostError('a push URL must be <host>/<owner>/<name>.git, as pushUrl builds it');
+  }
+  return host;
 }
 
 /**
@@ -194,15 +245,15 @@ function checkPushUrl(url) {
  * the password of `url`'s origin (FACTORY_PUSH_ORIGIN) and of no other; it is in no URL, no argument, no file, and not
  * in process.env, so no other child of the dispatcher inherits it. Behind the allowlist, a second layer: a URL
  * rewritten by `insteadOf` to another https:// host gets no credential (the askpass answers one origin), one rewritten
- * to another protocol is refused by git (GIT_ALLOW_PROTOCOL, `allowProtocols`, wins over any protocol.<name>.allow);
+ * to another protocol is refused by git (GIT_ALLOW_PROTOCOL, from gitHost: https alone on GitHub; wins over any
+ * protocol.<name>.allow);
  * runGit adds no hook, no fsmonitor, no credential helper, no system or global config and no prompt.
  *
- * @param {{ token: string, sha: string, branch: string, url: string, allowProtocols?: string }} options `url` from
- *   pushUrl(repository); `allowProtocols` the value of GIT_ALLOW_PROTOCOL, `https` but in tests (`http:https`, to a
- *   loopback server), and it must allow `url`'s own
+ * @param {{ token: string, sha: string, branch: string, url: string }} options `url` from pushUrl(repository): on
+ *   GIT_HOST, or a test's loopback server (gitHost); any other is refused here, where the token is handed over
  * @returns {{ args: string[], allow: readonly string[], set: Record<string, string>, ref: string }}
  */
-export function gitPushCommand({ token, sha, branch, url, allowProtocols = 'https' }) {
+export function gitPushCommand({ token, sha, branch, url }) {
   if (typeof token !== 'string' || token === '') {
     throw new Error('gitPushCommand: a token is required');
   }
@@ -210,12 +261,7 @@ export function gitPushCommand({ token, sha, branch, url, allowProtocols = 'http
     throw new TypeError('gitPushCommand: sha must be a commit\'s 40 hex digits');
   }
   checkTaskBranch(branch);
-  const parsed = checkPushUrl(url);
-  const scheme = parsed.protocol.replace(/:$/, '');
-  if (!/^[a-z]+(:[a-z]+)*$/.test(allowProtocols)
-    || !allowProtocols.split(':').includes(scheme)) {
-    throw new Error(`gitPushCommand: allowProtocols must be protocols joined by ":", ${scheme} among them`);
-  }
+  const { origin, allowProtocols } = checkPushUrl(url);
   const ref = `${PUSH_REF_PREFIX}${branch}`;
   return {
     args: ['push', '--no-verify', '--porcelain', url, `${sha}:${ref}`],
@@ -223,7 +269,7 @@ export function gitPushCommand({ token, sha, branch, url, allowProtocols = 'http
     set: {
       GIT_ASKPASS,
       GIT_ALLOW_PROTOCOL: allowProtocols,
-      FACTORY_PUSH_ORIGIN: parsed.origin,
+      FACTORY_PUSH_ORIGIN: origin,
       FACTORY_PUSH_TOKEN: token,
     },
     ref,

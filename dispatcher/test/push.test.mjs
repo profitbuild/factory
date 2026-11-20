@@ -339,7 +339,7 @@ test('a token source for another repository is refused before anything, its toke
   }
 });
 
-test('the git host is GitHub but in tests, and a test\'s is HTTPS or loopback HTTP, an origin alone', async () => {
+test('the git host is GitHub or loopback http (a test\'s server), an origin alone; no other host is taken', async () => {
   for (const gitBase of ['http://example.com', 'http://github.com', 'ftp://127.0.0.1', `${server.baseUrl}/x`,
     `${server.baseUrl}/`, server.baseUrl.replace('http://', 'http://u:p@'), 'not a url']) {
     const { run, source } = push({ gitBase });

@@ -32,8 +32,7 @@ import { loadBundle } from '../git/bundle.mjs';
 import { checkPushConfig, initBare } from '../git/config-allowlist.mjs';
 import { runGit } from '../git/run-git.mjs';
 import { ensureOwnDirectory } from '../state/files.mjs';
-import { GIT_HOST, checkTaskBranch, gitPushCommand, pushUrl } from './builder-token.mjs';
-import { LOOPBACK_HOSTS } from './url-policy.mjs';
+import { GIT_HOST, checkTaskBranch, gitHost, gitPushCommand, pushUrl } from './builder-token.mjs';
 
 /** The longest a push may run. */
 export const PUSH_TIMEOUT_MS = 10 * 60 * 1000;
@@ -125,19 +124,13 @@ export async function mainObjects(repoDir, { uid = process.getuid(), lstatOf = l
  * @returns {{ url: string, allowProtocols: string }}
  */
 export function pushTarget(repository, gitBase = GIT_HOST) {
-  if (gitBase === GIT_HOST) {
-    return { url: pushUrl(repository, GIT_HOST), allowProtocols: 'https' };
-  }
   let host;
   try {
-    host = new URL(gitBase);
-  } catch {
-    host = null;
+    host = gitHost(gitBase);
+  } catch (error) {
+    throw new PushRefusedError(error.message);
   }
-  if (!host || host.protocol !== 'http:' || !LOOPBACK_HOSTS.includes(host.hostname) || host.origin !== gitBase) {
-    throw new PushRefusedError(`the git host must be ${GIT_HOST}, or a test's http:// origin on a loopback address`);
-  }
-  return { url: pushUrl(repository, host.origin), allowProtocols: 'http:https' };
+  return { url: pushUrl(repository, host.origin), allowProtocols: host.allowProtocols };
 }
 
 /**
@@ -176,7 +169,7 @@ export async function pushTask({
   gitBase = GIT_HOST, git,
 }) {
   checkTarget({ task, sha, branch, repository, tokens });
-  const { url, allowProtocols } = pushTarget(repository, gitBase);
+  const { url } = pushTarget(repository, gitBase);
   const taskDir = join(stateDir, 'tasks', task.runId);
   const dir = join(taskDir, 'push');
   await ensureOwnDirectory(join(stateDir, 'tasks'), { uid });
@@ -197,7 +190,7 @@ export async function pushTask({
     await loadBundle({ gitDir: repo, bundle, prerequisite: task.baseSha, ref: { sha, name: `refs/heads/${branch}` }, git });
     await hooks.beforeToken?.(repo);
     await checkPushConfig(repo, reference, { git });
-    const command = gitPushCommand({ token: await tokens.getToken(), sha, branch, url, allowProtocols });
+    const command = gitPushCommand({ token: await tokens.getToken(), sha, branch, url });
     const result = await runGit({
       cwd: repo, gitDir: repo, git, args: command.args, allow: command.allow, set: command.set, baseEnv,
       timeoutMs: PUSH_TIMEOUT_MS,

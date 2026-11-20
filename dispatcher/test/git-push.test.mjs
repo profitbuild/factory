@@ -4,8 +4,8 @@
 // these tests run the same command in a repository holding what an agent could plant (a hook, a credential helper, an
 // insteadOf, an ssh command), to show what still holds behind that check: the token reaches the server through
 // libexec/git-askpass.sh and no argument, file, hook, helper, ssh command or other host; control runs without the
-// overrides show that what is planted here would have had it. The tests push over http:// to loopback, so they pass
-// allowProtocols 'http:https' explicitly; the default is 'https' alone.
+// overrides show that what is planted here would have had it. The tests push over http:// to loopback, the one host
+// besides GitHub that gitHost takes, and for it alone GIT_ALLOW_PROTOCOL is 'http:https'; on GitHub it is 'https'.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawn } from 'node:child_process';
@@ -14,7 +14,8 @@ import { join } from 'node:path';
 
 import { GIT, GIT_OVERRIDES, runGit } from '../src/git/run-git.mjs';
 import {
-  GIT_ASKPASS, PUSH_ENV_ALLOWED, PUSH_REF_PREFIX, checkTaskBranch, gitPushCommand, pushUrl,
+  GIT_ASKPASS, GIT_HOST, GitHostError, PUSH_ENV_ALLOWED, PUSH_REF_PREFIX, checkTaskBranch, gitHost, gitPushCommand,
+  pushUrl,
 } from '../src/github/builder-token.mjs';
 import { filesContaining, makeRoot } from '../testing/builder-github.mjs';
 import { basic, startGitServer } from '../testing/git-server.mjs';
@@ -75,7 +76,7 @@ async function setUp(name) {
 
 /** The command of gitPushCommand, run by runGit in `repo` (a test's repository, standing for an agent's). */
 function pushFrom({ repo, sha, baseEnv, wrapper }, { url = git.url, set = {} } = {}) {
-  const command = gitPushCommand({ token: TOKEN, sha, branch: 'feat/x', url, allowProtocols: 'http:https' });
+  const command = gitPushCommand({ token: TOKEN, sha, branch: 'feat/x', url });
   return runGit({ cwd: repo, gitDir: join(repo, '.git'), git: wrapper, args: command.args, allow: command.allow,
     set: { ...command.set, ...set }, baseEnv }).then((result) => ({ ...result, stdout: result.stdout.toString() }));
 }
@@ -163,12 +164,12 @@ test('the command: the refspec built from { sha, branch }, the token in its env 
   assert.equal(GIT, '/usr/bin/git', 'git by its full path: PATH does not choose the program handed the token');
 });
 
-test('the command refuses a bad sha or branch, a URL with credentials or not HTTPS, and no token', () => {
+test('the command refuses a bad sha or branch, a URL with credentials or of another host, and no token', () => {
   const ok = { token: TOKEN, sha: SHA, branch: 'feat/x', url: pushUrl('profitbuild/incident-platform') };
   assert.throws(() => gitPushCommand({ ...ok, url: 'https://x:y@github.com/profitbuild/incident-platform.git' }),
     /no user or password/);
   assert.throws(() => gitPushCommand({ ...ok, url: 'http://github.com/profitbuild/incident-platform.git' }),
-    /must be an https:\/\/ URL/);
+    /the git host must be https:\/\/github\.com, or a test's http:\/\/ origin on a loopback address/);
   for (const sha of ['HEAD', SHA.toUpperCase(), SHA.slice(1), `+${SHA}`]) {
     assert.throws(() => gitPushCommand({ ...ok, sha }), /40 hex digits/);
   }
@@ -177,9 +178,19 @@ test('the command refuses a bad sha or branch, a URL with credentials or not HTT
     assert.throws(() => checkTaskBranch(branch), TypeError);
   }
   assert.throws(() => gitPushCommand({ ...ok, token: '' }), /a token is required/);
-  assert.throws(() => gitPushCommand({ ...ok, url: 'http://127.0.0.1:1/x.git' }), /http among them/,
-    'http:// to loopback needs http allowed explicitly');
-  assert.throws(() => gitPushCommand({ ...ok, allowProtocols: 'https ssh' }), /protocols joined by ":"/);
+  // Where the token is handed over, the host is GitHub's or a test's loopback one, the URL pushUrl's shape: the
+  // rule of gitHost, the same as pushTarget's (review round 3).
+  for (const url of ['https://git.example/profitbuild/incident-platform.git',
+    'https://github.com.evil.example/profitbuild/incident-platform.git', 'https://127.0.0.1/profitbuild/x.git',
+    'http://192.0.2.1/profitbuild/x.git', 'https://github.com/profitbuild/incident-platform',
+    'https://github.com/profitbuild/incident-platform.git?x=1', 'https://github.com/a/b/c.git',
+    'https://github.com/profitbuild/...git', 'https://github.com:443/profitbuild/x.git', 'not a url']) {
+    assert.throws(() => gitPushCommand({ ...ok, url }), (error) => error instanceof GitHostError, url);
+  }
+  assert.equal(gitPushCommand({ ...ok, url: 'http://127.0.0.1:9/profitbuild/x.git' }).set.GIT_ALLOW_PROTOCOL, 'http:https');
+  assert.equal(gitPushCommand(ok).set.GIT_ALLOW_PROTOCOL, 'https');
+  assert.throws(() => pushUrl('profitbuild/x', 'https://git.example'), GitHostError);
+  assert.equal(gitHost(GIT_HOST).origin, 'https://github.com');
   assert.throws(() => pushUrl('incident-platform'), /owner\/name/);
 });
 
@@ -236,8 +247,7 @@ test('a push URL rewritten by insteadOf to ssh:// is refused by git: the ssh com
 
 test('control: without GIT_ALLOW_PROTOCOL, the ssh command of the config gets the token', async () => {
   const setup = await setUpSsh('ssh-control');
-  const command = gitPushCommand({ token: TOKEN, sha: setup.sha, branch: 'feat/x', url: git.url,
-    allowProtocols: 'http:https' });
+  const command = gitPushCommand({ token: TOKEN, sha: setup.sha, branch: 'feat/x', url: git.url });
   const set = { ...command.set };
   delete set.GIT_ALLOW_PROTOCOL;
   const { code } = await runGit({ cwd: setup.repo, gitDir: join(setup.repo, '.git'), git: setup.wrapper, args: command.args,

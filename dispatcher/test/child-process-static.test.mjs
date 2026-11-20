@@ -12,6 +12,7 @@ import { childProcessCalls, childProcessViolations } from '../testing/child-proc
 import { testOnlyOptions } from '../testing/test-only-options-scan.mjs';
 
 const SRC = fileURLToPath(new URL('../src/', import.meta.url));
+const BIN = fileURLToPath(new URL('../bin/', import.meta.url));
 
 async function modules() {
   const entries = await readdir(SRC, { withFileTypes: true, recursive: true });
@@ -100,10 +101,16 @@ test('review round 1: git is started by src/git/run-git.mjs alone, and flock(1) 
   assert.deepEqual(wrongStarts('git/run-git.mjs', planted('spawn(git, [...GIT_OVERRIDES], { env: childEnv() });')), []);
 });
 
-test('review round 2: no module of src/ gives a test\'s option (git, gitBase, hooks, maxOutput, lstatOf)', async () => {
+test('review rounds 2 and 3: no module of src/ or bin/ gives a test\'s option (git, gitBase, hooks, maxOutput, '
+  + 'lstatOf, uid)', async () => {
   const found = [];
   for (const file of await modules()) {
     found.push(...testOnlyOptions(file.slice(SRC.length), await readFile(file, 'utf8')));
+  }
+  const bins = (await readdir(BIN)).filter((name) => name.endsWith('.mjs'));
+  assert.ok(bins.length >= 2, 'the scan sees bin/');
+  for (const name of bins) {
+    found.push(...testOnlyOptions(`bin/${name}`, await readFile(join(BIN, name), 'utf8')));
   }
   assert.deepEqual(found, []);
   for (const [path, code] of [
@@ -119,6 +126,13 @@ test('review round 2: no module of src/ gives a test\'s option (git, gitBase, ho
     ['github/push.mjs', "runGit({ cwd, args, git: '/tmp/git' });"],
     ['github/push.mjs', "pushTarget(repository, 'http://127.0.0.1:1');"],
     ['git/bundle.mjs', 'runGit({ cwd, args, maxOutput: 10 });'],
+    ['cli.mjs', "runGit({ cwd, args, 'git': '/tmp/git' });"],
+    ['cli.mjs', 'pushTask({ stateDir, "gitBase": base });'],
+    ['bin/check-app.mjs', "pushTask({ stateDir, hooks: {} });"],
+    ['cli.mjs', 'pushTask({ stateDir, uid: 0 });'],
+    ['cli.mjs', 'mainObjects(repoDir, { uid });'],
+    ['github/push.mjs', "const git = '/tmp/git';\nrunGit({ cwd, args, git });"],
+    ['git/bundle.mjs', "let { git } = other;\nrunGit({ cwd, args, git });"],
   ]) {
     assert.notDeepEqual(testOnlyOptions(path, `${code}\n`), [], `${path}: ${code}`);
   }
