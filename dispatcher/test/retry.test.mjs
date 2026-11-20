@@ -45,9 +45,25 @@ test('AC4: a 503, 500, 502 or 429 is retried until GitHub answers, and the retri
 });
 
 test('AC4: a timeout is retried', async (t) => {
-  const { github, call } = await fakeWith(t, [{ ...OK, delayMs: 400 }, { ...OK, delayMs: 400 }]);
-  assert.deepEqual(await call(), [{ number: 7 }]);
-  assert.equal(github.requests.length, 3);
+  // The timeout injected, with no clock: fetch rejects as AbortSignal.timeout makes it reject (a TimeoutError), twice,
+  // and githubRequest turns that into kind 'timeout'. The signal fetch is given is the request's own, checked too.
+  const github = await startFakeGitHub({ [`GET ${PATH}`]: () => OK });
+  t.after(github.close);
+  let calls = 0;
+  const timingOut = async (url, init) => {
+    calls += 1;
+    assert.ok(init.signal instanceof AbortSignal);
+    if (calls <= 2) {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    }
+    return fetch(url, init);
+  };
+  const kinds = [];
+  assert.deepEqual(await githubCall({ baseUrl: github.baseUrl, method: 'GET', path: PATH, bearer: 't',
+    fetchImpl: timingOut }, { sleep: async () => {}, onRetry: ({ error }) => kinds.push(error.kind) }), [{ number: 7 }]);
+  assert.equal(calls, 3);
+  assert.deepEqual(kinds, ['timeout', 'timeout']);
+  assert.equal(github.requests.length, 1, 'only the third call reached GitHub');
 });
 
 test('AC4: a network error, a refused connection or a DNS error, is retried', async (t) => {

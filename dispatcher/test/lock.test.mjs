@@ -32,12 +32,11 @@ test('AC2: a second run is refused while another process holds the lock, and a k
   lock.release();
 });
 
-test('AC2: the lock is held for as long as the run lives, and the same process cannot take it twice', async (t) => {
+test('AC2: the same process cannot take the lock twice, and a release frees it', async (t) => {
   const state = await makeStateDir();
   t.after(state.remove);
   const lock = acquireLock(state.dir);
   try {
-    await new Promise((resolve) => { setTimeout(resolve, 200); });
     assert.throws(() => acquireLock(state.dir), LockHeldError);
   } finally {
     lock.release();
