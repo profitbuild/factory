@@ -8,7 +8,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { childProcessCalls, childProcessViolations } from '../testing/child-process-scan.mjs';
+import { childProcessCalls, childProcessViolations, mask } from '../testing/child-process-scan.mjs';
 import { testOnlyOptions } from '../testing/test-only-options-scan.mjs';
 
 const SRC = fileURLToPath(new URL('../src/', import.meta.url));
@@ -177,8 +177,8 @@ test('#0-277 AC10: no module of src/ both names factory\'s paths and touches a f
     + "import { open } from 'node:fs/promises';\n"), []);
 });
 
-test('review rounds 2 and 3, #0-277: no module of src/ or bin/ gives a test\'s option (git, gitBase, hooks, maxOutput, '
-  + 'lstatOf, uid, sudo)', async () => {
+test('review rounds 2 and 3, #0-277, #0-278: no module of src/ or bin/ gives a test\'s option (git, gitBase, hooks, '
+  + 'maxOutput, lstatOf, uid, sudo, apiBase)', async () => {
   const found = [];
   for (const file of await modules()) {
     found.push(...testOnlyOptions(file.slice(SRC.length), await readFile(file, 'utf8')));
@@ -213,7 +213,13 @@ test('review rounds 2 and 3, #0-277: no module of src/ or bin/ gives a test\'s o
     ['container/environment.mjs', "const sudo = '/tmp/sudo';\nupContainer({ runId, carried, sudo });"],
     ['github/push.mjs', 'runContainerCommand({ program, args, sudo });'],
     ['bin/check-app.mjs', "main(['sweep'], { sudo: '/tmp/x' });"],
-    ['cli.mjs', 'pushTask({ stateDir, gitBase });'],
+    // #0-278: the CLI forwards its test's gitBase and apiBase (the fake GitHub's), and no other module may.
+    ['container/environment.mjs', 'pushTask({ stateDir, gitBase });'],
+    ['cli.mjs', 'fetchMain({ stateDir, gitBase: base });'],
+    ['cli.mjs', "openPullHeads({ repository, apiBase: 'http://127.0.0.1:1' });"],
+    ['product/commands.mjs', 'openPullHeads({ repository, apiBase });'],
+    ['github/push.mjs', 'fetchMain({ stateDir, apiBase });'],
+    ['product/trusted-paths.mjs', 'withTaskObjects({ stateDir, hooks });'],
     ['container/daemon.mjs', 'pushTask({ stateDir, hooks });'],
     ['git/bundle.mjs', "let { git } = other;\nrunGit({ cwd, args, git });"],
   ]) {
@@ -225,3 +231,49 @@ test('review rounds 2 and 3, #0-277: no module of src/ or bin/ gives a test\'s o
   'a module that runs git forwards its caller\'s own option');
   assert.deepEqual(testOnlyOptions('cli.mjs', "pushTask({ stateDir, tokens }); pushTarget(repository);\n"), []);
 });
+
+/**
+ * incident-platform backlog #0-278, ADR-0060 D6 as amended: no product code runs as `dispatcher`, main's included.
+ * Held three ways, on top of the rule of which module starts which program (above: git, flock and sudo, each by one
+ * module, so no product path is ever a program the dispatcher starts):
+ *  - src/product/, which reads the product, starts nothing itself: no mention of child_process;
+ *  - the adapter's commands are named only where they are checked (adapter-from-base.mjs) and where they are handed
+ *    to the task container (commands.mjs), which reaches it through execInTask alone, the starter's docker exec;
+ *  - test/cli.test.mjs runs the whole flow with scripts that leave a mark if run, and finds none.
+ */
+const NAMES_COMMANDS = /\b(?:gate|changedPaths)\.command\b|\]\.command\b/;
+const COMMAND_MODULES = ['product/adapter-from-base.mjs', 'product/commands.mjs'];
+
+function productCodeOnHost(path, source) {
+  const found = [];
+  if (path.startsWith('product/') && source.includes('child_process')) {
+    found.push(`${path} mentions child_process`);
+  }
+  if (NAMES_COMMANDS.test(mask(source).code) && !COMMAND_MODULES.includes(path)) {
+    found.push(`${path} names the adapter's commands`);
+  }
+  if (path === 'product/commands.mjs' && /\b(?:runGit|runContainerCommand|mustRun)\s*\(/.test(mask(source).code)) {
+    found.push(`${path} reaches a host starter, not execInTask alone`);
+  }
+  return found;
+}
+
+test('#0-278 D6: no product code runs as dispatcher: src/product/ starts nothing, the commands go to the container only',
+  async () => {
+    const found = [];
+    for (const file of await modules()) {
+      found.push(...productCodeOnHost(file.slice(SRC.length), await readFile(file, 'utf8')));
+    }
+    assert.deepEqual(found, []);
+    const commands = await readFile(join(SRC, 'product', 'commands.mjs'), 'utf8');
+    assert.match(commands, /return execInTask\(\{ container, sudo, limitS, graceS, env, outputLimit,/);
+    for (const [path, code] of [
+      ['product/commands.mjs', "import { spawn } from 'node:child_process';\n"],
+      ['cli.mjs', 'runGit({ cwd, args: adapter.gate.command });\n'],
+      ['github/push.mjs', "spawnLike(adapter['changedPaths'].command);\nconst x = adapter[which].command;\n"],
+      ['product/commands.mjs', 'mustRun({ program: \'docker\', args: adapter[which].command });\n'],
+    ]) {
+      assert.notDeepEqual(productCodeOnHost(path, code), [], `${path}: ${code}`);
+    }
+    assert.deepEqual(productCodeOnHost('product/commands.mjs', 'execInTask({ args: adapter[which].command });\n'), []);
+  });

@@ -95,20 +95,40 @@ export function configDifference(actual, reference) {
 }
 
 /**
+ * Refuses the repository `gitDir` unless its config is exactly the reference repository's, but for the entries of
+ * `allowed`, each of which it may hold once, with exactly that value (FACTORY_REPO_DIR's remote.origin.url, which
+ * `git clone --bare` writes and no command of the dispatcher's reads: incident-platform backlog #0-278).
+ *
+ * @param {string} gitDir
+ * @param {string} referenceDir
+ * @param {{ git?: string, allowed?: [string, string][], what?: string }} [options]
+ */
+export async function checkRepoConfig(gitDir, referenceDir, { git, allowed = [], what = 'the push repository' } = {}) {
+  const actual = await readConfig(gitDir, { git });
+  const rest = [...actual];
+  for (const [key, value] of allowed) {
+    const at = rest.findIndex(([k, v]) => k === key && v === value);
+    if (at >= 0) {
+      rest.splice(at, 1);
+    }
+  }
+  const { unknown, changed } = configDifference(rest, await readConfig(referenceDir, { git }));
+  if (unknown.length + changed.length > 0) {
+    const parts = [
+      ...(unknown.length ? [`keys a reference git init --bare does not write: ${unknown.join(', ')}`] : []),
+      ...(changed.length ? [`keys whose value is not the reference's: ${changed.join(', ')}`] : []),
+    ];
+    throw new ConfigRefusedError(`${what}'s config is refused, before any token is asked for: ${parts.join('; ')}`);
+  }
+}
+
+/**
  * Refuses the push repository `gitDir` unless its config is exactly the reference repository's.
  *
  * @param {string} gitDir
  * @param {string} referenceDir
  * @param {{ git?: string }} [options]
  */
-export async function checkPushConfig(gitDir, referenceDir, options) {
-  const { unknown, changed } = configDifference(await readConfig(gitDir, options),
-    await readConfig(referenceDir, options));
-  if (unknown.length + changed.length > 0) {
-    const parts = [
-      ...(unknown.length ? [`keys a reference git init --bare does not write: ${unknown.join(', ')}`] : []),
-      ...(changed.length ? [`keys whose value is not the reference's: ${changed.join(', ')}`] : []),
-    ];
-    throw new ConfigRefusedError(`the push repository's config is refused, before any token is asked for: ${parts.join('; ')}`);
-  }
+export async function checkPushConfig(gitDir, referenceDir, { git } = {}) {
+  await checkRepoConfig(gitDir, referenceDir, { git });
 }

@@ -29,6 +29,10 @@ export async function startBuilderGitHub({ clock = { get now() { return Date.now
     tokenDelayMs: 0,
     factory: () => ({ status: 404, body: { message: 'Not Found' } }),
     failRevoke: false,
+    // The open pull requests' head branches (incident-platform backlog #0-278), and an answer of a page to put in
+    // place of the list's (pullsPage(page) returns { status, body }, or undefined for the list's own).
+    pulls: [],
+    pullsPage: () => undefined,
     minted: [],
     revoked: [],
   });
@@ -49,6 +53,18 @@ export async function startBuilderGitHub({ clock = { get now() { return Date.now
     ...Object.fromEntries(PRODUCTS.map((product) => [`GET /repos/${product}/installation`, ({ headers }) => (
       jwtValid(headers.authorization)
         ? { status: 200, body: { repository_selection: 'selected', ...state.installation } } : unauthorized)])),
+    ...Object.fromEntries(PRODUCTS.map((product) => [`GET /repos/${product}/pulls`, ({ headers, query }) => {
+      if (!tokenValid(headers.authorization)) {
+        return unauthorized;
+      }
+      const page = Number(query.get('page'));
+      const perPage = Number(query.get('per_page'));
+      if (query.get('state') !== 'open' || !(page >= 1) || !(perPage >= 1)) {
+        return { status: 422, body: { message: 'the fake takes state=open, page and per_page' } };
+      }
+      return state.pullsPage(page) ?? { status: 200, body: state.pulls.slice((page - 1) * perPage, page * perPage)
+        .map((ref, i) => ({ number: (page - 1) * perPage + i + 1, head: { ref } })) };
+    }])),
     'GET /repos/profitbuild/factory/installation': ({ headers }) => (jwtValid(headers.authorization)
       ? state.factory() : unauthorized),
     [`POST /app/installations/${INSTALLATION_ID}/access_tokens`]: ({ headers }) => {
@@ -83,7 +99,7 @@ export async function startBuilderGitHub({ clock = { get now() { return Date.now
       return { status: 204 };
     },
   });
-  return { ...fake, state, reset, privateKey, publicKey };
+  return { ...fake, state, reset, privateKey, publicKey, tokenValid: (token) => tokenValid(`Bearer ${token}`) };
 }
 
 /**

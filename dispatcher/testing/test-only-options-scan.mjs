@@ -21,7 +21,7 @@
 // seen. The review reads those.
 import { argumentsOf, closing, mask } from './child-process-scan.mjs';
 
-export const OPTIONS = Object.freeze(['git', 'gitBase', 'hooks', 'maxOutput', 'lstatOf', 'uid', 'sudo']);
+export const OPTIONS = Object.freeze(['git', 'gitBase', 'hooks', 'maxOutput', 'lstatOf', 'uid', 'sudo', 'apiBase']);
 export const FUNCTIONS = Object.freeze(['pushTask', 'runGit', 'initBare', 'readConfig', 'checkPushConfig',
   'loadBundle', 'mainObjects', 'pushTarget',
   // #0-277: the container starter and everything that runs a container command, or git for the task container.
@@ -30,24 +30,25 @@ export const FUNCTIONS = Object.freeze(['pushTask', 'runGit', 'initBare', 'readC
   'createTaskNetwork', 'createTaskVolumes', 'removeOwnObjects', 'killTask', 'readTaskConfig', 'treeEntry', 'blobOf',
   'upContainer', 'inspectJson', 'execInTask', 'callInTask', 'probeTimeout', 'bundleFromTask', 'setUpTaskContainer',
   'inTaskEnvironment', 'mainCommit', 'makeBaseBundle', 'inRepo', 'sweep', 'main',
-  // #0-278: the reads of the base, the read of a task's commits, the commands.
-  'lsTree', 'resolveInBase', 'subtreeFiles', 'readBlobs', 'readAdapter', 'checkAdapterPaths', 'withTaskObjects',
-  'checkOwnRepoDir', 'changedPathsOf', 'checkTaskPaths', 'trustedArchive', 'runProductCommand', 'probeTools']);
+  // #0-278: the reads of the base, the fetch of main, the read of a task's commits, the item's lock, the commands.
+  'lsTree', 'resolveInBase', 'subtreeFiles', 'readBlobs', 'readAdapter', 'checkAdapterPaths', 'currentAdapter',
+  'itemAndBase', 'fetchMain', 'checkRepoConfig', 'withTaskObjects', 'checkOwnRepoDir', 'changedPathsOf',
+  'checkTaskPaths', 'trustedArchive', 'runProductCommand', 'openPullHeads', 'probeTools']);
 /**
  * The modules that run git, push, or run a container command, and the options of a test's each may forward: all but
- * `sudo` for #0-276's, `git` and `sudo` for #0-277's (the task container's), and `sudo` alone for the CLI's main, which a
- * test calls with the fake daemon.
+ * `sudo` for #0-276's, `git` and `sudo` for #0-277's (the task container's), and for the CLI's main, which a test calls
+ * with the fake daemon and the fake GitHub, `sudo`, `gitBase` and `apiBase` (#0-278).
  */
-const ALL = Object.freeze(OPTIONS.filter((option) => option !== 'sudo'));
+const ALL = Object.freeze(OPTIONS.filter((option) => !['sudo', 'apiBase'].includes(option)));
 const TASK = Object.freeze(['git', 'sudo']);
 export const CHAIN = Object.freeze({
   'git/run-git.mjs': ALL, 'git/bundle.mjs': ALL, 'git/config-allowlist.mjs': ALL, 'github/push.mjs': ALL,
   'git/base-bundle.mjs': TASK, 'container/run-container.mjs': TASK, 'container/work-dir.mjs': TASK,
   'container/daemon.mjs': TASK, 'container/task-container.mjs': TASK, 'container/task-bundle.mjs': TASK,
-  'container/environment.mjs': TASK, 'cli.mjs': Object.freeze(['sudo']),
-  'git/task-objects.mjs': ALL, 'product/base-tree.mjs': Object.freeze(['git']),
+  'container/environment.mjs': TASK, 'cli.mjs': Object.freeze(['sudo', 'gitBase', 'apiBase']),
+  'git/task-objects.mjs': ALL, 'git/main-fetch.mjs': ALL, 'product/base-tree.mjs': Object.freeze(['git']),
   'product/adapter-from-base.mjs': Object.freeze(['git']), 'product/trusted-paths.mjs': Object.freeze(['git', 'uid']),
-  'product/commands.mjs': TASK,
+  'product/commands.mjs': TASK, 'github/item-lock.mjs': Object.freeze(['apiBase']),
 });
 
 /**

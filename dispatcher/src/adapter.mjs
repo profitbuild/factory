@@ -2,11 +2,10 @@
  * A product's adapter, `.factory/adapter.json`, and its gate's answer, against the factory's schemas
  * (schemas/adapter.schema.json, schemas/gate.schema.json; incident-platform ADR-0060 D6, backlog #0-275 AC5).
  *
- * In v0 the adapter is read from the path `run --adapter` names; step 4.3d reads it, and the commands it names, from
- * the product's main. A refusal lists where the document breaks the schema, never a value found there.
+ * The schema checks the adapter's spelling only. The adapter is read from the base commit of the dispatcher's clone of
+ * the product's main, as a blob, and its paths are checked against that base's tree, by product/adapter-from-base.mjs
+ * (incident-platform backlog #0-278). A refusal lists where the document breaks the schema, never a value found there.
  */
-import { readFile } from 'node:fs/promises';
-
 import adapterSchema from '../../schemas/adapter.schema.json' with { type: 'json' };
 import gateSchema from '../../schemas/gate.schema.json' with { type: 'json' };
 import { checkSchema, validate } from './schema/validate.mjs';
@@ -31,28 +30,6 @@ export function checkAdapter(value) {
     throw refuse('the adapter', errors);
   }
   return deepFreeze(structuredClone(value));
-}
-
-/**
- * The adapter at `path`: read, parsed and checked.
- *
- * @param {string} path
- * @returns {Promise<object>}
- */
-export async function loadAdapter(path) {
-  let text;
-  try {
-    text = await readFile(path, 'utf8');
-  } catch (error) {
-    throw new AdapterError(`the adapter ${path} cannot be read (${error.code ?? error.message})`);
-  }
-  let value;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    throw new AdapterError(`the adapter ${path} is not JSON`);
-  }
-  return checkAdapter(value);
 }
 
 /**

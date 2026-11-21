@@ -10,7 +10,7 @@ import { appendFile, chmod, lstat, mkdir, readFile, rm, stat, symlink, writeFile
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadAdapter } from '../src/adapter.mjs';
+import { checkAdapter } from '../src/adapter.mjs';
 import { BundleError, readBundleFile } from '../src/git/bundle.mjs';
 import { ConfigRefusedError, readConfig } from '../src/git/config-allowlist.mjs';
 import { GIT_HOST, pushUrl } from '../src/github/builder-token.mjs';
@@ -256,11 +256,9 @@ test('readPushResult: up to date is a success; a local refusal keeps git\'s own 
 });
 
 test('AC3: the repository and the push URL come from the adapter: two products, two URLs', async () => {
-  const ip = await loadAdapter(fileURLToPath(new URL('../testing/fixtures/incident-platform.adapter.json',
-    import.meta.url)));
-  const otherFile = join(root.dir, 'other.adapter.json');
-  await writeFile(otherFile, JSON.stringify({ ...ip, repository: 'profitbuild/other-product' }));
-  const other = await loadAdapter(otherFile);
+  const ip = checkAdapter(JSON.parse(await readFile(fileURLToPath(new URL(
+    '../testing/fixtures/incident-platform.adapter.json', import.meta.url)), 'utf8')));
+  const other = checkAdapter({ ...ip, repository: 'profitbuild/other-product' });
   assert.equal(pushUrl(ip.repository), 'https://github.com/profitbuild/incident-platform.git');
   assert.equal(pushUrl(other.repository), 'https://github.com/profitbuild/other-product.git');
   const otherServer = await startGitServer({ token: TOKEN, path: '/profitbuild/other-product.git' });

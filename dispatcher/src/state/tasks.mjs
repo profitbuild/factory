@@ -61,16 +61,17 @@ async function writeTask(stateDir, task) {
  * A new task, its directory made once (700) and its task.json written before any phase.
  *
  * @param {string} stateDir
- * @param {{ runId: string, item?: string | null }} options
+ * @param {{ runId: string, item?: string | null, baseSha?: string | null }} options `baseSha` the base the run read
+ *   the adapter from (incident-platform backlog #0-278), recorded before the task container is set up
  */
-export async function createTask(stateDir, { runId, item = null }) {
+export async function createTask(stateDir, { runId, item = null, baseSha = null }) {
   if (!RUN_ID.test(runId)) {
     throw new TypeError('createTask: runId is not one of newRunId\'s');
   }
   await ensureOwnDirectory(tasksDir(stateDir));
   await ensureOwnDirectory(join(tasksDir(stateDir), runId), { exclusive: true });
   return writeTask(stateDir, {
-    version: 1, runId, item, branch: null, baseSha: null, phase: null, round: 0, calls: [], status: 'running',
+    version: 1, runId, item, branch: null, baseSha, phase: null, round: 0, calls: [], status: 'running',
     reason: null, pr: null, imageId: null,
   });
 }
@@ -93,13 +94,12 @@ export async function loadTask(stateDir, runId) {
 }
 
 /**
- * The one running task on `branch`, for `run --resume <branch>`: refused when there is none, or more than one, or
- * when the task on it has ended.
+ * Every task of $FACTORY_STATE_DIR/tasks/, by its runId, each checked against its schema.
  *
  * @param {string} stateDir
- * @param {string} branch
+ * @returns {Promise<object[]>}
  */
-export async function findTaskByBranch(stateDir, branch) {
+export async function listTasks(stateDir) {
   let names;
   try {
     names = await readdir(tasksDir(stateDir));
@@ -109,13 +109,22 @@ export async function findTaskByBranch(stateDir, branch) {
     }
     names = [];
   }
-  const found = [];
+  const tasks = [];
   for (const runId of names.filter((name) => RUN_ID.test(name)).sort()) {
-    const task = await loadTask(stateDir, runId);
-    if (task.branch === branch) {
-      found.push(task);
-    }
+    tasks.push(await loadTask(stateDir, runId));
   }
+  return tasks;
+}
+
+/**
+ * The one running task on `branch`, for `run --resume <branch>`: refused when there is none, or more than one, or
+ * when the task on it has ended.
+ *
+ * @param {string} stateDir
+ * @param {string} branch
+ */
+export async function findTaskByBranch(stateDir, branch) {
+  const found = (await listTasks(stateDir)).filter((task) => task.branch === branch);
   if (found.length === 0) {
     throw new StateError(`no task is on the branch ${branch}`);
   }
