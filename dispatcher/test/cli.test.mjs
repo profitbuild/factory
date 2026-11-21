@@ -249,6 +249,21 @@ test('review round 1 c: a revoke that fails is one line on stderr naming its kin
   assert.equal(errors.length, 1);
 });
 
+test('review round 2, 3: a write to stderr that throws, after a revoke that fails, still frees the lock', async (t) => {
+  const { env, fake, product, lines } = await setUpDaemon(t);
+  github.state.failRevoke = true;
+  let writes = 0;
+  const broken = { write: () => { writes += 1; throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }); } };
+  const call = (args, err) => main(args, { env, out: { write: (line) => lines.push(line) }, err, sudo: fake.sudo,
+    apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
+  const left = await call(['run', '--item', '0-1'], broken);
+  assert.equal(left.status, 'running', left.reason);
+  assert.equal(left.baseSha, product.base);
+  assert.equal(writes, 1, 'the line was tried');
+  github.state.failRevoke = false;
+  assert.equal((await call(['run', '--item', '0-2'], broken)).status, 'running', 'the lock was released');
+});
+
 test('#0-278: an adapter of the base that breaks its schema, or its tree\'s rules, refuses the run before any task',
   async (t) => {
     const broken = { ...ADAPTER };

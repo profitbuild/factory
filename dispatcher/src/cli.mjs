@@ -214,12 +214,21 @@ export async function main(argv, {
     return left;
   } finally {
     // A failed revoke changes neither what the run did nor the lock's release: one line on stderr, naming the kind
-    // of failure (its kind, or its class), never GitHub's answer; the token expires within the hour.
-    await tokens?.revoke().catch((error) => {
-      const kind = error?.kind ?? error?.constructor?.name ?? 'unknown';
-      err.write(`dispatcher: builder-app's token could not be revoked (${kind}); it expires within the hour\n`);
-    });
-    lock.release();
+    // of failure (its kind, or its class), never GitHub's answer; the token expires within the hour. The lock is
+    // released in a finally of its own, whatever the revoke or that line do (a write to stderr can throw: EPIPE;
+    // review round 2 of factory#20, 3).
+    try {
+      await tokens?.revoke().catch((error) => {
+        const kind = error?.kind ?? error?.constructor?.name ?? 'unknown';
+        try {
+          err.write(`dispatcher: builder-app's token could not be revoked (${kind}); it expires within the hour\n`);
+        } catch {
+          // stderr is gone: the line is lost, the run's result and the lock are not.
+        }
+      });
+    } finally {
+      lock.release();
+    }
   }
 }
 
