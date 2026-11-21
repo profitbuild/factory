@@ -1,0 +1,17 @@
+{
+  "description": "The factory's plugin hooks (incident-platform ADR-0060 D5 as amended): Claude Code ignores a plugin agent's frontmatter hooks, so they live here. foreground-bash refuses a Bash call in the background; onFailure block makes a hook that cannot start refuse the call too.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/foreground-bash.mjs\"",
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  }
+}
