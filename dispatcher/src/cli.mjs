@@ -179,13 +179,14 @@ async function sweep(settings, { force, runId, sudo }) {
  * @param {string[]} argv the arguments after the script
  * @param {{ env?: Record<string, string | undefined>, out?: { write: (text: string) => void },
  *   now?: () => number, random?: (size: number) => Buffer, phases?: typeof PHASES, sudo?: string, apiBase?: string,
- *   gitBase?: string, fetchImpl?: typeof fetch }} [options] all but argv for the tests (`sudo`: the fake daemon's;
+ *   gitBase?: string, fetchImpl?: typeof fetch, err?: { write: (text: string) => void } }} [options] all but argv for
+ *   the tests (`sudo`: the fake daemon's;
  *   `apiBase`, `gitBase`, `fetchImpl`: the fake GitHub's)
  * @returns {Promise<object>} the task as it was left (`run`), or what the sweep removed (`sweep`)
  */
 export async function main(argv, {
-  env = process.env, out = process.stdout, now, random, phases = PHASES, sudo, apiBase = GITHUB_API,
-  gitBase = GIT_HOST, fetchImpl,
+  env = process.env, out = process.stdout, err = process.stderr, now, random, phases = PHASES, sudo,
+  apiBase = GITHUB_API, gitBase = GIT_HOST, fetchImpl,
 } = {}) {
   const args = parse(argv);
   refuseSecretShaped(env);
@@ -219,8 +220,12 @@ export async function main(argv, {
       status: left.status, reason: left.reason })}\n`);
     return left;
   } finally {
-    // A token not revoked expires within the hour; a failed revoke does not change what the run did.
-    await tokens?.revoke().catch(() => {});
+    // A failed revoke changes neither what the run did nor the lock's release: one line on stderr, naming the kind
+    // of failure (its kind, or its class), never GitHub's answer; the token expires within the hour.
+    await tokens?.revoke().catch((error) => {
+      const kind = error?.kind ?? error?.constructor?.name ?? 'unknown';
+      err.write(`dispatcher: builder-app's token could not be revoked (${kind}); it expires within the hour\n`);
+    });
     lock.release();
   }
 }

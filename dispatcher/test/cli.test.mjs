@@ -224,6 +224,24 @@ async function refusedBeforeTask({ stateDir, fake, call }, args, pattern) {
   assert.deepEqual(github.state.revoked, github.state.minted, 'a token minted is revoked');
 }
 
+test('review round 1 c: a revoke that fails is one line on stderr naming its kind; the run keeps its result and frees '
+  + 'the lock', async (t) => {
+  const { env, fake, product, lines } = await setUpDaemon(t);
+  github.state.failRevoke = true;
+  const errors = [];
+  const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) },
+    err: { write: (line) => errors.push(line) }, sudo: fake.sudo, apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
+  const left = await call(['run', '--item', '0-1']);
+  assert.equal(left.status, 'running', left.reason);
+  assert.equal(left.baseSha, product.base);
+  assert.deepEqual(errors, ['dispatcher: builder-app\'s token could not be revoked (Error); it expires within the hour\n']);
+  assert.ok(!errors.join('').includes('Bad Gateway'), 'no text of GitHub\'s answer');
+  assert.equal(JSON.parse(lines.at(-1)).runId, left.runId, 'the run printed its task');
+  github.state.failRevoke = false;
+  assert.equal((await call(['run', '--item', '0-2'])).status, 'running', 'the lock was released');
+  assert.equal(errors.length, 1);
+});
+
 test('#0-278: an adapter of the base that breaks its schema, or its tree\'s rules, refuses the run before any task',
   async (t) => {
     const broken = { ...ADAPTER };
