@@ -7,10 +7,12 @@
 // In hooks.json and not in an agent's frontmatter: Claude Code ignores a plugin agent's frontmatter `hooks:`
 // (incident-platform ADR-0060 D5 as amended, backlog #0-299). One session runs one agent, so the hook holds for it alone.
 //
-// Fails closed: Claude Code runs the call after any exit status but 2, so every way out but a call this script has read
-// and found in the foreground is exit 2: bad JSON, a missing field, a value other than false, an exception, an input
-// that does not end. hooks.json's `onFailure: "block"` covers a `node` that does not start. A refusal says what to do
-// instead and quotes nothing of the input, which is the agent's. It runs whenever it is loaded (no check that it is the
+// Fails closed. Of its own accord Claude Code blocks a call only on a hook's exit 2 and runs it after any other status,
+// so every way out but a call this script has read and found in the foreground is exit 2: bad JSON, a missing field, a
+// value other than false, an exception, an input that does not end. With `onFailure: "block"`, as hooks/hooks.json has
+// it, Claude Code also blocks the call when the hook exits with any status but 0 or its interpreter does not start
+// (measured on Claude Code 2.1.328 for exit 1 and a missing interpreter). A refusal says what to do instead and quotes
+// nothing of the input, which is the agent's. It runs whenever it is loaded (no check that it is the
 // main module, which a symlinked path would fail, letting every call run); its tests run it as Claude Code does.
 import { setTimeout as delay } from 'node:timers/promises';
 

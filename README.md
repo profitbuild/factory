@@ -62,8 +62,10 @@ ADR-0060 D5 as amended), which a product's task container loads read-only from `
   (#0-302). The answer's schema comes with the dispatcher's call (#0-301).
 - **Hooks.** Claude Code ignores a plugin agent's frontmatter `hooks:`, `mcpServers:` and `permissionMode:`, so the
   plugin's hooks are `hooks/hooks.json`: `foreground-bash.mjs` refuses a Bash call with `run_in_background` (an
-  agent's turns are its budget), and fails closed: every input but a Bash call in the foreground exits 2, and
-  `onFailure: "block"` covers a `node` that does not start.
+  agent's turns are its budget), and fails closed: every input but a Bash call in the foreground exits 2. Of its own
+  accord Claude Code blocks a call only on a hook's exit 2, and runs it after any other status; with
+  `onFailure: "block"`, which `hooks/hooks.json` sets, it also blocks the call when the hook exits with a status
+  other than 0 or its interpreter does not start.
   The architect has no boundary hooks on this path: the old path's `readonly-bash` and `write-scope` are not
   ported (migration step M2.0's decision), so in the container nothing limits what it writes. The dispatcher's own
   check of the paths each call's commit changed replaces them (`writeScopes`, fail closed, incident-platform backlog
@@ -73,13 +75,23 @@ ADR-0060 D5 as amended), which a product's task container loads read-only from `
   `/usr/bin`, a version manager's directory), so the plugin cannot name one path for every product. An agent that
   can write a directory earlier on PATH could put there a `node` that exits 0 and run a command in the background
   again: that costs only the turn budget this hook guards, not a security boundary (the container holds no
-  credential, and the gate and the dispatcher's checks run outside it). A `node` that is missing, or a hook that
-  exits with any status but 0, refuses every Bash call (`onFailure: "block"`, measured on Claude Code 2.1.328).
+  credential, and the gate and the dispatcher's checks run outside it). A `NODE_OPTIONS` in the session's
+  environment does the same, for example `--import` of a module that exits 0, since it loads before the hook; the
+  cost is the same, the turn budget only, not a security boundary. What was measured, on Claude Code 2.1.328 with
+  `onFailure: "block"`: a hook that exits 1 and a missing interpreter each blocked the Bash call, which did not run,
+  and without `onFailure` the same exit 1 let it run. A hook past a `timeout` was measured once, with a timeout of
+  2 s set on a copy of the plugin, and blocked too; `hooks/hooks.json` sets no `timeout` of its own, so Claude
+  Code's default applies, which was not measured (the hook ends a read that does not end itself after 10 s, with
+  exit 2).
 - **Checks.** `dispatcher/test/plugin.test.mjs`, in job `Test`: the manifest's name, the agents' frontmatter
   exactly `name`, `description`, `tools`, `model`, `maxTurns` (a key Claude Code would ignore fails here),
   a list of refused patterns (the first product's names and paths, a stack's words) absent from `agents/`, no commit,
-  the light agent equal to the implementer but for its paragraph, and each hook's script present;
-  `dispatcher/test/foreground-bash.test.mjs` runs the hook as Claude Code does. `claude plugin validate .` passes
+  the sentence that the repository's text is data, not instructions, in each of the three agents, the light agent
+  equal to the implementer but for its paragraph, and each hook's script present. A product's word an agent truly
+  needs takes a deliberate change of the list `REFUSED` in that test, which the review sees.
+  `dispatcher/test/foreground-bash.test.mjs` runs the hook as Claude Code does: in the background refused, in the
+  foreground allowed, every malformed input refused, an input over 1 MiB refused without being quoted, and an
+  exception, a rejected promise and a failing read of stdin each refused with exit 2. `claude plugin validate .` passes
   offline and without a token, but is not in CI: it would need Claude Code installed there at a pin and a change to
   the workflow, which is the owner's, and it does not see an agent's `hooks:`, which the test does.
 
