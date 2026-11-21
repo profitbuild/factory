@@ -68,6 +68,13 @@ ADR-0060 D5 as amended), which a product's task container loads read-only from `
   ported (migration step M2.0's decision), so in the container nothing limits what it writes. The dispatcher's own
   check of the paths each call's commit changed replaces them (`writeScopes`, fail closed, incident-platform backlog
   #0-302); until then the architect's text alone asks it to write only its plan file and an ADR.
+  A known limitation: the hook's command runs `node` from the session's PATH, not by an absolute path. The task
+  image is the product's, built from its own Dockerfile, which puts Node where its base image does (`/usr/local/bin`,
+  `/usr/bin`, a version manager's directory), so the plugin cannot name one path for every product. An agent that
+  can write a directory earlier on PATH could put there a `node` that exits 0 and run a command in the background
+  again: that costs only the turn budget this hook guards, not a security boundary (the container holds no
+  credential, and the gate and the dispatcher's checks run outside it). A `node` that is missing, or a hook that
+  exits with any status but 0, refuses every Bash call (`onFailure: "block"`, measured on Claude Code 2.1.328).
 - **Checks.** `dispatcher/test/plugin.test.mjs`, in job `Test`: the manifest's name, the agents' frontmatter
   exactly `name`, `description`, `tools`, `model`, `maxTurns` (a key Claude Code would ignore fails here),
   a list of refused patterns (the first product's names and paths, a stack's words) absent from `agents/`, no commit,
