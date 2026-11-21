@@ -7,7 +7,8 @@
  *    leaves one running for ever, and the next run must start (#0-277 AC13);
  *  - an open pull request holds it: its head branch contains `/<id>-` (factory/feat/0-278-x, feat/0-278-x; not
  *    feat/0-2780-x), the lock next-item.sh reads, so that the owner's path and the dispatcher's lock each other.
- *    The rule's cases are testing/fixtures/item-lock-branches.tsv, which next-item.sh's tests read too.
+ *    The rule's cases are testing/fixtures/item-lock-branches.tsv, a copy of incident-platform's
+ *    .github/scripts/fixtures/item-lock-branches.tsv, which leads (ADR-0061) and which next-item.sh's tests read.
  * The open pull requests are listed with builder-app's token, every page, each through the retry helper (#0-261):
  * `GET /repos/{owner}/{repo}/pulls?state=open&sort=created&direction=asc&per_page=100&page=N` until a page shorter than
  * 100; a page that cannot be read, or is not a list of pull requests with a head branch, or more than MAX_PULL_PAGES

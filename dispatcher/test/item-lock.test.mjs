@@ -2,7 +2,8 @@
 // pull request whose head branch contains /<id>- holds the item, read with builder-app's token from a fake GitHub,
 // every page, each through the retry helper; a list not read whole refuses the start; one of the dispatcher's own
 // tasks holds it only while it runs with a branch (a killed run's task with none does not: #0-277 AC13). The rule of
-// a branch is tested against testing/fixtures/item-lock-branches.tsv, the cases next-item.sh's tests read too.
+// a branch is tested against testing/fixtures/item-lock-branches.tsv, a copy of the cases incident-platform's
+// next-item.sh tests read (the product's file leads, ADR-0061).
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -54,6 +55,20 @@ test('AC11: the rule of a head branch holds every case of the fixture both sides
   assert.ok(cases.some(([item, branch, e]) => item === '0-278' && branch === 'feat/0-2780-x' && e === 'free'));
   assert.throws(() => branchHoldsItem('feat/0-3-x', '3'), TypeError);
 });
+
+test('review round 1 a: the fixture is the product\'s copy: its notice, ended by a line of # alone, then the original',
+  () => {
+    const lines = readFileSync(new URL('../testing/fixtures/item-lock-branches.tsv', import.meta.url), 'utf8')
+      .split('\n');
+    assert.equal(lines[0], '# A copy of profitbuild/incident-platform\'s .github/scripts/fixtures/item-lock-branches.tsv, '
+      + 'which leads (ADR-0061); held equal to it, this notice aside, by incident-platform\'s check-factory-copies.rb.');
+    const end = lines.indexOf('#');
+    assert.ok(end > 0 && lines.slice(0, end).every((line) => line.startsWith('# ')), 'the notice: # lines, then #');
+    const original = lines.slice(end + 1);
+    assert.equal(original.indexOf('#'), -1, 'the original holds no line of # alone, so the notice ends at the first');
+    assert.ok(!original.join('\n').includes('#0-268'), 'no claim of the copy check: incident-platform adds it');
+    assert.ok(original.some((line) => line === '0-3\trefactor/0-3-left-over\theld'));
+  });
 
 test('AC9: every page is read, with builder-app\'s token: an item held on the second page is refused', async () => {
   fake.state.pulls = [...Array.from({ length: PULLS_PER_PAGE }, (_, i) => `feat/0-${1000 + i}-other`),

@@ -1,10 +1,11 @@
+# A copy of profitbuild/incident-platform's .github/scripts/fixtures/item-lock-branches.tsv, which leads (ADR-0061); held equal to it, this notice aside, by incident-platform's check-factory-copies.rb.
+# Change the original first, then this copy; this paragraph, up to the line holding # alone, is the copy's only.
+#
 # The lock of an item by an open pull request's head branch (incident-platform backlog #0-278 AC11, ADR-0060 D8 as
 # amended): an item 0-N is held by a head branch that contains /0-N- (a slash, the item, a dash), and by no other.
-# Both sides of the rule read this file: the dispatcher's lock (dispatcher/src/github/item-lock.mjs, its test
-# dispatcher/test/item-lock.test.mjs) and the product's next-item.sh (incident-platform's
-# .github/scripts/test-queue.sh, from a copy of this file). The copy is held equal to this one by incident-platform's
-# check of the factory's copies (#0-268, ADR-0061): a change of the rule is made here and there in step.
-#
+# Both sides of the rule read these cases: the product's next-item.sh, through its tests
+# (incident-platform's .github/scripts/test-queue.sh), and the factory's lock (profitbuild/factory's
+# dispatcher/src/github/item-lock.mjs, through dispatcher/test/item-lock.test.mjs, which reads a copy).
 # Format: lines starting with # are comments; every other line is one case, three fields separated by one tab:
 #   <item>	<head branch>	<held|free>
 # held: the branch holds the item; free: it does not.
