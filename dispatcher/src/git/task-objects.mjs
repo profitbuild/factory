@@ -16,7 +16,7 @@
  */
 import { constants } from 'node:fs';
 import { lstat, mkdir, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, normalize } from 'node:path';
 
 import { ensureOwnDirectory } from '../state/files.mjs';
 import { loadBundle } from './bundle.mjs';
@@ -42,6 +42,23 @@ async function isMissing(path) {
 }
 
 /**
+ * FACTORY_REPO_DIR's path is absolute and normalized (review round 2 of factory#20, 2): with a trailing /, lstat
+ * follows a symlink at the end, and a . or .. segment makes the walk up to / check other directories than the ones on
+ * the way. Refused naming the setting, never its value.
+ *
+ * @param {string} repoDir
+ */
+function checkRepoDirPath(repoDir) {
+  if (typeof repoDir !== 'string' || !isAbsolute(repoDir)) {
+    throw new TypeError('checkOwnRepoDir: repoDir must be an absolute path');
+  }
+  if (normalize(repoDir) !== repoDir || (repoDir !== '/' && repoDir.endsWith('/'))) {
+    throw new RepoDirError('FACTORY_REPO_DIR is not a normalized path: no . or .. segment, no // and no trailing / '
+      + '(a trailing / would follow a symlink at its end)');
+  }
+}
+
+/**
  * FACTORY_REPO_DIR is the dispatcher's alone (incident-platform backlog #0-278 AC7): through alternates its objects
  * feed every push, so no one else may write any file of it, a loose object's directory or a pack included. Two rules:
  *  - the shield: the clone itself or its parent (provision.sh makes it in the dispatcher's home, 700) is a directory
@@ -59,9 +76,7 @@ async function isMissing(path) {
  * @param {{ uid?: number, lstatOf?: typeof lstat }} [options] for the tests only
  */
 export async function checkOwnRepoDir(repoDir, { uid = process.getuid(), lstatOf = lstat } = {}) {
-  if (typeof repoDir !== 'string' || !isAbsolute(repoDir)) {
-    throw new TypeError('checkOwnRepoDir: repoDir must be an absolute path');
-  }
+  checkRepoDirPath(repoDir);
   const own = async (path) => {
     const stats = await lstatOf(path).catch(() => null);
     return { stats, shields: stats?.isDirectory() === true && stats.uid === uid && (stats.mode & 0o077) === 0 };
@@ -141,6 +156,7 @@ export async function mainObjects(repoDir, { uid = process.getuid(), lstatOf = l
  * @param {{ uid?: number, lstatOf?: typeof lstat }} [options] for the tests only
  */
 export async function checkRepoDir(repoDir, { uid, lstatOf = lstat } = {}) {
+  checkRepoDirPath(repoDir);
   const stats = await lstatOf(repoDir).catch(() => null);
   if (!stats?.isDirectory()) {
     throw new RepoDirError('FACTORY_REPO_DIR is not a directory');

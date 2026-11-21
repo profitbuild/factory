@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { chmod, lstat, mkdir, readdir, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { RepoDirError, checkOwnRepoDir, mainObjects } from '../src/git/task-objects.mjs';
+import { RepoDirError, checkOwnRepoDir, checkRepoDir, mainObjects } from '../src/git/task-objects.mjs';
 import { git, makeProduct } from '../testing/git-fixtures.mjs';
 import { makeStateDir } from '../testing/state-dir.mjs';
 
@@ -116,3 +116,22 @@ test('review round 1 g: every directory on the way to /, as sshd\'s StrictModes:
     && error.message === `a directory on the way to FACTORY_REPO_DIR, ${link}, is not a directory (a symlink is refused)`);
   await assert.rejects(checkOwnRepoDir('relative/repo'), TypeError);
 });
+
+test('review round 2, 2: a path not normalized is refused naming the setting, never the value; a normalized one passes',
+  async () => {
+    const { dir, repo } = await home();
+    const link = join(dir, 'link-to-clone');
+    await symlink(repo, link);
+    const cases = { 'a trailing / at a symlink to the clone': `${link}/`, 'a trailing /': `${repo}/`,
+      'a .. inside': join(dir, 'x').replace(/x$/, `x/../${repo.split('/').at(-1)}`), 'a . inside': `${dir}/./repo`,
+      'a //': `${dir}//repo` };
+    for (const [what, path] of Object.entries(cases)) {
+      for (const check of [checkOwnRepoDir, checkRepoDir]) {
+        await assert.rejects(check(path), (error) => error instanceof RepoDirError
+          && error.message === 'FACTORY_REPO_DIR is not a normalized path: no . or .. segment, no // and no trailing / '
+            + '(a trailing / would follow a symlink at its end)' && !error.message.includes(dir), `${check.name}: ${what}`);
+      }
+    }
+    await checkOwnRepoDir(repo);
+    await checkRepoDir(repo);
+  });
