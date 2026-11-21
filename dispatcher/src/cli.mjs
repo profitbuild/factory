@@ -47,7 +47,7 @@ import { readBuilderEnv } from './config/builder-env.mjs';
 import { readFactoryEnv } from './config/factory-env.mjs';
 import { refuseSecretShaped } from './config/settings.mjs';
 import { inTaskEnvironment, setUpTaskContainer } from './container/environment.mjs';
-import { refuseWhileRollback, sweepDaemon } from './container/daemon.mjs';
+import { checkDaemonOptions, refuseWhileRollback, sweepDaemon } from './container/daemon.mjs';
 import { mainCommit } from './git/base-bundle.mjs';
 import { fetchMain } from './git/main-fetch.mjs';
 import { checkRepoDir } from './git/task-objects.mjs';
@@ -162,10 +162,13 @@ async function itemAndBase(settings, args, { builder, apiBase, gitBase, fetchImp
 
 /** `sweep [--force]`: the sweep alone, under the lock. */
 async function sweep(settings, { force, runId, sudo }) {
+  const { stateDir } = settings;
+  // The sweep's helper is a container: none on a daemon off the VM's options (#0-284, review round 1 of factory#22).
+  await checkDaemonOptions({ sudo, stateDir });
   if (!force) {
-    await refuseWhileRollback({ sudo, when: 'the sweep is refused' });
+    await refuseWhileRollback({ sudo, stateDir, when: 'the sweep is refused' });
   }
-  return sweepDaemon({ runId, helperImage: settings.helperImage, sudo });
+  return sweepDaemon({ runId, helperImage: settings.helperImage, sudo, stateDir });
 }
 
 /**
@@ -203,7 +206,8 @@ export async function main(argv, {
     const { resumed, base, adapter } = await itemAndBase(settings, args,
       { builder, apiBase, gitBase, fetchImpl, keep });
     const runId = resumed?.runId ?? newRunId({ now, random });
-    const { result: left } = await inTaskEnvironment({ runId, helperImage: settings.helperImage, sudo }, async () => {
+    const { result: left } = await inTaskEnvironment({ runId, helperImage: settings.helperImage,
+      stateDir: settings.stateDir, sudo }, async () => {
       const task = resumed ?? await createTask(settings.stateDir, { runId, item: args.item, baseSha: base });
       const ready = await setUpTaskContainer({ stateDir: settings.stateDir, repoDir: settings.repoDir, task, adapter,
         helperImage: settings.helperImage, sudo });

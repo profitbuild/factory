@@ -79,7 +79,7 @@ async function setUpDaemon(t, initial, { product: productOptions = {} } = {}) {
   const env = { ...validEnv(state.dir, product.repoDir), BUILDER_APP_ID: String(APP_ID),
     BUILDER_APP_INSTALLATION_ID: String(INSTALLATION_ID), BUILDER_APP_KEY: app.keyPath };
   const lines = [];
-  const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) }, sudo: fake.sudo,
+  const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) }, ...fake.runner,
     apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
   const advance = async (change = { files: { 'src/merged.txt': 'merged\n' } }) => {
     const sha = await commit(product.work, change);
@@ -237,7 +237,7 @@ test('review round 1 c: a revoke that fails is one line on stderr naming its kin
   github.state.failRevoke = true;
   const errors = [];
   const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) },
-    err: { write: (line) => errors.push(line) }, sudo: fake.sudo, apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
+    err: { write: (line) => errors.push(line) }, ...fake.runner, apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
   const left = await call(['run', '--item', '0-1']);
   assert.equal(left.status, 'running', left.reason);
   assert.equal(left.baseSha, product.base);
@@ -254,7 +254,7 @@ test('review round 2, 3: a write to stderr that throws, after a revoke that fail
   github.state.failRevoke = true;
   let writes = 0;
   const broken = { write: () => { writes += 1; throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }); } };
-  const call = (args, err) => main(args, { env, out: { write: (line) => lines.push(line) }, err, sudo: fake.sudo,
+  const call = (args, err) => main(args, { env, out: { write: (line) => lines.push(line) }, err, ...fake.runner,
     apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
   const left = await call(['run', '--item', '0-1'], broken);
   assert.equal(left.status, 'running', left.reason);
@@ -344,8 +344,9 @@ test('--resume <branch> takes the running task on it, in a container of the imag
   assert.equal(resumed.runId, first.runId);
   assert.equal(resumed.status, 'running', resumed.reason);
   assert.equal(resumed.imageId, first.imageId);
-  const ups = fake.calls().filter((c) => c.program === 'devcontainer');
-  assert.equal(ups.length, 2);
+  // #0-284: one build, the new task's; both runs up from the image's ID.
+  const devcontainer = fake.calls().filter((c) => c.program === 'devcontainer').map((c) => c.args[0]);
+  assert.deepEqual(devcontainer, ['build', 'up', 'up']);
   await assert.rejects(call(['run', '--resume', 'factory/none']),
     /no task is on the branch factory\/none/);
 });
@@ -353,7 +354,8 @@ test('--resume <branch> takes the running task on it, in a container of the imag
 test('#0-277: sweep removes a killed run\'s leftovers; it refuses while a rollback runs, naming it, and --force sweeps '
   + 'that too', async (t) => {
   const rollback = plantedContainer({ name: 'planted-rollback', labels: { 'factory.rollback': '1' } });
-  const { call, lines, fake } = await setUpDaemon(t, { containers: [rollback, plantedContainer({ name: 'leftover' })],
+  const leftover = plantedContainer({ name: 'leftover' });
+  const { call, lines, fake } = await setUpDaemon(t, { containers: [rollback, leftover],
     volumes: [{ name: 'incident-platform-gh', labels: {} }] });
   await assert.rejects(call(['sweep']), (error) => {
     assert.match(error.message, /^the sweep is refused: a running container carries factory\.rollback: planted-rollback \(/);
@@ -363,8 +365,9 @@ test('#0-277: sweep removes a killed run\'s leftovers; it refuses while a rollba
   assert.equal(fake.read().containers.length, 2, 'nothing removed');
   const removed = await call(['sweep', '--force']);
   assert.deepEqual(JSON.parse(lines.at(-1)), { swept: removed });
-  assert.deepEqual([...removed.containers].sort(), ['leftover', 'planted-rollback']);
-  assert.deepEqual(removed.volumes, ['incident-platform-gh']);
+  // #0-284 (review round 1 of factory#22): the daemon's IDs, short, and a count of volumes; never a name.
+  assert.deepEqual([...removed.containers].sort(), [rollback.id.slice(0, 12), leftover.id.slice(0, 12)].sort());
+  assert.equal(removed.volumes, 1);
   assert.deepEqual(fake.read().containers, []);
   assert.deepEqual((await call(['sweep'])).containers, [], 'an empty daemon sweeps to nothing');
 });
@@ -376,4 +379,45 @@ test('#0-277: a run refused by a running rollback makes no task and removes noth
     /the run is refused: a running container carries factory\.rollback: rollback/);
   assert.deepEqual((await readdir(stateDir)).sort(), ['lock', 'state.json']);
   assert.equal(fake.read().containers.length, 1);
+});
+
+test('#0-284, review round 1 of factory#22: sweep prints the daemon\'s IDs of the containers and networks it removed and '
+  + 'how many volumes, never a name', async (t) => {
+  // Put together at run time from two parts, so that no file of the repository holds text shaped like a secret.
+  const secret = 'ghs' + `_${'n'.repeat(36)}`;
+  const container = plantedContainer({ name: `c-${secret}`, running: false, volumes: [`v-${secret}`] });
+  const { call, lines, fake } = await setUpDaemon(t, { containers: [container],
+    volumes: [{ name: `v-${secret}`, labels: {} }, { name: 'factory-dispatcher-m2', labels: {} }] });
+  const network = { id: '9'.repeat(64), name: `n-${secret}`, labels: {} };
+  fake.update((s) => { s.networks.push(network); });
+  // A volume is removed by its name, the one docker gives it, and the starter refuses an argument shaped like a
+  // secret (sudo logs them): the sweep is refused, naming the argument's position, never the name.
+  await assert.rejects(call(['sweep']), (error) => {
+    assert.match(error.message, /^docker volume rm: argument \d+ holds a value shaped like a secret/);
+    assert.ok(!error.message.includes('ghs_'), error.message);
+    return true;
+  });
+  // The container and the network were removed by their IDs; a volume of an ordinary name is counted.
+  fake.update((s) => {
+    s.volumes = s.volumes.filter((v) => !v.name.includes(secret));
+    s.containers.push(container);
+    s.networks.push(network);
+    s.volumes.push({ name: 'left-by-a-test', labels: {} });
+  });
+  const removed = await call(['sweep']);
+  assert.deepEqual(removed, { containers: [container.id.slice(0, 12)], networks: [network.id.slice(0, 12)], volumes: 1 });
+  assert.ok(!lines.join('').includes('ghs_'), lines.join(''));
+});
+
+test('#0-284, review round 1 of factory#22 (decision 1): sweep and run on a daemon off the VM\'s options are refused '
+  + 'before any container, the sweep\'s helper included', async (t) => {
+  const { stateDir, call, fake } = await setUpDaemon(t, { containers: [plantedContainer({ name: 'leftover' })] });
+  fake.update((s) => { s.scenario.info = { SecurityOptions: ['name=seccomp,profile=builtin', 'name=cgroupns'] }; });
+  for (const args of [['sweep'], ['sweep', '--force'], ['run', '--item', '0-1']]) {
+    await assert.rejects(call(args), /^Error: factory's daemon's security options are not the VM's .*missing name=rootless.*: no container is made on it$/);
+  }
+  assert.ok(!fake.calls().some((c) => c.program === 'devcontainer' || c.args[0] === 'run'),
+    'no helper, no container of a task');
+  assert.deepEqual(fake.read().containers.map((c) => c.name), ['leftover'], 'nothing swept');
+  assert.ok(!(await readdir(stateDir)).includes('tasks'), 'no task made');
 });

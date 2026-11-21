@@ -59,13 +59,14 @@ test('AC13: a killed run\'s leftovers, labelled or not, and a stopped rollback\'
   const fake = await setUp(leftovers());
   await mkdir(join(fake.tasks, OLD_RUN, 'w', '.git'), { recursive: true });
   await writeFile(join(fake.tasks, OLD_RUN, '.x'), 'x');
-  await refuseWhileRollback({ sudo: fake.sudo, when: 'test' });
-  const removed = await sweepDaemon({ runId: RUN_ID, helperImage: HELPER_IMAGE, sudo: fake.sudo });
-  assert.deepEqual(removed.containers.sort(), ['compose-db', 'rollback', 'task-old', 'testcontainers-postgres',
-    'testcontainers-ryuk']);
-  assert.deepEqual(removed.networks.sort(), ['compose_default', `factory-task-${OLD_RUN}`]);
-  assert.deepEqual(removed.volumes.sort(), ['compose_data', `factory-task-${OLD_RUN}-claude`,
-    'incident-platform-claude', 'incident-platform-gh', 'incident-platform-m2'].sort());
+  await refuseWhileRollback({ ...fake.runner, when: 'test' });
+  const removed = await sweepDaemon({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner });
+  // #0-284 (review round 1 of factory#22): by the daemon's IDs, short, and a count of volumes, never a name.
+  const planted = leftovers();
+  assert.equal(removed.containers.length, planted.containers.length);
+  assert.ok(removed.containers.every((id) => /^[0-9a-f]{12}$/.test(id)), removed.containers.join());
+  assert.deepEqual(removed.networks.sort(), ['a'.repeat(12), 'b'.repeat(12)]);
+  assert.equal(removed.volumes, 5, 'every volume but factory-dispatcher-m2 and the anonymous one rm -v took');
   const state = fake.read();
   assert.deepEqual(state.containers, []);
   assert.deepEqual(state.networks.map((x) => x.name).sort(), ['bridge', 'host', 'none']);
@@ -83,7 +84,7 @@ test('AC13: a running container labelled factory.rollback refuses, naming it and
   async () => {
     const fake = await setUp({ containers: [plantedContainer({ name: 'rollback-devcontainer',
       labels: { 'factory.rollback': '1' } }), plantedContainer({ name: 'unlabelled' })] });
-    await assert.rejects(refuseWhileRollback({ sudo: fake.sudo, when: 'the run is refused' }), (error) => {
+    await assert.rejects(refuseWhileRollback({ ...fake.runner, when: 'the run is refused' }), (error) => {
       assert.ok(error instanceof RollbackRunningError);
       assert.match(error.message, /^the run is refused: a running container carries factory\.rollback: rollback-devcontainer \([0-9a-f]{12}\)\. If it is a rollback, end it .*; if it is not \(a killed run left it\), clear it with `node --env-file=\/home\/dispatcher\/\.config\/factory\/env \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep --force`$/);
       return true;
@@ -91,9 +92,9 @@ test('AC13: a running container labelled factory.rollback refuses, naming it and
     assert.deepEqual(fake.calls().map((c) => c.args), [['ps', '--no-trunc', '--filter', 'label=factory.rollback',
       '--format', '{{.ID}} {{.Names}}']], 'running ones only, by the label\'s presence');
     fake.update((s) => { s.containers[0].running = false; });
-    await refuseWhileRollback({ sudo: fake.sudo, when: 'x' });
+    await refuseWhileRollback({ ...fake.runner, when: 'x' });
     fake.update((s) => { s.containers[0].labels = { 'factory.rollback': '' }; s.containers[0].running = true; });
-    await assert.rejects(refuseWhileRollback({ sudo: fake.sudo, when: 'x' }), RollbackRunningError,
+    await assert.rejects(refuseWhileRollback({ ...fake.runner, when: 'x' }), RollbackRunningError,
       'the label is positive, whatever its value');
   });
 
@@ -101,24 +102,27 @@ test('a sweep out of order fails, since docker refuses a volume a stopped contai
   const fake = await setUp(leftovers());
   // The volumes first, as a wrong order would: docker refuses those still in use, and the check finds them.
   const { mustRun } = await import('../src/container/run-container.mjs');
-  await assert.rejects(mustRun({ program: 'docker', sudo: fake.sudo,
+  await assert.rejects(mustRun({ program: 'docker', ...fake.runner,
     args: ['volume', 'rm', 'incident-platform-gh', 'compose_data'] }),
-  /docker volume rm failed \(exit 1\); its stderr, the agent's side's, is not quoted$/);
+  /docker volume rm failed \(exit 1\); its stderr, the agent's side's, is not quoted: it is kept in \S+$/);
   assert.ok(fake.read().volumes.some((v) => v.name === 'incident-platform-gh'));
 });
 
 test('a sweep that leaves something refuses the run, naming what is left and the sweep\'s command', async () => {
   const fake = await setUp(leftovers());
   fake.update((s) => { s.scenario.ignoreRm = true; });
-  await assert.rejects(sweepDaemon({ runId: RUN_ID, helperImage: HELPER_IMAGE, sudo: fake.sudo }), (error) => {
+  await assert.rejects(sweepDaemon({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner }), (error) => {
     assert.ok(error instanceof Error);
-    return /^docker volume rm failed \(exit 1\); its stderr, the agent's side's, is not quoted$/.test(error.message);
+    return /^docker volume rm failed \(exit 1\); its stderr, the agent's side's, is not quoted: it is kept in \S+$/
+      .test(error.message);
   });
   fake.update((s) => { s.volumes = s.volumes.filter((v) => v.name === 'factory-dispatcher-m2'); s.networks = s.networks
     .filter((x) => ['bridge', 'host', 'none'].includes(x.name)); });
-  await assert.rejects(checkSwept({ sudo: fake.sudo }), (error) => {
+  await assert.rejects(checkSwept({ ...fake.runner }), (error) => {
     assert.ok(error instanceof SweepError);
-    assert.match(error.message, /^the sweep left containers task-old \(.*\), testcontainers-postgres .* on factory's daemon: the run is refused until `node --env-file=\/home\/dispatcher\/\.config\/factory\/env \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep` leaves it empty$/);
+    // #0-284: by count and the daemon's IDs, never a name.
+    assert.match(error.message, /^the sweep left containers \d+ \([0-9a-f]{12}(, [0-9a-f]{12})*\) on factory's daemon: the run is refused until `node --env-file=\/home\/dispatcher\/\.config\/factory\/env \/opt\/factory-checkout\/dispatcher\/src\/cli\.mjs sweep` leaves it empty$/);
+    assert.ok(!error.message.includes('task-old') && !error.message.includes('testcontainers'), error.message);
     return true;
   });
   assert.equal(SWEEP_COMMAND,
@@ -126,9 +130,10 @@ test('a sweep that leaves something refuses the run, naming what is left and the
   const empty = await setUp();
   fake.update(() => {});
   empty.update((s) => { s.networks = s.networks.filter((x) => ['bridge', 'host', 'none'].includes(x.name)); });
-  await checkSwept({ sudo: empty.sudo });
+  await checkSwept({ ...empty.runner });
   empty.update((s) => { s.volumes.push({ name: 'left', labels: {} }); });
-  await assert.rejects(checkSwept({ sudo: empty.sudo }), /^Error: the sweep left volumes left on/);
+  await assert.rejects(checkSwept({ ...empty.runner }),
+    /^Error: the sweep left volumes 1 \(by count: a volume's name is not quoted\) on/);
 });
 
 test('removeOwnObjects and killTask touch what carries the run\'s label, and nothing else', async () => {
@@ -140,9 +145,9 @@ test('removeOwnObjects and killTask touch what carries the run\'s label, and not
   });
   fake.update((s) => { s.networks.push({ id: 'c'.repeat(64), name: `factory-task-${RUN_ID}`,
     labels: { 'factory.task': RUN_ID } }); });
-  assert.deepEqual(await killTask({ runId: RUN_ID, sudo: fake.sudo }), ['mine']);
+  assert.deepEqual(await killTask({ runId: RUN_ID, ...fake.runner }), ['mine']);
   assert.deepEqual(fake.read().containers.map((c) => [c.name, c.running]), [['mine', false], ['rollback', true]]);
-  await removeOwnObjects({ runId: RUN_ID, sudo: fake.sudo });
+  await removeOwnObjects({ runId: RUN_ID, ...fake.runner });
   const state = fake.read();
   assert.deepEqual(state.containers.map((c) => c.name), ['rollback']);
   assert.deepEqual(state.volumes.map((v) => v.name), ['incident-platform-gh']);
@@ -157,6 +162,42 @@ test('docker\'s output is untrusted: a line out of its pattern is refused', asyn
     const sudo = join(root.dir, `liar-${n}`);
     await writeFile(sudo, `#!/bin/sh\nprintf '%s\\n' '${line}'\n`);
     await chmod(sudo, 0o755);
-    await assert.rejects(containers({ sudo }), (error) => error instanceof DockerOutputError);
+    await assert.rejects(containers({ sudo, stateDir: root.dir }), (error) => error instanceof DockerOutputError);
+  }
+});
+
+test('#0-284 AC4: the sweep\'s refusals name what is left by count and the daemon\'s IDs, never a name: a container\'s, '
+  + 'a network\'s or a volume\'s, which the agent\'s side chooses', async () => {
+  // Put together at run time from two parts, so that no file of the repository holds text shaped like a secret.
+  const secret = 'ghs' + `_${'w'.repeat(36)}`;
+  const fake = await setUp({
+    containers: [plantedContainer({ name: `c-${secret}`, volumes: [`v-${secret}`] })],
+    volumes: [{ name: `v-${secret}`, labels: {} }],
+  });
+  fake.update((s) => {
+    s.networks.push({ id: 'e'.repeat(64), name: `n-${secret}`, labels: {} });
+    s.scenario.ignoreRm = true;
+  });
+  const messages = [];
+  await assert.rejects(sweepDaemon({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner }), (error) => {
+    messages.push(error.message);
+    return true;
+  });
+  // The sweep removed the network (only rm is ignored): one left, as a failed `network rm` would leave it.
+  fake.update((s) => { s.containers = []; s.networks.push({ id: 'e'.repeat(64), name: `n-${secret}`, labels: {} }); });
+  await assert.rejects(checkSwept({ ...fake.runner }), (error) => {
+    assert.ok(error instanceof SweepError);
+    messages.push(error.message);
+    assert.match(error.message, /^the sweep left networks \d+ \([0-9a-f]{12}(, [0-9a-f]{12})*\); volumes 1 \(by count/);
+    return true;
+  });
+  fake.update((s) => { s.containers = [plantedContainer({ name: `c-${secret}` })]; });
+  await assert.rejects(checkSwept({ ...fake.runner }), (error) => {
+    messages.push(error.message);
+    assert.match(error.message, /^the sweep left containers 1 \([0-9a-f]{12}\); networks/);
+    return true;
+  });
+  for (const message of messages) {
+    assert.ok(!message.includes('ghs_') && !message.includes(secret), message);
   }
 });

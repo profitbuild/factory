@@ -26,6 +26,7 @@
  * counts.
  */
 import { WORKSPACE } from '../container/paths.mjs';
+import { stderrNote } from '../container/run-container.mjs';
 import { execInTask } from '../container/task-container.mjs';
 import { readAdapter } from './adapter-from-base.mjs';
 import { MODES, readBlobs, resolveInBase, segmentsOf, subtreeFiles } from './base-tree.mjs';
@@ -142,15 +143,16 @@ export async function trustedArchive({ repoDir, base, git }) {
 /**
  * The directory the first call printed, refused unless the call exited 0 and printed one line of TRUSTED_DIR's shape.
  *
- * @param {{ code: number, stdout: Buffer }} result
+ * @param {{ code: number, stdout: Buffer, stderrFile?: string | null }} result the starter's: its stderr only as the
+ *   file it is kept in (#0-284)
  * @returns {string}
  */
-export function unpackedDir({ code, stdout }) {
-  const dir = stdout.toString('utf8').replace(/\n$/, '');
+export function unpackedDir(result) {
+  const { code } = result;
+  const dir = result.stdout.toString('utf8').replace(/\n$/, '');
   if (code !== 0 || !TRUSTED_DIR.test(dir)) {
     refuse(`the trusted paths could not be put into the task container (exit ${code}${code === 0
-      ? ', no directory of /tmp/factory-trusted.XXXXXXXX printed' : ''}); its stderr, the agent's side's, is not `
-      + 'quoted');
+      ? ', no directory of /tmp/factory-trusted.XXXXXXXX printed' : ''}); ${stderrNote(result.stderrFile ?? null)}`);
   }
   return dir;
 }
@@ -166,7 +168,8 @@ export function unpackedDir({ code, stdout }) {
  *   task: { runId: string, baseSha: string | null }, which: 'gate' | 'changedPaths', limitS: number,
  *   graceS?: number, env?: Record<string, string>, outputLimit?: number, sudo?: string, git?: string }} options
  *   `sudo` and `git` for the tests only
- * @returns {Promise<{ code: number, stdout: Buffer, stderr: string }>} the command's, the agent's side
+ * @returns {Promise<{ code: number, stdout: Buffer, stderrFile: string | null }>} the command's, the agent's side; its
+ *   stderr kept in a file of the state, never returned (#0-284)
  */
 export async function runProductCommand({
   container, repoDir, task, which, limitS, graceS, env, outputLimit, sudo, git,

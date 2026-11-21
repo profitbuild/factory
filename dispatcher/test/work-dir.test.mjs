@@ -49,7 +49,7 @@ test('AC7: the base\'s bundle is refs/heads/base at the base, made in FACTORY_RE
   const { product, fake } = await setUp();
   const bundle = await makeBaseBundle({ repoDir: product.repoDir, baseSha: product.base, git: REAL_GIT });
   assert.ok(bundle.subarray(0, 80).toString().startsWith(`# v2 git bundle\n${product.base} ${BASE_REF}\n\n`));
-  await makeWorkDir({ runId: RUN_ID, bundle, image: IMAGE, sudo: fake.sudo });
+  await makeWorkDir({ runId: RUN_ID, bundle, image: IMAGE, ...fake.runner });
   const work = join(fake.tasks, RUN_ID, 'w');
   assert.equal(git(work, ['rev-parse', 'HEAD']), product.base);
   assert.equal(git(work, ['symbolic-ref', 'HEAD']), 'refs/heads/base', 'checked out, by the branch named');
@@ -70,7 +70,7 @@ test('AC10: the helper is the pinned image, no network, three capabilities, the 
   + 'constant and the runId', async () => {
   const { product, fake } = await setUp();
   const bundle = await makeBaseBundle({ repoDir: product.repoDir, baseSha: product.base, git: REAL_GIT });
-  await makeWorkDir({ runId: RUN_ID, bundle, image: IMAGE, sudo: fake.sudo });
+  await makeWorkDir({ runId: RUN_ID, bundle, image: IMAGE, ...fake.runner });
   const [call] = fake.calls();
   assert.deepEqual(call.args, helperArgs({ runId: RUN_ID, image: IMAGE, script: 'make' }));
   assert.deepEqual(call.args.slice(0, 22), ['run', '--rm', '-i', '--pull=never', '--network', 'none', '--user', '0:0',
@@ -91,32 +91,32 @@ test('AC10: the override is written by a helper from stdin; a link planted in it
   + 'nor is a work directory that exists already', async () => {
   const { product, fake } = await setUp();
   const bundle = await makeBaseBundle({ repoDir: product.repoDir, baseSha: product.base, git: REAL_GIT });
-  await makeWorkDir({ runId: RUN_ID, bundle, image: IMAGE, sudo: fake.sudo });
-  await writeOverride({ runId: RUN_ID, override: { a: 1 }, image: IMAGE, sudo: fake.sudo });
+  await makeWorkDir({ runId: RUN_ID, bundle, image: IMAGE, ...fake.runner });
+  await writeOverride({ runId: RUN_ID, override: { a: 1 }, image: IMAGE, ...fake.runner });
   const written = join(fake.tasks, RUN_ID, 'devcontainer.json');
   assert.deepEqual(JSON.parse(await readFile(written, 'utf8')), { a: 1 });
   assert.equal((await stat(written)).mode & 0o777, 0o600);
-  await assert.rejects(writeOverride({ runId: RUN_ID, override: { a: 2 }, image: IMAGE, sudo: fake.sudo }),
+  await assert.rejects(writeOverride({ runId: RUN_ID, override: { a: 2 }, image: IMAGE, ...fake.runner }),
     WorkDirError, 'noclobber: a file there is not written over');
   const other = '20261120T101500Z-0000aa';
   const target = join(root.dir, `outside-${n}`);
   await mkdir(join(fake.tasks, other));
   await symlink(target, join(fake.tasks, other, 'devcontainer.json'));
-  await assert.rejects(writeOverride({ runId: other, override: { a: 3 }, image: IMAGE, sudo: fake.sudo }), WorkDirError);
+  await assert.rejects(writeOverride({ runId: other, override: { a: 3 }, image: IMAGE, ...fake.runner }), WorkDirError);
   await assert.rejects(lstat(target), { code: 'ENOENT' }, 'the link is not written through');
-  await assert.rejects(makeWorkDir({ runId: RUN_ID, bundle, image: IMAGE, sudo: fake.sudo }),
+  await assert.rejects(makeWorkDir({ runId: RUN_ID, bundle, image: IMAGE, ...fake.runner }),
     /the work directory of .* could not be made: docker run failed/);
   const linked = '20261120T101500Z-0000bb';
   await symlink(target, join(fake.tasks, linked));
-  await assert.rejects(writeOverride({ runId: linked, override: {}, image: IMAGE, sudo: fake.sudo }), WorkDirError);
-  await assert.rejects(makeWorkDir({ runId: linked, bundle, image: IMAGE, sudo: fake.sudo }), WorkDirError);
+  await assert.rejects(writeOverride({ runId: linked, override: {}, image: IMAGE, ...fake.runner }), WorkDirError);
+  await assert.rejects(makeWorkDir({ runId: linked, bundle, image: IMAGE, ...fake.runner }), WorkDirError);
   await assert.rejects(lstat(target), { code: 'ENOENT' });
   // A link to a directory that exists: `mkdir` (no -p) refuses it, so nothing is written through it.
   const outside = join(root.dir, `outside-dir-${n}`);
   await mkdir(outside);
   const pointing = '20261120T101500Z-0000cc';
   await symlink(outside, join(fake.tasks, pointing));
-  await assert.rejects(makeWorkDir({ runId: pointing, bundle, image: IMAGE, sudo: fake.sudo }), WorkDirError);
+  await assert.rejects(makeWorkDir({ runId: pointing, bundle, image: IMAGE, ...fake.runner }), WorkDirError);
   assert.deepEqual(await readdir(outside), [], 'no bundle, no clone written through the link');
 });
 
@@ -131,19 +131,19 @@ test('AC12: the work directory is removed whole, dot entries and the directory i
       await writeFile(join(dir, name), 'x');
     }
     await symlink('/etc', join(dir, 'w', 'link'));
-    await removeWorkDir({ runId: RUN_ID, image: IMAGE, sudo: fake.sudo });
+    await removeWorkDir({ runId: RUN_ID, image: IMAGE, ...fake.runner });
     await assert.rejects(lstat(dir), { code: 'ENOENT' });
-    await removeWorkDir({ runId: RUN_ID, image: IMAGE, sudo: fake.sudo });
+    await removeWorkDir({ runId: RUN_ID, image: IMAGE, ...fake.runner });
     for (const name of ['20261120T000000Z-aaaaaa', '.left', '..also']) {
       await mkdir(join(fake.tasks, name, '.git'), { recursive: true });
       await writeFile(join(fake.tasks, name, '.git', 'HEAD'), 'x');
       await writeFile(join(fake.tasks, name, 'devcontainer-lock.json'), '{}');
     }
     await writeFile(join(fake.tasks, '.dotfile'), 'x');
-    await removeAllWorkDirs({ runId: RUN_ID, image: IMAGE, sudo: fake.sudo });
+    await removeAllWorkDirs({ runId: RUN_ID, image: IMAGE, ...fake.runner });
     assert.deepEqual(await readdir(fake.tasks), []);
     assert.ok((await stat('/etc')).isDirectory(), 'a link is removed, not followed');
     fake.update((s) => { s.scenario.helperFails = true; });
-    await assert.rejects(removeAllWorkDirs({ runId: RUN_ID, image: IMAGE, sudo: fake.sudo }),
-      /the work directories could not be removed: docker run failed \(exit 1\); its stderr, the agent's side's, is not quoted$/);
+    await assert.rejects(removeAllWorkDirs({ runId: RUN_ID, image: IMAGE, ...fake.runner }),
+      /the work directories could not be removed: docker run failed \(exit 1\); its stderr, the agent's side's, is not quoted: it is kept in \S+$/);
   });

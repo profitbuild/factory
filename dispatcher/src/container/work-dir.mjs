@@ -25,8 +25,11 @@
  * the configuration file, so in the clone, which is `dev`'s (1000:1000, a subuid on the host) and where `factory` may
  * not write (EACCES, the VM's run of 2026-11-20). With `--config` the lockfile is `<runId>/devcontainer-lock.json`,
  * `factory`'s, removed with the directory; the CLI reads no devcontainer.json of the product's, and the override's
- * paths are absolute already. removeWorkDir: `rm -rf <runId>`, the directory itself and every entry, dot entries included, and
- * then nothing is there. removeAllWorkDirs: the same for every entry under /tasks (what a killed run left).
+ * paths are absolute already. writeBuildConfig (#0-284): `<runId>/build/devcontainer.json`, the configuration
+ * `devcontainer build --config` reads, in a directory of its own made by `mkdir` (no -p: one there is refused), so
+ * the build's lockfile is `<runId>/build/devcontainer-lock.json` and the build's configuration is never the one
+ * `devcontainer up` reads. removeWorkDir: `rm -rf <runId>`, the directory itself and every entry, dot entries
+ * included, and then nothing is there. removeAllWorkDirs: the same for every entry under /tasks (what a killed run left).
  */
 import { RUN_ID, TASKS_ROOT, HELPER_TASKS, TASK_LABEL, WORK_OWNER } from './paths.mjs';
 import { ContainerRunError, mustRun } from './run-container.mjs';
@@ -54,6 +57,13 @@ const SCRIPTS = Object.freeze({
     'umask 077',
     'test -d "$1/$2" && test ! -L "$1/$2"',
     'cat > "$1/$2/devcontainer.json"',
+  ].join('\n'),
+  buildConfig: [
+    'set -euC',
+    'umask 077',
+    'test -d "$1/$2" && test ! -L "$1/$2"',
+    'mkdir -- "$1/$2/build"',
+    'cat > "$1/$2/build/devcontainer.json"',
   ].join('\n'),
   remove: [
     'set -eu',
@@ -84,10 +94,10 @@ export function helperArgs({ runId, image, script }) {
     '--entrypoint', '/bin/sh', image, '-c', SCRIPTS[script], 'helper', HELPER_TASKS, runId];
 }
 
-async function helper(what, { runId, image, script, input, sudo }) {
+async function helper(what, { runId, image, script, input, sudo, stateDir }) {
   try {
     await mustRun({ program: 'docker', args: helperArgs({ runId, image, script }), input, timeoutMs: HELPER_TIMEOUT_MS,
-      sudo });
+      sudo, stateDir });
   } catch (error) {
     if (error instanceof ContainerRunError) {
       throw new WorkDirError(`${what}: ${error.message}`);
@@ -99,33 +109,46 @@ async function helper(what, { runId, image, script, input, sudo }) {
 /**
  * The task's work directory, `<runId>/w`, a clone of `bundle` (base-bundle.mjs) owned by the container's user.
  *
- * @param {{ runId: string, bundle: Buffer, image: string, sudo?: string }} options `sudo` for the tests only
+ * @param {{ runId: string, bundle: Buffer, image: string, stateDir: string, sudo?: string }} options `stateDir`
+ *   where the helper's stderr is kept (run-container.mjs); `sudo` for the tests only
  */
-export function makeWorkDir({ runId, bundle, image, sudo }) {
+export function makeWorkDir({ runId, bundle, image, sudo, stateDir }) {
   if (!Buffer.isBuffer(bundle) || bundle.length === 0) {
     throw new TypeError('makeWorkDir: bundle must be the base bundle\'s bytes');
   }
-  return helper(`the work directory of ${runId} could not be made`, { runId, image, script: 'make', input: bundle, sudo });
+  return helper(`the work directory of ${runId} could not be made`, { runId, image, script: 'make', input: bundle, sudo,
+    stateDir });
 }
 
 /**
  * `<runId>/devcontainer.json`, the override `devcontainer up --config` reads, from `override` (task-config.mjs's), as JSON.
  *
- * @param {{ runId: string, override: object, image: string, sudo?: string }} options
+ * @param {{ runId: string, override: object, image: string, stateDir: string, sudo?: string }} options
  */
-export function writeOverride({ runId, override, image, sudo }) {
+export function writeOverride({ runId, override, image, sudo, stateDir }) {
   return helper(`the configuration of ${runId} could not be written`,
-    { runId, image, script: 'override', input: `${JSON.stringify(override, null, 2)}\n`, sudo });
+    { runId, image, script: 'override', input: `${JSON.stringify(override, null, 2)}\n`, sudo, stateDir });
+}
+
+/**
+ * `<runId>/build/devcontainer.json`, the configuration `devcontainer build --config` reads (#0-284), as JSON.
+ *
+ * @param {{ runId: string, config: object, image: string, stateDir: string, sudo?: string }} options
+ */
+export function writeBuildConfig({ runId, config, image, sudo, stateDir }) {
+  return helper(`the build configuration of ${runId} could not be written`,
+    { runId, image, script: 'buildConfig', input: `${JSON.stringify(config, null, 2)}\n`, sudo, stateDir });
 }
 
 /** Removes `<runId>/` whole, and checks that nothing is left of it. */
-export function removeWorkDir({ runId, image, sudo }) {
-  return helper(`the work directory of ${runId} could not be removed`, { runId, image, script: 'remove', sudo });
+export function removeWorkDir({ runId, image, sudo, stateDir }) {
+  return helper(`the work directory of ${runId} could not be removed`, { runId, image, script: 'remove', sudo,
+    stateDir });
 }
 
 /** Removes everything under the tasks' directory (a killed run's work directory), and checks it is empty. */
-export function removeAllWorkDirs({ runId, image, sudo }) {
-  return helper('the work directories could not be removed', { runId, image, script: 'removeAll', sudo });
+export function removeAllWorkDirs({ runId, image, sudo, stateDir }) {
+  return helper('the work directories could not be removed', { runId, image, script: 'removeAll', sudo, stateDir });
 }
 
 export { SCRIPTS };

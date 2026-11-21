@@ -15,12 +15,17 @@
  *   `...Basename`): the host's environment and paths;
  * - refused: every other field, `initializeCommand`, `mounts`, `workspaceMount`, `containerUser`, `image`, `name`
  *   among them.
- * buildOverride writes the configuration `devcontainer up --config` reads: what was carried, with absolute
- * paths into the task's clone, the features by digest, and what the dispatcher sets itself (its mounts, given as
- * `docker run` arguments, the workspace, `updateRemoteUserUID: false`, `containerUser: root`). checkImageMetadata
- * holds the built image's `devcontainer.metadata` label to the same list.
+ * Two configurations are written from what was carried (#0-284, ADR-0062 point 4 as amended): imageBuildConfig's,
+ * which `devcontainer build --config` reads (the build, with absolute paths into the task's clone, the features by
+ * digest, and the users the features are installed for), and buildOverride's, which `devcontainer up --config` reads:
+ * the image by its ID, never a build nor a feature (with either the CLI would build a new image over the one checked),
+ * and what the container needs (the carried runtime fields, the dispatcher's mounts as `docker run` arguments, the
+ * workspace, `updateRemoteUserUID: false`, `containerUser: root`). checkImageMetadata holds the built image's
+ * `devcontainer.metadata` label to the same list, before any container is made of the image.
  *
- * A refusal names the field, never a value read from the product's file.
+ * A refusal names the field, never a value read from the product's file; of the image's label, which the build wrote
+ * and the daemon returned, a refusal names an entry by its index and a key only when it is one of the list's or the
+ * dispatcher's own, never one it found (#0-284).
  */
 import { posix } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -157,12 +162,17 @@ function subset(value, allowed, what) {
   return [...value];
 }
 
-function containerEnv(value, list, where = 'containerEnv') {
+/**
+ * containerEnv's keys and values held to the list. `quoted` false (the image's label, #0-284): a refusal names a
+ * key by its position and its value never, since what it found is the daemon's answer, not the product's file.
+ */
+function containerEnv(value, list, where = 'containerEnv', { quoted = true } = {}) {
   if (!isObject(value)) {
     refuse(`${where} must be an object`);
   }
-  for (const [key, v] of Object.entries(value)) {
-    if (!list.containerEnv.includes(key)) {
+  for (const [position, [found, v]] of Object.entries(value).entries()) {
+    const key = quoted || list.containerEnv.includes(found) ? found : `<key ${position}>`;
+    if (!list.containerEnv.includes(found)) {
       refuse(`${where}.${key} is not a key of the list's (${list.containerEnv.join(', ')})`);
     }
     if (typeof v !== 'string') {
@@ -296,25 +306,42 @@ export function dispatcherMounts(runId, user) {
   ];
 }
 
+/** The users the dispatcher sets, in both configurations: the features are installed for them, and run as them. */
+const USERS = { updateRemoteUserUID: false, containerUser: 'root' };
+
 /**
- * The configuration `devcontainer up --config` reads, as an object (written as strict JSON): the carried
- * fields, the features by digest, and the dispatcher's own. With `imageId` (a task resumed), the image the task
- * recorded instead of the build: its features are in it already.
+ * The configuration `devcontainer build --config` reads (#0-284), as an object (written as strict JSON): the build
+ * with absolute paths into the task's clone, the features by digest, and the users the features are installed for
+ * (their scripts read `_REMOTE_USER` and `_CONTAINER_USER`). Nothing that runs: no lifecycle command, no
+ * capability, no mount; those are the container's, in buildOverride's.
  *
  * @param {ReturnType<typeof checkTaskConfig>} carried
- * @param {{ runId: string, imageId?: string | null }} options
+ * @param {{ runId: string }} options
  */
-export function buildOverride(carried, { runId, imageId = null }) {
+export function imageBuildConfig(carried, { runId }) {
   const { work } = taskPaths(runId);
-  const override = imageId === null
-    ? {
-      build: { dockerfile: `${work}/${carried.dockerfile}`, context: `${work}/${carried.context}` },
-      features: Object.fromEntries(carried.features.map((f) => [f.ref, f.options])),
-    }
-    : { image: imageId };
-  if (imageId !== null && !/^sha256:[0-9a-f]{64}$/.test(imageId)) {
+  return {
+    build: { dockerfile: `${work}/${carried.dockerfile}`, context: `${work}/${carried.context}` },
+    features: Object.fromEntries(carried.features.map((f) => [f.ref, f.options])),
+    remoteUser: carried.remoteUser,
+    ...USERS,
+  };
+}
+
+/**
+ * The configuration `devcontainer up --config` reads, as an object (written as strict JSON): the image by its ID,
+ * checked and recorded before (#0-284: a new task's and a resumed one's alike), the carried runtime fields and the
+ * dispatcher's own. Never a build nor a feature: with either the CLI would build another image over the one checked.
+ *
+ * @param {ReturnType<typeof checkTaskConfig>} carried
+ * @param {{ runId: string, imageId: string }} options
+ */
+export function buildOverride(carried, { runId, imageId }) {
+  const { work } = taskPaths(runId);
+  if (typeof imageId !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(imageId)) {
     throw new TypeError('buildOverride: imageId must be sha256:<64 hex>');
   }
+  const override = { image: imageId };
   for (const name of COMMANDS) {
     if (own(carried, name)) {
       override[name] = carried[name];
@@ -328,13 +355,24 @@ export function buildOverride(carried, { runId, imageId = null }) {
     runArgs: [...carried.runArgs, ...dispatcherMounts(runId, carried.remoteUser)],
     workspaceMount: `type=bind,source=${work},target=${WORKSPACE}`,
     workspaceFolder: WORKSPACE,
-    updateRemoteUserUID: false,
-    containerUser: 'root',
+    ...USERS,
   };
 }
 
 /** The image's metadata fields the dispatcher sets, at the values it sets. */
-const SET = { updateRemoteUserUID: false, containerUser: 'root' };
+const SET = USERS;
+
+/**
+ * Where a feature's entry of the label differs from what the list holds for it (#0-284 AC7): the list's keys whose
+ * values differ or are missing, by name (the factory's own words), and how many keys the entry holds that the list
+ * does not, by count alone (the label's, so the daemon's answer).
+ */
+function featureDifference(entry, metadata) {
+  const differ = Object.keys(metadata)
+    .filter((key) => !own(entry, key) || !isDeepStrictEqual(entry[key], metadata[key]));
+  const foreign = Object.keys(entry).filter((key) => !own(metadata, key)).length;
+  return { differ, foreign };
+}
 
 /**
  * The built image's `devcontainer.metadata` label (which `devcontainer up` merges into the container's
@@ -377,11 +415,15 @@ export function checkImageMetadata(label, { carried, list = LIST }) {
       seen.add(feature.id);
       const { id, ...rest } = entry;
       if (!isDeepStrictEqual(rest, feature.metadata)) {
-        refuse(`${where}, the feature ${feature.id}'s, is not what the feature declares at ${feature.digest}`);
+        const { differ, foreign } = featureDifference(rest, feature.metadata);
+        const differing = differ.length > 0 ? `the list's ${differ.join(', ')} differ${differ.length === 1 ? 's' : ''}`
+          : 'no key of the list\'s differs';
+        refuse(`${where}, the feature ${feature.id}'s, is not what the feature declares at ${feature.digest}: `
+          + `${differing}; ${foreign} key${foreign === 1 ? '' : 's'} off the list (not named)`);
       }
       continue;
     }
-    for (const [key, value] of Object.entries(entry)) {
+    for (const [position, [key, value]] of Object.entries(entry).entries()) {
       if (own(SET, key)) {
         if (value !== SET[key]) {
           refuse(`${where}.${key} is not the dispatcher's value`);
@@ -394,9 +436,9 @@ export function checkImageMetadata(label, { carried, list = LIST }) {
       } else if (key === 'capAdd') {
         subset(value, list.capAdd, `${where}.capAdd`);
       } else if (key === 'containerEnv') {
-        containerEnv(value, list, `${where}.containerEnv`);
+        containerEnv(value, list, `${where}.containerEnv`, { quoted: false });
       } else {
-        refuse(`${where}.${key} is not on the list`);
+        refuse(`${where} holds a key off the list, its key ${position} (not named)`);
       }
     }
   }
