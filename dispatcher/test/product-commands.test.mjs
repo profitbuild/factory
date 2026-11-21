@@ -41,10 +41,12 @@ async function setUp(productOptions) {
     sudo: fake.sudo, git: REAL_GIT });
   assert.ok(ready.container, ready.task.reason);
   const work = join(fake.tasks, RUN_ID, 'w');
-  // No adapter is given: runProductCommand reads the base's itself (review round 1, e).
+  // No adapter and no base are given: runProductCommand reads the base from the task, and the base's adapter itself
+  // (review round 1, e; round 2, 4).
   const run = (which = 'gate', extra = {}) => runProductCommand({ container: ready.container, repoDir: product.repoDir,
-    base: product.base, which, limitS: 30, sudo: fake.sudo, git: REAL_GIT, ...extra });
-  return { dir, product, fake, container: ready.container, work, run };
+    task: ready.task, which, limitS: 30, sudo: fake.sudo, git: REAL_GIT, ...extra });
+  const onBase = (baseSha) => ({ task: { ...ready.task, baseSha } });
+  return { dir, product, fake, container: ready.container, task: ready.task, work, run, onBase };
 }
 
 const lines = (result) => result.stdout.toString('utf8').trim().split('\n');
@@ -119,6 +121,21 @@ test('G: a failure to unpack, or no directory printed, is refused without the ag
   await assert.rejects(s.run('queue'), TypeError);
 });
 
+test('review round 2, 4: the base is the task\'s: a task with no base recorded is refused, and a base handed in is not '
+  + 'taken', async () => {
+  const s = await setUp();
+  const before = execs(s.fake).length;
+  for (const baseSha of [null, undefined, 'main', s.product.base.slice(1)]) {
+    await assert.rejects(s.run('gate', s.onBase(baseSha)), (error) => error instanceof ProductCommandError
+      && error.message === `the task ${s.task.runId} has no base recorded`, String(baseSha));
+  }
+  await assert.rejects(s.run('gate', { task: null }), /the task undefined has no base recorded/);
+  assert.equal(execs(s.fake).length, before, 'refused before any call in the container');
+  const later = await commit(s.product.work, { files: { '.factory/adapter.json': '{}\n' } });
+  git(s.product.work, ['push', '-q', s.product.repoDir, 'HEAD:refs/heads/main']);
+  assert.equal(lines(await s.run('gate', { base: later }))[0], 'run-tests from the base', 'the task\'s base, not one handed in');
+});
+
 test('e: the command is the base adapter\'s, read by runProductCommand itself: a later base whose adapter breaks a rule '
   + 'runs nothing, and an adapter handed in is not taken', async () => {
   const s = await setUp();
@@ -130,7 +147,7 @@ test('e: the command is the base adapter\'s, read by runProductCommand itself: a
     const later = await commit(s.product.work, { files: { '.factory/adapter.json': `${JSON.stringify({ ...ADAPTER,
       gate: { ...ADAPTER.gate, command: [script] } })}\n` }, message: what });
     git(s.product.work, ['push', '-q', s.product.repoDir, 'HEAD:refs/heads/main']);
-    await assert.rejects(s.run('gate', { base: later }), pattern, what);
+    await assert.rejects(s.run('gate', s.onBase(later)), pattern, what);
   }
   assert.equal(execs(s.fake).length, before, 'refused before any call in the container');
   const handed = await s.run('gate', { adapter: { ...ADAPTER, gate: { ...ADAPTER.gate,
@@ -159,7 +176,7 @@ test('G: a symlink put under a trusted directory of a later base refuses the com
   const later = await commit(s.product.work, { links: { 'scripts/factory/lib/up.sh': '../../../README.md' } });
   git(s.product.work, ['push', '-q', s.product.repoDir, 'HEAD:refs/heads/main']);
   const before = execs(s.fake).length;
-  await assert.rejects(s.run('gate', { base: later }), /trustedPaths\[0\] holds a symlink in the base/);
+  await assert.rejects(s.run('gate', s.onBase(later)), /trustedPaths\[0\] holds a symlink in the base/);
   assert.equal(execs(s.fake).length, before);
 });
 

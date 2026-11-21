@@ -51,6 +51,7 @@ const UNPACK = [
 const RUN = 'cd -- "$1" && d=$2 && s=$3 && shift 3 && exec "$d/$s" "$@"';
 
 const BLOCK = 512;
+const SHA = /^[0-9a-f]{40}$/;
 const refuse = (message) => { throw new ProductCommandError(message); };
 
 function octal(value, width) {
@@ -155,22 +156,28 @@ export function unpackedDir({ code, stdout }) {
 }
 
 /**
- * The product's command `which` of the base's adapter, run in the task container from the base's blobs. The adapter is
- * read here, from `base` (readAdapter, with every check of its paths: a script's segments, under trustedPaths,
- * executable), so that no caller can hand it another, a branch's included (review round 1 of factory#20, e).
+ * The product's command `which` of the task's base's adapter, run in the task container from the base's blobs. The
+ * base is the task's, task.baseSha, as checkTaskPaths reads it, and a task with none recorded is refused (review
+ * round 2 of factory#20, 4); the adapter is read here, from it (readAdapter, with every check of its paths: a
+ * script's segments, under trustedPaths, executable), so that no caller can hand it another, a branch's included
+ * (review round 1, e).
  *
- * @param {{ container: { runId: string, id: string, remoteUser: string }, repoDir: string, base: string,
- *   which: 'gate' | 'changedPaths', limitS: number, graceS?: number, env?: Record<string, string>,
- *   outputLimit?: number, sudo?: string, git?: string }} options `base` the task's; `sudo` and `git` for the tests
- *   only
+ * @param {{ container: { runId: string, id: string, remoteUser: string }, repoDir: string,
+ *   task: { runId: string, baseSha: string | null }, which: 'gate' | 'changedPaths', limitS: number,
+ *   graceS?: number, env?: Record<string, string>, outputLimit?: number, sudo?: string, git?: string }} options
+ *   `sudo` and `git` for the tests only
  * @returns {Promise<{ code: number, stdout: Buffer, stderr: string }>} the command's, the agent's side
  */
 export async function runProductCommand({
-  container, repoDir, base, which, limitS, graceS, env, outputLimit, sudo, git,
+  container, repoDir, task, which, limitS, graceS, env, outputLimit, sudo, git,
 }) {
   if (!COMMANDS.includes(which)) {
     throw new TypeError(`runProductCommand: which must be one of ${COMMANDS.join(', ')}`);
   }
+  if (!SHA.test(task?.baseSha ?? '')) {
+    refuse(`the task ${task?.runId} has no base recorded`);
+  }
+  const base = task.baseSha;
   const adapter = await readAdapter({ repoDir, base, git });
   const [script, ...args] = adapter[which].command;
   const archive = await archiveOf({ repoDir, base, adapter, git });
