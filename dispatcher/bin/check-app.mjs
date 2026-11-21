@@ -14,7 +14,8 @@
  * The repository the token is narrowed to is the product's, and no product is named in the code (incident-platform
  * backlog #0-276). `--adapter-from-repo` (#0-278 AC8) takes it from the adapter's `repository`, the adapter read as
  * the dispatcher reads it: `.factory/adapter.json` at refs/heads/main of FACTORY_REPO_DIR (from the same env file,
- * with every other FACTORY_* setting), a blob of the base, checked against its schema and the base's tree
+ * with every other FACTORY_* setting; the clone checked first as cli.mjs checks it, git/task-objects.mjs checkRepoDir),
+ * a blob of the base, checked against its schema and the base's tree
  * (src/product/adapter-from-base.mjs); nothing is fetched. `--repository <owner/name>` names it, in the adapter
  * schema's shape, until the VM's install-builder-app.sh passes none of its own (then it goes); exactly one of the two.
  * It mints a token after every check (the key is a regular file of this user, readable by no one else; the
@@ -32,6 +33,7 @@ import { parseArgs } from 'node:util';
 import { readBuilderEnv } from '../src/config/builder-env.mjs';
 import { readFactoryEnv } from '../src/config/factory-env.mjs';
 import { mainCommit } from '../src/git/base-bundle.mjs';
+import { checkRepoDir } from '../src/git/task-objects.mjs';
 import { GITHUB_API } from '../src/github/app-token.mjs';
 import { checkApiUrl } from '../src/github/checked-token.mjs';
 import { parseRepository } from '../src/github/builder-token.mjs';
@@ -58,6 +60,8 @@ export async function main(argv, env = process.env, fetchImpl = fetch) {
   let repository = values.repository;
   if (fromRepo) {
     const { repoDir } = readFactoryEnv(env);
+    // The clone checked as cli.mjs checks it, before any git runs in it (review round 1 of factory#20, d).
+    await checkRepoDir(repoDir);
     repository = (await readAdapter({ repoDir, base: await mainCommit(repoDir) })).repository;
     say(process.stdout, `repository from the adapter at FACTORY_REPO_DIR's main: ${repository}`);
   }

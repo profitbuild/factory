@@ -43,12 +43,15 @@ const ORIGIN_URL = `${gitServer.baseUrl}/profitbuild/incident-platform.git`;
 /** A product's script that leaves a mark if anything runs it, on the host or anywhere. */
 const marking = (mark) => `#!/bin/sh\ntouch '${mark}'\n`;
 
+/** A state and a FACTORY_REPO_DIR, an empty bare repository in a directory of 700, for the runs refused early. */
 async function setUp(t) {
   const state = await makeStateDir();
   const repo = await makeStateDir();
   t.after(state.remove);
   t.after(repo.remove);
-  return { stateDir: state.dir, env: validEnv(state.dir, repo.dir) };
+  const repoDir = join(repo.dir, 'repo.git');
+  git(repo.dir, ['init', '-q', '--bare', repoDir]);
+  return { stateDir: state.dir, env: validEnv(state.dir, repoDir), repoParent: repo.dir };
 }
 
 const cli = (args, env) => run(CLI, args, { env });
@@ -192,9 +195,10 @@ test('FACTORY_STATE_DIR open to others is refused, and left as it is', async (t)
 
 test('#0-278 AC7: a FACTORY_REPO_DIR not the dispatcher\'s alone is refused before the lock, and left as it is',
   async (t) => {
-    const { stateDir, env } = await setUp(t);
-    await chmod(env.FACTORY_REPO_DIR, 0o755);
+    const { stateDir, env, repoParent } = await setUp(t);
+    await chmod(repoParent, 0o755);
     refusedWith(await cli(['run', '--item', '0-1'], env), /^dispatcher: FACTORY_REPO_DIR is not the dispatcher's alone: neither it nor its parent directory is owned by this process's user with mode 700/, [env.FACTORY_REPO_DIR]);
+    await chmod(repoParent, 0o700);
     assert.deepEqual(await readdir(stateDir), []);
   });
 

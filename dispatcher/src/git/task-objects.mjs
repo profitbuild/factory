@@ -107,6 +107,22 @@ export async function mainObjects(repoDir, { uid = process.getuid(), lstatOf = l
 }
 
 /**
+ * FACTORY_REPO_DIR checked before any git runs in it, by every command that reads it (cli.mjs, bin/check-app.mjs:
+ * review round 1 of factory#20, d): a directory, then mainObjects (its objects the dispatcher's, no alternates, the
+ * clone the dispatcher's alone and every directory on the way to it its user's or root's, writable by no one else).
+ *
+ * @param {string} repoDir
+ * @param {{ uid?: number, lstatOf?: typeof lstat }} [options] for the tests only
+ */
+export async function checkRepoDir(repoDir, { uid, lstatOf = lstat } = {}) {
+  const stats = await lstatOf(repoDir).catch(() => null);
+  if (!stats?.isDirectory()) {
+    throw new RepoDirError('FACTORY_REPO_DIR is not a directory');
+  }
+  await mainObjects(repoDir, { uid, lstatOf });
+}
+
+/**
  * @template T
  * @param {{ stateDir: string, repoDir: string, task: { runId: string, baseSha: string | null }, bundle: Buffer,
  *   sha: string, branch: string, purpose: 'push' | 'check', uid?: number, git?: string,

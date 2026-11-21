@@ -5,7 +5,7 @@
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, rm } from 'node:fs/promises';
+import { chmod, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -202,4 +202,25 @@ test('#0-278 AC8: --adapter-from-repo refuses a main with no adapter, or one off
     assert.match(result.stderr, pattern, what);
     assert.equal(fake.requests.length, start, `${what}: no request`);
   }
+});
+
+test('review round 1 d: --adapter-from-repo checks the clone as cli.mjs does, before any git and any request', async () => {
+  const dir = join(root, 'open-clone');
+  await mkdir(dir, { mode: 0o700 });
+  const product = await makeAdapterProduct(dir);
+  // No main to read: a git run in the clone would fail on it, so the refusal shows that none ran first.
+  git(product.repoDir, ['update-ref', '-d', 'refs/heads/main']);
+  await chmod(dir, 0o755);
+  const start = fake.requests.length;
+  const open = await checkApp(['--adapter-from-repo'], await vmFiles(product.repoDir), { repository: null });
+  assert.equal(open.code, 1);
+  assert.match(open.stderr, /^check-app: FACTORY_REPO_DIR is not the dispatcher's alone: neither it nor its parent /);
+  await chmod(dir, 0o700);
+  const noMain = await checkApp(['--adapter-from-repo'], await vmFiles(product.repoDir), { repository: null });
+  assert.match(noMain.stderr, /^check-app: git rev-parse in FACTORY_REPO_DIR failed/m, 'git runs once the clone passes');
+  const empty = join(dir, 'empty');
+  await mkdir(empty, { mode: 0o700 });
+  const notRepo = await checkApp(['--adapter-from-repo'], await vmFiles(empty), { repository: null });
+  assert.match(notRepo.stderr, /^check-app: FACTORY_REPO_DIR holds no objects directory/);
+  assert.equal(fake.requests.length, start, 'no request');
 });

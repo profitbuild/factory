@@ -37,19 +37,18 @@
  * ended by its owner, never swept. `sweep --force` sweeps that container too: one a task's code started with the
  * label, which a killed run left running (ADR-0062's Consequences: a refusal cleared with `cli.mjs sweep`).
  */
-import { lstat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { readBuilderEnv } from './config/builder-env.mjs';
 import { readFactoryEnv } from './config/factory-env.mjs';
-import { ConfigError, refuseSecretShaped } from './config/settings.mjs';
+import { refuseSecretShaped } from './config/settings.mjs';
 import { inTaskEnvironment, setUpTaskContainer } from './container/environment.mjs';
 import { refuseWhileRollback, sweepDaemon } from './container/daemon.mjs';
 import { mainCommit } from './git/base-bundle.mjs';
 import { fetchMain } from './git/main-fetch.mjs';
-import { checkOwnRepoDir } from './git/task-objects.mjs';
+import { checkRepoDir } from './git/task-objects.mjs';
 import { GITHUB_API } from './github/app-token.mjs';
 import { GIT_HOST, checkTaskBranch, createBuilderTokenSource } from './github/builder-token.mjs';
 import { openPullHeads, refuseHeldByPull, refuseHeldByTask } from './github/item-lock.mjs';
@@ -115,14 +114,6 @@ function parse(argv) {
     }
   }
   return { command, ...values };
-}
-
-async function checkRepoDir(path) {
-  const stats = await lstat(path).catch(() => null);
-  if (!stats?.isDirectory()) {
-    throw new ConfigError('FACTORY_REPO_DIR is not a directory');
-  }
-  await checkOwnRepoDir(path);
 }
 
 /** The adapter of FACTORY_REPO_DIR's main as it is, before the update: the repository the token is narrowed to. */
