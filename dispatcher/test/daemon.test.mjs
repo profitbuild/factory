@@ -61,11 +61,12 @@ test('AC13: a killed run\'s leftovers, labelled or not, and a stopped rollback\'
   await writeFile(join(fake.tasks, OLD_RUN, '.x'), 'x');
   await refuseWhileRollback({ ...fake.runner, when: 'test' });
   const removed = await sweepDaemon({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner });
-  assert.deepEqual(removed.containers.sort(), ['compose-db', 'rollback', 'task-old', 'testcontainers-postgres',
-    'testcontainers-ryuk']);
-  assert.deepEqual(removed.networks.sort(), ['compose_default', `factory-task-${OLD_RUN}`]);
-  assert.deepEqual(removed.volumes.sort(), ['compose_data', `factory-task-${OLD_RUN}-claude`,
-    'incident-platform-claude', 'incident-platform-gh', 'incident-platform-m2'].sort());
+  // #0-284 (review round 1 of factory#22): by the daemon's IDs, short, and a count of volumes, never a name.
+  const planted = leftovers();
+  assert.equal(removed.containers.length, planted.containers.length);
+  assert.ok(removed.containers.every((id) => /^[0-9a-f]{12}$/.test(id)), removed.containers.join());
+  assert.deepEqual(removed.networks.sort(), ['a'.repeat(12), 'b'.repeat(12)]);
+  assert.equal(removed.volumes, 5, 'every volume but factory-dispatcher-m2 and the anonymous one rm -v took');
   const state = fake.read();
   assert.deepEqual(state.containers, []);
   assert.deepEqual(state.networks.map((x) => x.name).sort(), ['bridge', 'host', 'none']);

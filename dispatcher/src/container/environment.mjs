@@ -11,8 +11,7 @@
  *  5. the task: made, or the one resumed (the caller's);
  *  6. its container (setUpTaskContainer), checked before anything runs in it (#0-284, ADR-0062 points 4 and 6 as
  *     amended): the base (FACTORY_REPO_DIR's main in v0) recorded; the configuration read from the base and checked;
- *     the daemon's options (`docker info`: rootless, seccomp's builtin profile, cgroup namespaces, runc) checked
- *     before the task's first container; the work directory cloned from the base's bundle by a helper, the task's
+ *     the work directory cloned from the base's bundle by a helper, the task's
  *     volumes; for a new task, the build configuration written by a helper and `devcontainer build` as a call of its
  *     own, to the name factory-task-<runId>, and the image's ID read once from that name; for a task resumed, the ID
  *     it recorded. The same way for both from there: the image's devcontainer.metadata label held to the list, the ID
@@ -22,13 +21,16 @@
  *     with the reason, and a label off the list ends it before any container of the task's is made;
  *  7. the phases (4.4's; none in v0), given the container;
  *  8. at the end, BLOCKED or not, the same sweep as in 2, its result checked.
- * Every refusal of 1 and 4 names what it found and the sweep's command (daemon.mjs).
+ * Before 1, the daemon's options (`docker info`: rootless, seccomp's builtin profile, cgroup namespaces, runc), checked
+ * before the run's first container, the sweep's helper included: a daemon off them refuses the run, and no sweep
+ * follows (#0-284; review round 1 of factory#22). Every refusal of 1 and 4 names what it found and the sweep's
+ * command (daemon.mjs).
  */
 import { BaseBundleError, mainCommit, makeBaseBundle } from '../git/base-bundle.mjs';
 import { GitRunError } from '../git/run-git.mjs';
 import { blockTask, updateTask } from '../state/tasks.mjs';
 import {
-  DaemonOptionsError, DockerOutputError, SweepError, checkDaemonOptions, createTaskNetwork, createTaskVolumes,
+  DockerOutputError, SweepError, checkDaemonOptions, createTaskNetwork, createTaskVolumes,
   refuseWhileRollback, removeOwnObjects, sweepDaemon,
 } from './daemon.mjs';
 import { JsoncError } from './jsonc.mjs';
@@ -43,7 +45,7 @@ import { WorkDirError, makeWorkDir, writeBuildConfig, writeOverride } from './wo
 
 /** What ends a task BLOCKED when its container cannot be set up: the product's, the daemon's or the image's fault. */
 const BLOCKING = [TaskConfigError, TaskContainerError, JsoncError, ContainerRunError, WorkDirError, BaseBundleError,
-  DockerOutputError, CallTimeoutError, GitRunError, BaseTreeError, DaemonOptionsError];
+  DockerOutputError, CallTimeoutError, GitRunError, BaseTreeError];
 
 /**
  * Steps 6: the task's container, or the task BLOCKED with the reason.
@@ -61,7 +63,6 @@ export async function setUpTaskContainer({ stateDir, repoDir, task, adapter, hel
       current = await updateTask(stateDir, current, { baseSha: await mainCommit(repoDir, { git }) });
     }
     const carried = await readTaskConfig({ repoDir, base: current.baseSha, path: adapter.taskImage, git });
-    await checkDaemonOptions(run);
     await makeWorkDir({ runId, bundle: await makeBaseBundle({ repoDir, baseSha: current.baseSha, git }),
       image: helperImage, ...run });
     await createTaskVolumes({ runId, ...run });
@@ -97,6 +98,9 @@ export async function setUpTaskContainer({ stateDir, repoDir, task, adapter, hel
  * @template T
  */
 export async function inTaskEnvironment({ runId, helperImage, stateDir, sudo }, inside) {
+  // Before the run's first container, the sweep's helper included: a daemon off the VM's options refuses the run, and
+  // no sweep follows (review round 1 of factory#22, the owner's decision 1).
+  await checkDaemonOptions({ sudo, stateDir });
   await refuseWhileRollback({ sudo, stateDir, when: 'the run is refused' });
   const swept = await sweepDaemon({ runId, helperImage, sudo, stateDir });
   let result;

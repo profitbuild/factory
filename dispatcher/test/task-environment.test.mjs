@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { RollbackRunningError } from '../src/container/daemon.mjs';
+import { DaemonOptionsError, RollbackRunningError } from '../src/container/daemon.mjs';
 import { inTaskEnvironment, setUpTaskContainer } from '../src/container/environment.mjs';
 import { bundleFromTask } from '../src/container/task-bundle.mjs';
 import { CallTimeoutError, callInTask, execInTask, readTaskConfig } from '../src/container/task-container.mjs';
@@ -80,7 +80,7 @@ async () => {
         volumes: state.volumes.map((v) => v.name) };
       return ready.task;
     });
-  assert.deepEqual(swept.containers.sort(), ['task-old', 'testcontainers-kafka']);
+  assert.equal(swept.containers.length, 2, 'task-old and testcontainers-kafka, by their IDs');
   assert.equal(seen.ready.task.status, 'running', seen.ready.task.reason);
   assert.equal(seen.head, product.base, 'the clone is the base');
   assert.equal(result.baseSha, product.base);
@@ -116,15 +116,17 @@ async () => {
   const order = steps(fake);
   const first = (s, from = 0) => order.indexOf(s, from);
   const network = first('network create');
-  assert.equal(order[0], 'ps (rollback)', 'the first check, before anything');
+  assert.deepEqual(order.slice(0, 2), ['info', 'ps (rollback)'], 'the daemon\'s options and the rollback first');
   assert.ok(first('rm') < network && first('run') < network, 'the sweep before the run is visible');
   assert.equal(order[network + 1], 'ps (rollback)', 'the second check right after the network');
   assert.ok(network < first('devcontainer up'), 'and before the task container');
-  // #0-284: the daemon's options before the task's first container; the build, the ID, the label, then up.
-  const info = first('info');
-  assert.ok(info > network && info < first('run', network), 'docker info before the work directory\'s helper');
+  // #0-284: the daemon's options before the run's first container, the sweep's helper included (review round 1 of
+  // factory#22); then the build, the ID, the label, and up.
+  assert.equal(first('info'), 0);
+  assert.ok(first('info') < first('run'), 'docker info before the sweep\'s helper');
+  assert.equal(order.filter((x) => x === 'info').length, 1, 'once for the run');
   const built = first('devcontainer build');
-  assert.ok(built > info && first('image inspect', built) > built, 'the ID read after the build');
+  assert.ok(built > network && first('image inspect', built) > built, 'the ID read after the build');
   assert.ok(first('image inspect', first('image inspect', built) + 1) < first('devcontainer up'),
     'the label checked before up');
   assert.ok(first('exec') > first('container inspect'), 'the probe of timeout after the checks');
@@ -189,7 +191,7 @@ test('AC13: a running rollback refuses the run at its start, and nothing is remo
     labels: { 'factory.rollback': '1' } }), plantedContainer({ name: 'testcontainers' })] } });
   await assert.rejects(inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner }, async () => {}),
     /^RollbackRunningError|the run is refused: a running container carries factory\.rollback: rollback/);
-  assert.deepEqual(steps(fake), ['ps (rollback)']);
+  assert.deepEqual(steps(fake), ['info', 'ps (rollback)']);
   assert.equal(fake.read().containers.length, 2);
 });
 
@@ -496,32 +498,39 @@ test('#0-284 AC2: a new task and a resumed one start the same way, from the imag
   }
 });
 
-test('#0-284 AC3: a daemon whose security options or default runtime are not the VM\'s is refused before the task\'s '
-  + 'first container', async () => {
-  const vm = ['name=seccomp,profile=builtin', 'name=rootless', 'name=cgroupns'];
-  for (const [info, pattern] of [
-    [{ SecurityOptions: ['name=rootless', 'name=cgroupns'] }, /missing name=seccomp,profile=builtin, 0 other entries/],
-    [{ SecurityOptions: ['name=seccomp,profile=builtin', 'name=cgroupns'] }, /missing name=rootless, 0 other/],
-    [{ SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless'] }, /missing name=cgroupns, 0 other/],
-    [{ SecurityOptions: ['name=seccomp,profile=unconfined', 'name=rootless', 'name=cgroupns'] },
-      /missing name=seccomp,profile=builtin, 1 other entry \(not quoted\)/],
-    [{ SecurityOptions: [...vm, 'name=userns'] }, /none missing, 1 other entry \(not quoted\)/],
-    [{ SecurityOptions: [...vm, 'name=rootless'] }, /none missing, 0 other entries \(not quoted\), one twice/],
-    [{ SecurityOptions: null }, /reports no list of security options/],
-    [{ DefaultRuntime: 'runsc' }, /default runtime is not runc \(what it reports is not quoted\)/],
-    [{ DefaultRuntime: SECRET() }, /default runtime is not runc/],
-  ]) {
-    const setup = await setUp();
-    const fake = await blocked(setup, new RegExp(`^the task container: factory's daemon(?:'s)? .*${pattern.source}`),
-      (f) => { f.update((s) => { s.scenario.info = info; }); });
-    const order = steps(fake);
-    const at = order.indexOf('info', order.indexOf('network create'));
-    assert.ok(at > 0, order.join());
-    // From the refusal to the end sweep, whose first step is its list of containers.
-    const before = order.slice(at + 1, order.indexOf('ps', at));
-    assert.ok(!before.some((x) => ['run', 'devcontainer build', 'devcontainer up', 'volume create'].includes(x)),
-      `nothing made after the refusal: ${before}`);
-    assert.ok(!(await loadTask(setup.stateDir, RUN_ID)).reason.includes('ghs_'));
+/** The VM's daemon's security options, and every way off them, with what the refusal says. */
+const VM_OPTIONS = ['name=seccomp,profile=builtin', 'name=rootless', 'name=cgroupns'];
+const OFF_THE_VM = [
+  [{ SecurityOptions: ['name=rootless', 'name=cgroupns'] }, /missing name=seccomp,profile=builtin, 0 other entries/],
+  [{ SecurityOptions: ['name=seccomp,profile=builtin', 'name=cgroupns'] }, /missing name=rootless, 0 other/],
+  [{ SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless'] }, /missing name=cgroupns, 0 other/],
+  [{ SecurityOptions: ['name=seccomp,profile=unconfined', 'name=rootless', 'name=cgroupns'] },
+    /missing name=seccomp,profile=builtin, 1 other entry \(not quoted\)/],
+  [{ SecurityOptions: [...VM_OPTIONS, 'name=userns'] }, /none missing, 1 other entry \(not quoted\)/],
+  [{ SecurityOptions: [...VM_OPTIONS, 'name=rootless'] }, /none missing, 0 other entries \(not quoted\), one twice/],
+  [{ SecurityOptions: null }, /reports no list of security options/],
+  [{ DefaultRuntime: 'runsc' }, /default runtime is not runc \(what it reports is not quoted\)/],
+  [{ DefaultRuntime: SECRET() }, /default runtime is not runc/],
+];
+
+test('#0-284 AC3, review round 1 of factory#22 (decision 1): a daemon whose security options or default runtime are '
+  + 'not the VM\'s refuses the run before its first container, the sweep\'s helper included, and no sweep follows',
+async () => {
+  for (const [info, pattern] of OFF_THE_VM) {
+    const { fake } = await setUp({ initial: { containers: [plantedContainer({ name: 'leftover' })] } });
+    fake.update((s) => { s.scenario.info = info; });
+    let inside = false;
+    await assert.rejects(inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner },
+      async () => { inside = true; }), (error) => {
+      assert.ok(error instanceof DaemonOptionsError, error.message);
+      assert.match(error.message, new RegExp(`^factory's daemon(?:'s)? .*${pattern.source}.*: no container is made on it$`));
+      assert.ok(!error.message.includes('ghs_') && !error.message.includes('runsc') && !error.message.includes('userns'),
+        error.message);
+      return true;
+    });
+    assert.equal(inside, false, 'no task');
+    assert.deepEqual(steps(fake), ['info'], 'nothing but docker info: no helper, no container, no sweep');
+    assert.deepEqual(fake.read().containers.map((c) => c.name), ['leftover'], 'nothing removed');
   }
 });
 

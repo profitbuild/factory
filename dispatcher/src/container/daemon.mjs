@@ -16,8 +16,10 @@
  *   joins it;
  * - removeOwnObjects: only what carries the run's label, for a run that a rollback stops after its network exists:
  *   then the rollback is running, and the daemon is not the run's to sweep.
- * - checkDaemonOptions (#0-284, ADR-0062 point 6): `docker info`'s security options and default runtime, exactly the
- *   VM's (rootless, seccomp's builtin profile, cgroup namespaces; runc), checked before the task's first container.
+ * - checkDaemonOptions (#0-284, ADR-0062 points 4 and 6): `docker info`'s security options and default runtime,
+ *   exactly the VM's (rootless, seccomp's builtin profile, cgroup namespaces; runc), checked before the first container
+ *   of a run or of `cli.mjs sweep`, the sweep's helper included (review round 1 of factory#22, the owner's decision
+ *   1): a daemon off them is every task's, so the run is refused, and no container is made on it, nor a sweep's.
  * Everything read from docker's output is untrusted: an id, a name, each line is held to a pattern, or refused. A
  * refusal names what it found by the IDs the daemon gave (hex) and counts, never by a name (#0-284: a container's,
  * a network's or a volume's name is the agent's side's to choose, and could carry what it read); only the rollback's
@@ -118,24 +120,27 @@ export async function refuseWhileRollback({ sudo, stateDir, when }) {
  * then every work directory, and checks that nothing is left.
  *
  * @param {{ runId: string, helperImage: string, stateDir: string, sudo?: string }} options `runId` labels the helper
- * @returns {Promise<{ containers: string[], networks: string[], volumes: string[] }>} what was removed, by name
+ * @returns {Promise<{ containers: string[], networks: string[], volumes: number }>} what was removed: the containers
+ *   and the networks by the daemon's IDs, short, and how many volumes, never a name (#0-284, review round 1 of
+ *   factory#22: `cli.mjs sweep` prints it)
  */
 export async function sweepDaemon({ runId, helperImage, stateDir, sudo }) {
-  const removed = { containers: [], networks: [], volumes: [] };
+  const removed = { containers: [], networks: [], volumes: 0 };
+  const short = (items) => items.map(({ id }) => id.slice(0, 12));
   const found = await containers({ sudo, stateDir });
   if (found.length > 0) {
     await docker(['rm', '-f', '-v', ...found.map(({ id }) => id)], { sudo, stateDir });
-    removed.containers = found.map(({ name }) => name);
+    removed.containers = short(found);
   }
   const nets = await networks({ sudo, stateDir });
   if (nets.length > 0) {
     await docker(['network', 'rm', ...nets.map(({ id }) => id)], { sudo, stateDir });
-    removed.networks = nets.map(({ name }) => name);
+    removed.networks = short(nets);
   }
   const vols = (await volumes({ sudo, stateDir })).filter((name) => name !== M2_VOLUME);
   if (vols.length > 0) {
     await docker(['volume', 'rm', ...vols], { sudo, stateDir });
-    removed.volumes = vols;
+    removed.volumes = vols.length;
   }
   await removeAllWorkDirs({ runId, image: helperImage, sudo, stateDir });
   await checkSwept({ sudo, stateDir });
@@ -212,14 +217,14 @@ export const DAEMON_SECURITY_OPTIONS = Object.freeze(['name=seccomp,profile=buil
   'name=cgroupns']);
 export const DAEMON_DEFAULT_RUNTIME = 'runc';
 
-/** The daemon's options are not the VM's: no container of a task is made on it. */
+/** The daemon's options are not the VM's: no container is made on it, a sweep's helper included. */
 export class DaemonOptionsError extends Error {}
 
 /**
  * `docker info`'s SecurityOptions, exactly DAEMON_SECURITY_OPTIONS (in any order, each once), and its DefaultRuntime,
  * runc: a daemon that is not rootless, has seccomp off or another profile, or another runtime by default, is refused
- * before the task's first container. What the daemon reported is not quoted: the refusal says which rule failed and how
- * many entries it found.
+ * before any container is made on it. What the daemon reported is not quoted: the refusal says which rule failed and
+ * how many entries it found.
  *
  * @param {{ stateDir: string, sudo?: string }} options
  */
@@ -233,8 +238,7 @@ export async function checkDaemonOptions({ stateDir, sudo }) {
   }
   const options = info?.SecurityOptions;
   if (!Array.isArray(options) || !options.every((o) => typeof o === 'string')) {
-    throw new DaemonOptionsError('factory\'s daemon reports no list of security options: the task is refused before '
-      + 'its first container');
+    throw new DaemonOptionsError('factory\'s daemon reports no list of security options: no container is made on it');
   }
   const missing = DAEMON_SECURITY_OPTIONS.filter((o) => !options.includes(o));
   const other = options.filter((o) => !DAEMON_SECURITY_OPTIONS.includes(o)).length;
@@ -242,11 +246,10 @@ export async function checkDaemonOptions({ stateDir, sudo }) {
   if (missing.length > 0 || other > 0 || twice) {
     throw new DaemonOptionsError(`factory's daemon's security options are not the VM's (${DAEMON_SECURITY_OPTIONS
       .join('; ')}): ${missing.length > 0 ? `missing ${missing.join('; ')}` : 'none missing'}, ${other} other `
-      + `entr${other === 1 ? 'y' : 'ies'} (not quoted)${twice ? ', one twice' : ''}: the task is refused before its `
-      + 'first container');
+      + `entr${other === 1 ? 'y' : 'ies'} (not quoted)${twice ? ', one twice' : ''}: no container is made on it`);
   }
   if (info.DefaultRuntime !== DAEMON_DEFAULT_RUNTIME) {
     throw new DaemonOptionsError(`factory's daemon's default runtime is not ${DAEMON_DEFAULT_RUNTIME} (what it reports `
-      + 'is not quoted): the task is refused before its first container');
+      + 'is not quoted): no container is made on it');
   }
 }
