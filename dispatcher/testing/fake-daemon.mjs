@@ -11,7 +11,7 @@
 //    real, with /home/factory/tasks mapped to the test's tasks/ and a `chown` that records its arguments (a test is
 //    not root): the clone is a real git's, the removal a real rm's;
 //  - `docker exec ... <id> <command>` runs the command for real (`timeout` included), in the container's workspace
-//    as mapped, with the -e variables it was given;
+//    as mapped (an argument that is /workspace mapped too), with the -e variables it was given;
 //  - `devcontainer up` reads the override (`--config`) and, as the real CLI does, writes the features' lockfile
 //    beside the configuration file it was given, failing when that is in the clone or cannot be written; it makes a
 //    container from the override (mounts from workspaceMount, the `--mount=` run arguments and those of the image's
@@ -334,9 +334,13 @@ function exec(context, input) {
     fail(`Error response from daemon: container ${args[i]} is not running`);
     return undefined;
   }
-  const command = args.slice(i + 1);
-  if (state.scenario.execFails) {
-    // The call ran and failed, writing what the scenario gives to stderr: the agent's side's words.
+  // An argument naming the container's /workspace is the workspace as mapped, as its -w is (#0-278: the product's
+  // command is run with the clone as its directory).
+  const command = args.slice(i + 1).map((a) => (a === '/workspace' ? host(config, container.workspace) : a));
+  if (state.scenario.execFails && (state.scenario.execFails.when === undefined
+    || command.some((a) => a.includes(state.scenario.execFails.when)))) {
+    // The call ran and failed, writing what the scenario gives to stderr: the agent's side's words (`when`: only a
+    // call with an argument holding it).
     fail(state.scenario.execFails.stderr, state.scenario.execFails.code);
     return undefined;
   }

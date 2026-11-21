@@ -317,7 +317,7 @@ test('AC11: a call that ignores SIGTERM is killed after its grace, leaves no pro
     const pid = Number((await readFile(join(work, 'pid'), 'utf8')).trim());
     assert.equal(running(pid), false, 'no process is left');
     assert.ok(fake.calls().some((c) => c.args[0] === 'kill'), 'the task\'s containers killed by their label');
-    const exec = fake.calls().find((c) => c.args[0] === 'exec' && c.args.includes('sh'));
+    const exec = fake.calls().find((c) => c.args[0] === 'exec' && c.args.some((a) => a.includes('trap')));
     assert.deepEqual(exec.args.slice(0, 6), ['exec', '-i', '--user', 'dev', '-w', '/workspace']);
     assert.deepEqual(exec.args.slice(7, 13), ['timeout', '-s', 'TERM', '-k', '1s', '1s']);
   });
@@ -402,4 +402,16 @@ test('a call that exits 124, timeout\'s own code for its limit, is taken as its 
   await assert.rejects(execInTask({ container, sudo: fake.sudo, limitS: 5, args: ['sh', '-c', 'exit 124'] }),
     /^Error: the call sh in the task container ran past 5 s \(timeout's exit 124\): its processes were ended$/);
   assert.equal(fake.read().containers.find((c) => c.id === container.id).running, false, 'killed by the label');
+});
+
+test('#0-278: a task image without the tools the product\'s commands run with blocks the task, at setup', async () => {
+  const { stateDir, fake, options } = await setUp();
+  const secret = 'ghs' + `_${'q'.repeat(36)}`;
+  fake.update((s) => { s.scenario.execFails = { stderr: `tar: ${secret}`, code: 1, when: 'command -v' }; });
+  const { task, container } = await setUpTaskContainer({ ...options, task: await createTask(stateDir, { runId: RUN_ID }) });
+  assert.equal(container, null);
+  assert.equal(task.status, 'blocked');
+  assert.equal(task.reason, 'the task container: the task image cannot run the product\'s commands from the base (exit 1): '
+    + 'the image must hold sh, mktemp, tar, rm (its stderr, the agent\'s side\'s, is not quoted)');
+  assert.ok(fake.calls().filter((c) => c.args[0] === 'exec').length >= 2, 'after the probe of timeout');
 });

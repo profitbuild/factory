@@ -4,12 +4,10 @@
 // a schema that uses a keyword the validator does not check is refused, so it cannot claim a check never made.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 
-import { AdapterError, checkAdapter, checkGateAnswer, loadAdapter } from '../src/adapter.mjs';
+import { AdapterError, checkAdapter, checkGateAnswer } from '../src/adapter.mjs';
 import { checkSchema, SchemaError, validate } from '../src/schema/validate.mjs';
-import { makeStateDir } from '../testing/state-dir.mjs';
 
 const json = async (url) => JSON.parse(await readFile(new URL(url, import.meta.url), 'utf8'));
 const ADAPTER_PATH = new URL('../testing/fixtures/incident-platform.adapter.json', import.meta.url);
@@ -37,13 +35,14 @@ const withField = (object, path, value) => {
   return copy;
 };
 
-test('AC5: incident-platform\'s adapter, as stage-4.md describes it, passes; trustedPaths is ["scripts/factory/"]',
-  async () => {
-    const adapter = await loadAdapter(ADAPTER_PATH);
-    assert.deepEqual(adapter, ADAPTER);
-    assert.deepEqual(adapter.trustedPaths, ['scripts/factory/']);
-    assert.ok(Object.isFrozen(adapter.gate.command), 'the adapter loaded cannot be changed');
-  });
+test('AC5: incident-platform\'s adapter, as backlog #0-278 describes it, passes; trustedPaths are scripts/factory/ and '
+  + '.factory/', () => {
+  const adapter = checkAdapter(ADAPTER);
+  assert.deepEqual(adapter, ADAPTER);
+  assert.deepEqual(adapter.trustedPaths, ['scripts/factory/', '.factory/']);
+  assert.equal(adapter.taskImage, '.devcontainer/task.json');
+  assert.ok(Object.isFrozen(adapter.gate.command), 'the adapter checked cannot be changed');
+});
 
 test('AC5: the adapter missing any field, at any depth, is refused with where', () => {
   for (const field of adapterSchema.required) {
@@ -147,16 +146,6 @@ test('an error names where and what is expected, never the value found there', (
   assert.throws(() => checkAdapter(withField(ADAPTER, 'profile', secret)), (error) => !error.message.includes(secret));
   assert.throws(() => checkAdapter(withField(ADAPTER, 'gate/contract', secret)),
     (error) => !error.message.includes(secret));
-});
-
-test('the adapter file unreadable, or not JSON, is refused without quoting it', async (t) => {
-  const state = await makeStateDir();
-  t.after(state.remove);
-  await assert.rejects(loadAdapter(join(state.dir, 'none.json')), /cannot be read \(ENOENT\)/);
-  const quoted = 'ghs' + '_x';
-  await writeFile(join(state.dir, 'bad.json'), `{"repository": "${quoted}"`);
-  await assert.rejects(loadAdapter(join(state.dir, 'bad.json')), (error) => /is not JSON$/.test(error.message)
-    && !error.message.includes(quoted));
 });
 
 // The three shapes run-tests.sh prints: a pass, a fixable failure, and a stop before the build (exitCode -1).

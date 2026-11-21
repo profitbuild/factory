@@ -12,7 +12,8 @@
  *  6. its container (setUpTaskContainer): the base (FACTORY_REPO_DIR's main in v0) recorded, the work directory
  *     cloned from the base's bundle by a helper, the task's volumes, the configuration read from the base and
  *     checked, the override written by a helper, `devcontainer up`, the container and the image checked, the image's
- *     ID recorded, the probe of `timeout`. Any refusal there ends the task BLOCKED, with the reason;
+ *     ID recorded, the probes of `timeout` and of the tools the product's commands run with (#0-278). Any refusal
+ *     there ends the task BLOCKED, with the reason;
  *  7. the phases (4.4's; none in v0), given the container;
  *  8. at the end, BLOCKED or not, the same sweep as in 2, its result checked.
  * Every refusal of 1 and 4 names what it found and the sweep's command (daemon.mjs).
@@ -26,13 +27,16 @@ import {
 } from './daemon.mjs';
 import { JsoncError } from './jsonc.mjs';
 import { ContainerRunError } from './run-container.mjs';
-import { CallTimeoutError, TaskContainerError, probeTimeout, readTaskConfig, upContainer } from './task-container.mjs';
+import { BaseTreeError } from '../product/base-tree.mjs';
+import {
+  CallTimeoutError, TaskContainerError, probeTimeout, probeTools, readTaskConfig, upContainer,
+} from './task-container.mjs';
 import { TaskConfigError, buildOverride } from './task-config.mjs';
 import { WorkDirError, makeWorkDir, writeOverride } from './work-dir.mjs';
 
 /** What ends a task BLOCKED when its container cannot be set up: the product's, the daemon's or the image's fault. */
 const BLOCKING = [TaskConfigError, TaskContainerError, JsoncError, ContainerRunError, WorkDirError, BaseBundleError,
-  DockerOutputError, CallTimeoutError, GitRunError];
+  DockerOutputError, CallTimeoutError, GitRunError, BaseTreeError];
 
 /**
  * Steps 6: the task's container, or the task BLOCKED with the reason.
@@ -59,6 +63,7 @@ export async function setUpTaskContainer({ stateDir, repoDir, task, adapter, hel
       current = await updateTask(stateDir, current, { imageId: container.imageId });
     }
     await probeTimeout({ container, sudo });
+    await probeTools({ container, sudo });
     return { task: current, container };
   } catch (error) {
     if (BLOCKING.some((kind) => error instanceof kind)) {
