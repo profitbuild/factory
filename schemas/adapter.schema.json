@@ -14,7 +14,7 @@
       "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/(?!\\.{1,2}$)[A-Za-z0-9._-]+$"
     },
     "gate": {
-      "description": "The product's test gate: the command, and the contract its JSON answer keeps (schemas/gate.schema.json).",
+      "description": "The product's test gate: the command, and the contract its JSON answer keeps (schemas/gate.schema.json). Its script runs in the task container from a fresh directory holding the base's blobs of trustedPaths, with the task's clone (/workspace) as its working directory: only what the script reads relative to itself ($(dirname \"$0\")) is the base's; a file it reads by a path relative to the clone is the copy in the agent's working tree (backlog #0-278).",
       "type": "object",
       "required": ["command", "contract"],
       "additionalProperties": false,
@@ -24,7 +24,7 @@
       }
     },
     "changedPaths": {
-      "description": "The product's command that lists the paths a branch changes and classifies them (areas, rule files, reviewers): advisory, run in the task container, and no refusal of the dispatcher rests on it (backlog #0-278).",
+      "description": "The product's command that lists the paths a branch changes and classifies them (areas, rule files, reviewers): advisory, run in the task container, and no refusal of the dispatcher rests on it (backlog #0-278). Its script runs in the task container from a fresh directory holding the base's blobs of trustedPaths, with the task's clone (/workspace) as its working directory: only what the script reads relative to itself ($(dirname \"$0\")) is the base's; a file it reads by a path relative to the clone is the copy in the agent's working tree (backlog #0-278).",
       "type": "object",
       "required": ["command"],
       "additionalProperties": false,
