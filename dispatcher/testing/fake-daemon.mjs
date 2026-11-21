@@ -28,6 +28,7 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { labelEntry } from './feature-artifact.mjs';
+import { checkShellSafe } from './state-dir.mjs';
 
 const PROGRAMS = { '/usr/bin/docker': 'docker', '/usr/local/bin/devcontainer': 'devcontainer' };
 const TASKS_ROOT = '/home/factory/tasks';
@@ -44,6 +45,8 @@ export function makeFakeDaemon(root, initial = {}) {
   const tasks = join(root, 'tasks');
   const shims = join(dir, 'shims');
   const tmp = join(dir, 'tmp');
+  // Refused before anything is made or run: the container's /tmp/ goes unquoted into the unpacking script's text.
+  checkShellSafe(tmp, 'the fake daemon\'s /tmp/ (config.tmp)');
   mkdirSync(shims, { recursive: true });
   mkdirSync(tmp, { recursive: true, mode: 0o700 });
   mkdirSync(tasks, { recursive: true, mode: 0o700 });
@@ -345,6 +348,10 @@ function exec(context, input) {
   // round 1 of factory#20, f): every /tmp/ in an argument, a script's text included, is mapped there, and mapped
   // back in what the call prints, so the call sees /tmp/ and the host's /tmp is never touched.
   const mapsTmp = args.slice(i + 1).some((a) => a.includes('/tmp/'));
+  if (mapsTmp) {
+    // Again where it is used: a config written by hand could hold another (review round 2 of factory#20, 1).
+    checkShellSafe(config.tmp, 'the fake daemon\'s /tmp/ (config.tmp)');
+  }
   const command = args.slice(i + 1).map((a) => (a === '/workspace' ? host(config, container.workspace)
     : a.replaceAll('/tmp/', `${config.tmp}/`)));
   if (state.scenario.execFails && (state.scenario.execFails.when === undefined

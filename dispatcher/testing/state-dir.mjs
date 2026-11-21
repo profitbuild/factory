@@ -13,6 +13,25 @@ import { join } from 'node:path';
  * runner's, and Test (git 2.43)'s useradd'ed one, their parents root's 755). Made 700.
  */
 export const TEST_ROOT = join(homedir(), '.cache', 'factory-dispatcher-tests');
+
+/**
+ * Refuses a test's directory that holds anything but letters, digits, '.', '_', '-' and '/' (review round 2 of
+ * factory#20, 1): the fake daemon puts it, as the container's /tmp/, into the text of the unpacking script, where
+ * `rm -rf /tmp/factory-trusted.*` and `mktemp -d` stand unquoted, so a space would split `rm -rf` over a prefix of
+ * the developer's home, and a glob or shell character would widen it. An allowlist: whitespace, *?[]{}$"'`\ and the
+ * rest of the shell's characters are all outside it.
+ *
+ * @param {string} path
+ * @param {string} what what the path is, for the refusal
+ */
+export function checkShellSafe(path, what) {
+  if (typeof path !== 'string' || !/^\/[A-Za-z0-9._/-]*$/.test(path)) {
+    throw new Error(`${what} must be an absolute path of letters, digits, '.', '_', '-' and '/' alone: it goes unquoted `
+      + 'into a script the fake daemon runs');
+  }
+}
+
+checkShellSafe(TEST_ROOT, 'TEST_ROOT (the tests\' directory, under the home)');
 mkdirSync(TEST_ROOT, { recursive: true, mode: 0o700 });
 chmodSync(TEST_ROOT, 0o700);
 
