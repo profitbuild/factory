@@ -33,19 +33,21 @@
 //               without --agent factory:implementer: recorded only
 //
 // Everything is made in one mkdtemp directory (0700) outside the repository, emptied between rounds and removed at
-// the end, on SIGINT and SIGTERM, on an exception and on a spawn's error too, the read-only plugin tree made writable
-// first. The login is the one file ~/.claude/.credentials.json, copied (600) into the temporary HOME, never read here,
+// the end, on SIGINT, SIGTERM and SIGHUP, on an exception and on a spawn's error too, the read-only plugin tree made
+// writable first. The login is the one file ~/.claude/.credentials.json, copied (600) into the temporary HOME, never read here,
 // printed or logged. A copied OAuth login can be refreshed by the call that uses it, and a refresh can rotate the
 // token and so revoke the original's: run this script only knowingly. The report is an extract: each call's init
-// event fields, its stderr and each check's result, with the temporary directory and the owner's home replaced by
-// placeholders; the streams themselves are not kept.
+// event fields, its stderr, its result's subtype and each check's result, with the planted HOME, the temporary
+// directory and the owner's home replaced by the placeholders <tmp-home>, <tmp> and <owner-home>. The streams stay in
+// the temporary directory until the cleanup and never reach the report. If a round fails, what was measured before
+// it still reaches --out (written before the cleanup), with the failure's message.
 import { spawn } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
-  writeFileSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
+  rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -79,9 +81,17 @@ for (const r of rounds) {
     usage(`--round ${r} is not one of ${ROUNDS.join(', ')}`);
   }
 }
+// --out, checked before anything runs: its directory exists, and the file is outside the repository, both compared
+// after realpath (so neither ./..x in the repository nor a directory that is a symlink to it passes).
+let outFile;
 if (options.out !== undefined) {
-  const out = resolve(options.out);
-  if (!relative(REPO, out).startsWith('..')) {
+  const dir = dirname(resolve(options.out));
+  if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
+    usage('--out must name a file in a directory that exists');
+  }
+  outFile = join(realpathSync(dir), basename(options.out));
+  const repo = realpathSync(REPO).replace(/\/$/, '');
+  if (outFile === repo || outFile.startsWith(`${repo}${sep}`)) {
     usage('--out must name a file outside the repository: the extract is never kept in it');
   }
 }
@@ -135,7 +145,7 @@ function clean({ keepTmp }) {
   }
 }
 
-for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]) {
   process.on(signal, () => {
     clean({ keepTmp: false });
     process.exit(code);
@@ -215,8 +225,8 @@ function plantedSettings({ who, market, plugin, marketDir, elsewhere, plantConfi
 }
 
 /**
- * The temporary directory's content for a round: the factory plugin (the branch's tree, read-only), the other
- * managed-settings folder, the clone and the HOME. `extended` (rounds C and D) plants what else a clone can hold that
+ * The temporary directory's content for a round: the factory plugin (the committed tree, git archive HEAD,
+ * read-only), the other managed-settings folder, the clone and the HOME. `extended` (rounds C and D) plants what else a clone can hold that
  * Claude Code reads; `disableAllHooks` false (D1-control) leaves that key out of both settings.
  */
 async function prepare({ plantConfigDir, extended = false, disableAllHooks = true }) {
@@ -327,7 +337,8 @@ async function run(form, { extra = [], control = false, envAdd = [], cwd = clone
     argv: control ? [CLAUDE, ...args] : ['/usr/bin/timeout', ...argv], cwd };
 }
 
-const hide = (text) => String(text).split(tmp).join('<tmp>').split(homedir()).join('<owner-home>');
+const hide = (text) => String(text).split(home).join('<tmp-home>').split(tmp).join('<tmp>').split(homedir())
+  .join('<owner-home>');
 
 function events(file) {
   return readFileSync(file, 'utf8').split('\n').filter((l) => l.startsWith('{')).map((l) => {
@@ -416,13 +427,13 @@ function clearMarks() {
 }
 
 /**
- * A round of forms, each call's marks its own. Round A plants the whole set; round B the same set but CLAUDE_CONFIG_DIR
- * in env, which in A moves Claude Code's own config directory, and with it the login, so that A's F1 and control end
- * before a turn and measure nothing else; round C is B's set and more (prepare's `extended`).
+ * A round of forms, each call's marks its own. Round A plants the whole set; round B the same set without
+ * CLAUDE_CONFIG_DIR in env, which in A moves Claude Code's own config directory, and with it the login, so that A's F1
+ * and control end before a turn and measure nothing else; round C is B's set and more (prepare's `extended`).
  */
 async function round(name, plantOptions, forms, { promptOf } = {}) {
   await fresh(plantOptions);
-  const runs = [];
+  const runs = measured;
   for (const [form, given] of forms) {
     clearMarks();
     const ran = await run(form, { ...given, text: promptOf ? promptOf(form) : prompt(given.withBash !== false, form) });
@@ -434,7 +445,7 @@ async function round(name, plantOptions, forms, { promptOf } = {}) {
 /** D1 and D1-control: F3 without --agent; tried again, at most twice, while the background call is not made. */
 async function roundD1(name, disableAllHooks) {
   await fresh({ plantConfigDir: false, extended: true, disableAllHooks });
-  const tries = [];
+  const tries = measured;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     clearMarks();
     const ran = await run(name, { extra: [...F2_TOOLS, ...ADD_DIR], envAdd: ADD_DIR_ENV, agent: false,
@@ -451,7 +462,7 @@ async function roundD1(name, disableAllHooks) {
 /** D2: init's tools of F3, with both tool lists, with and without --agent; a call of one turn, recorded only. */
 async function roundD2() {
   await fresh({ plantConfigDir: false, extended: true });
-  const runs = [];
+  const runs = measured;
   for (const agent of [true, false]) {
     for (const tools of ['Read,Grep,Glob,Bash,Edit,Write', 'Read,Grep,Glob']) {
       clearMarks();
@@ -459,42 +470,54 @@ async function roundD2() {
       const ran = await run(form.replace(/[^A-Za-z0-9-]+/g, '_'), { extra: ['--restricted', '--tools', tools, ...ADD_DIR],
         envAdd: ADD_DIR_ENV, agent, maxTurns: 1, text: 'Reply with the one word OK.' });
       const { init } = extract(form, ran, { withBash: false });
-      runs.push({ round: 'D', form, command: ran.argv.map(hide), exit: ran.code, tools: init.tools,
+      const { result, stderr } = extract(form, ran, { withBash: false });
+      runs.push({ round: 'D', form, command: ran.argv.map(hide), exit: ran.code, result, stderr, tools: init.tools,
         agents: init.agents });
     }
   }
   return runs;
 }
 
+/** Every call's extract, as it is made: a round that fails leaves what came before it in the report. */
+const measured = [];
+
 async function main() {
-  const report = { claudeVersion: null, managedSettingsText: null, managedSettingsD: null, rounds, runs: [] };
+  const report = { claudeVersion: null, managedSettingsText: null, managedSettingsD: null, rounds, runs: measured,
+    error: null };
   try {
     report.managedSettingsText = readFileSync(MANAGED, 'utf8');
     report.managedSettingsD = readdirSync(join(dirname(MANAGED), 'managed-settings.d'));
     report.claudeVersion = (await child(CLAUDE, ['--version'], { env: { HOME: tmp, PATH } })).stdout.toString().trim();
     if (rounds.includes('A')) {
-      report.runs.push(...await round('A (CLAUDE_CONFIG_DIR planted)', { plantConfigDir: true }, FORMS_AB));
+      await round('A (CLAUDE_CONFIG_DIR planted)', { plantConfigDir: true }, FORMS_AB);
     }
     if (rounds.includes('B')) {
-      report.runs.push(...await round('B (no CLAUDE_CONFIG_DIR planted)', { plantConfigDir: false }, FORMS_AB));
+      await round('B (no CLAUDE_CONFIG_DIR planted)', { plantConfigDir: false }, FORMS_AB);
     }
     if (rounds.includes('C')) {
-      report.runs.push(...await round('C (round B\'s set and more, CLAUDE.md into F2)',
-        { plantConfigDir: false, extended: true }, FORMS_C, { promptOf: promptC }));
+      await round('C (round B\'s set and more, CLAUDE.md into F2)',
+        { plantConfigDir: false, extended: true }, FORMS_C, { promptOf: promptC });
     }
     if (rounds.includes('D')) {
-      report.runs.push(...await roundD1('D1', true));
-      report.runs.push(...await roundD1('D1-control', false));
-      report.runs.push(...await roundD2());
+      await roundD1('D1', true);
+      await roundD1('D1-control', false);
+      await roundD2();
     }
+  } catch (error) {
+    report.error = hide(error.message);
+    process.exitCode = 1;
   } finally {
-    clean({ keepTmp: false });
-  }
-  const text = `${JSON.stringify(report, null, 2)}\n`;
-  if (options.out !== undefined) {
-    writeFileSync(resolve(options.out), text, { mode: 0o600 });
-  } else {
-    process.stdout.write(text);
+    // The report first, whole or partial, then the cleanup.
+    const text = `${JSON.stringify(report, null, 2)}\n`;
+    try {
+      if (outFile !== undefined) {
+        writeFileSync(outFile, text, { mode: 0o600 });
+      } else {
+        process.stdout.write(text);
+      }
+    } finally {
+      clean({ keepTmp: false });
+    }
   }
 }
 
