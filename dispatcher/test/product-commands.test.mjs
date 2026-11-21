@@ -41,9 +41,10 @@ async function setUp(productOptions) {
     sudo: fake.sudo, git: REAL_GIT });
   assert.ok(ready.container, ready.task.reason);
   const work = join(fake.tasks, RUN_ID, 'w');
+  // No adapter is given: runProductCommand reads the base's itself (review round 1, e).
   const run = (which = 'gate', extra = {}) => runProductCommand({ container: ready.container, repoDir: product.repoDir,
-    base: product.base, adapter, which, limitS: 30, sudo: fake.sudo, git: REAL_GIT, ...extra });
-  return { dir, product, fake, adapter, container: ready.container, work, run };
+    base: product.base, which, limitS: 30, sudo: fake.sudo, git: REAL_GIT, ...extra });
+  return { dir, product, fake, container: ready.container, work, run };
 }
 
 const lines = (result) => result.stdout.toString('utf8').trim().split('\n');
@@ -77,8 +78,7 @@ test('G: two calls, the archive on the first\'s stdin; a fresh directory for eac
   const second = await s.run();
   const calls = execs(s.fake).slice(before);
   assert.equal(calls.length, 4);
-  const archive = await trustedArchive({ repoDir: s.product.repoDir, base: s.product.base, adapter: s.adapter,
-    git: REAL_GIT });
+  const archive = await trustedArchive({ repoDir: s.product.repoDir, base: s.product.base, git: REAL_GIT });
   assert.equal(calls[0].stdinBytes, archive.length, 'the dispatcher\'s archive, on stdin');
   assert.equal(calls[1].stdinBytes, 0, 'the command gets nothing on stdin');
   const tail = calls[1].args.slice(calls[1].args.indexOf('factory-run'));
@@ -112,21 +112,31 @@ test('G: a failure to unpack, or no directory printed, is refused without the ag
     && error.message === 'the trusted paths could not be put into the task container (exit 2); its stderr, the '
       + 'agent\'s side\'s, is not quoted' && !error.message.includes(secret));
   s.fake.update((state) => { delete state.scenario.execFails; });
-  const before = execs(s.fake).length;
-  await assert.rejects(s.run('gate', { adapter: { ...s.adapter, gate: { ...s.adapter.gate, command: ['scripts/factory/../../x.sh'] } } }),
-  /has an empty, \. or \.\. segment/);
-  await assert.rejects(s.run('gate', { adapter: { ...s.adapter, gate: { ...s.adapter.gate,
-    command: ['scripts/factory/.'] } } }), /gate\.command\[0\] has an empty, \. or \.\. segment \(segment 3\)/);
-  await assert.rejects(s.run('gate', { adapter: { ...s.adapter, gate: { ...s.adapter.gate,
-    command: ['bin/run.sh'] } } }), /gate\.command\[0\] is not under any of its trustedPaths/);
   await assert.rejects(s.run('queue'), TypeError);
+});
+
+test('e: the command is the base adapter\'s, read by runProductCommand itself: a later base whose adapter breaks a rule '
+  + 'runs nothing, and an adapter handed in is not taken', async () => {
+  const s = await setUp();
+  const before = execs(s.fake).length;
+  const bad = { 'a .. segment, the schema\'s': ['scripts/factory/../../x.sh', /breaks its schema: \/gate\/command\/0: /],
+    'a last . segment': ['scripts/factory/.', /gate\.command\[0\] has an empty, \. or \.\. segment \(segment 3\)/],
+    'outside trustedPaths': ['.ai/rules/protected-paths.md', /gate\.command\[0\] is not under any of its trustedPaths/] };
+  for (const [what, [script, pattern]] of Object.entries(bad)) {
+    const later = await commit(s.product.work, { files: { '.factory/adapter.json': `${JSON.stringify({ ...ADAPTER,
+      gate: { ...ADAPTER.gate, command: [script] } })}\n` }, message: what });
+    git(s.product.work, ['push', '-q', s.product.repoDir, 'HEAD:refs/heads/main']);
+    await assert.rejects(s.run('gate', { base: later }), pattern, what);
+  }
   assert.equal(execs(s.fake).length, before, 'refused before any call in the container');
+  const handed = await s.run('gate', { adapter: { ...ADAPTER, gate: { ...ADAPTER.gate,
+    command: ['scripts/factory/changed-paths.sh'] } } });
+  assert.equal(lines(handed)[0], 'run-tests from the base', 'the base\'s gate, whatever adapter the call names');
 });
 
 test('G: the archive holds directories and regular files alone, their git modes, read back by tar as such', async () => {
   const s = await setUp();
-  const archive = await trustedArchive({ repoDir: s.product.repoDir, base: s.product.base, adapter: s.adapter,
-    git: REAL_GIT });
+  const archive = await trustedArchive({ repoDir: s.product.repoDir, base: s.product.base, git: REAL_GIT });
   const listed = execFileSync('tar', ['-tvf', '-'], { input: archive, encoding: 'utf8' }).trim().split('\n')
     .map((line) => `${line.split(/\s+/)[0]} ${line.split(/\s+/).at(-1)}`);
   assert.deepEqual(listed, [

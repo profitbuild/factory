@@ -10,7 +10,6 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { readAdapter } from '../src/product/adapter-from-base.mjs';
 import {
   TrustedPathsError, changedPathsOf, changesEntry, checkChangedPaths, checkTaskPaths,
 } from '../src/product/trusted-paths.mjs';
@@ -34,8 +33,7 @@ async function setUp() {
     'scripts/factory/changed-paths.sh': marking, 'src/app.txt': 'app\n' } });
   const stateDir = join(dir, 'state');
   await mkdir(stateDir, { mode: 0o700 });
-  const adapter = await readAdapter({ repoDir: product.repoDir, base: product.base, git: REAL_GIT });
-  return { dir, product, stateDir, adapter };
+  return { dir, product, stateDir };
 }
 
 /** The task's branch: a clone of the product with one commit of `change`, and its bundle. */
@@ -51,9 +49,9 @@ async function branchOf({ dir, product }, change, name = `task-${n}`) {
 }
 
 const task = (product) => ({ runId: RUN_ID, branch: 'feat/0-278-x', baseSha: product.base });
-const check = (setup, branch, adapter = setup.adapter) => checkTaskPaths({ stateDir: setup.stateDir,
-  repoDir: setup.product.repoDir, task: task(setup.product), bundle: branch.bundle, sha: branch.sha, adapter,
-  git: REAL_GIT });
+// No adapter is given: checkTaskPaths reads the one of the task's base itself (review round 1, e).
+const check = (setup, branch) => checkTaskPaths({ stateDir: setup.stateDir, repoDir: setup.product.repoDir,
+  task: task(setup.product), bundle: branch.bundle, sha: branch.sha, git: REAL_GIT });
 
 async function refused(promise, pattern, values = [], what = 'the change') {
   await assert.rejects(promise, (error) => {
@@ -116,7 +114,8 @@ test('AC1 control: a change outside the trusted paths passes, and the changed pa
   assert.deepEqual(await check(setup, empty), []);
 });
 
-test('AC3: the branch\'s adapter drops a trusted path, and the task still refuses a change to it: the base\'s rules',
+test('AC3: the branch\'s adapter drops a trusted path, and the task still refuses a change to it: the base\'s rules '
+  + '(no adapter can be handed in: the check reads the base\'s)',
   async () => {
     const setup = await setUp();
     const branch = await branchOf(setup, async (work) => {
@@ -124,6 +123,10 @@ test('AC3: the branch\'s adapter drops a trusted path, and the task still refuse
       await write('scripts/factory/run-tests.sh', '#!/bin/sh\necho pass\n')(work);
     });
     await refused(check(setup, branch), /1 path of the adapter's trustedPaths\[0\], 1 path of the adapter's trustedPaths\[1\]/);
+    // An adapter handed in is not an option the check takes: the base's is read whatever the call says.
+    await refused(checkTaskPaths({ stateDir: setup.stateDir, repoDir: setup.product.repoDir, task: task(setup.product),
+      bundle: branch.bundle, sha: branch.sha, git: REAL_GIT, adapter: { trustedPaths: ['elsewhere/'] } }),
+    /1 path of the adapter's trustedPaths\[0\], 1 path of the adapter's trustedPaths\[1\]/);
   });
 
 test('a bundle not of the task, or a base not recorded, is refused before any path is listed', async () => {
@@ -131,8 +134,8 @@ test('a bundle not of the task, or a base not recorded, is refused before any pa
   const branch = await branchOf(setup, write('src/app.txt', 'x\n'));
   await assert.rejects(check(setup, { ...branch, sha: setup.product.base }), /the bundle's ref must be/);
   await assert.rejects(checkTaskPaths({ stateDir: setup.stateDir, repoDir: setup.product.repoDir,
-    task: { ...task(setup.product), baseSha: null }, bundle: branch.bundle, sha: branch.sha, adapter: setup.adapter,
-    git: REAL_GIT }), /has no base recorded/);
+    task: { ...task(setup.product), baseSha: null }, bundle: branch.bundle, sha: branch.sha, git: REAL_GIT }),
+  (error) => error instanceof TrustedPathsError && /has no base recorded$/.test(error.message));
 });
 
 test('changesEntry: a directory entry, its own name, a file entry and a directory put in its place', () => {

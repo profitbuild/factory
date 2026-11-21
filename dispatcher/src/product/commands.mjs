@@ -8,8 +8,11 @@
  *  1. the archive on stdin, unpacked by a constant script into a fresh directory, `mktemp -d
  *     /tmp/factory-trusted.XXXXXXXX`, outside the clone (any such directory a run before left is removed first); the
  *     script prints the directory, which the dispatcher holds to TRUSTED_DIR before it uses it;
- *  2. `cd <the clone> && exec <the directory>/<script> <arguments>`: the product's root as the working directory, the
+ *  2. `cd -- <the clone> && exec <the directory>/<script> <arguments>`: the product's root as the working directory, the
  *     script and its arguments the base's adapter's.
+ * The contract this gives a product's command (README, schemas/adapter.schema.json): only what its script reads
+ * relative to itself ($(dirname "$0")) is the base's; a file it reads by a path relative to the clone is the copy in
+ * the agent's working tree. The adapter is read here, from the base, never taken from the caller.
  * Two calls, not one with an exit code of its own for "could not unpack": `timeout` exits 125 when it fails itself,
  * and a product's script may exit with any code. What the second call prints is the agent's side: the caller (4.4)
  * reads it against its schema, and neither the review zone nor a refusal of the dispatcher rests on it.
@@ -24,8 +27,8 @@
  */
 import { WORKSPACE } from '../container/paths.mjs';
 import { execInTask } from '../container/task-container.mjs';
+import { readAdapter } from './adapter-from-base.mjs';
 import { MODES, readBlobs, resolveInBase, segmentsOf, subtreeFiles } from './base-tree.mjs';
-import { isUnder } from './trusted-paths.mjs';
 
 /** The product's command could not be put into the task container, or is not one the adapter may name. */
 export class ProductCommandError extends Error {}
@@ -111,12 +114,8 @@ export function ustar(files) {
   return Buffer.concat(parts);
 }
 
-/**
- * The archive of the adapter's `trustedPaths`, from the base's blobs.
- *
- * @param {{ repoDir: string, base: string, adapter: { trustedPaths: string[] }, git?: string }} options
- */
-export async function trustedArchive({ repoDir, base, adapter, git }) {
+/** The archive of `adapter`'s `trustedPaths` (the base's adapter, as readAdapter returns it), from the base's blobs. */
+async function archiveOf({ repoDir, base, adapter, git }) {
   const byPath = new Map();
   for (const [i, entry] of adapter.trustedPaths.entries()) {
     const what = `the adapter's trustedPaths[${i}]`;
@@ -128,6 +127,15 @@ export async function trustedArchive({ repoDir, base, adapter, git }) {
   const files = [...byPath.values()];
   const blobs = await readBlobs({ repoDir, oids: files.map((f) => f.oid), git, what: 'the adapter\'s trustedPaths' });
   return ustar(files.map((file, i) => ({ path: file.path, mode: file.mode, bytes: blobs[i] })));
+}
+
+/**
+ * The archive of the trustedPaths of the base's adapter, from the base's blobs: what the first call is given.
+ *
+ * @param {{ repoDir: string, base: string, git?: string }} options
+ */
+export async function trustedArchive({ repoDir, base, git }) {
+  return archiveOf({ repoDir, base, adapter: await readAdapter({ repoDir, base, git }), git });
 }
 
 /**
@@ -147,27 +155,25 @@ export function unpackedDir({ code, stdout }) {
 }
 
 /**
- * The product's command `which` of the base's adapter, run in the task container from the base's blobs.
+ * The product's command `which` of the base's adapter, run in the task container from the base's blobs. The adapter is
+ * read here, from `base` (readAdapter, with every check of its paths: a script's segments, under trustedPaths,
+ * executable), so that no caller can hand it another, a branch's included (review round 1 of factory#20, e).
  *
  * @param {{ container: { runId: string, id: string, remoteUser: string }, repoDir: string, base: string,
- *   adapter: object, which: 'gate' | 'changedPaths', limitS: number, graceS?: number,
- *   env?: Record<string, string>, outputLimit?: number, sudo?: string, git?: string }} options `adapter` the base's,
- *   as readAdapter returns it; `sudo` and `git` for the tests only
+ *   which: 'gate' | 'changedPaths', limitS: number, graceS?: number, env?: Record<string, string>,
+ *   outputLimit?: number, sudo?: string, git?: string }} options `base` the task's; `sudo` and `git` for the tests
+ *   only
  * @returns {Promise<{ code: number, stdout: Buffer, stderr: string }>} the command's, the agent's side
  */
 export async function runProductCommand({
-  container, repoDir, base, adapter, which, limitS, graceS, env, outputLimit, sudo, git,
+  container, repoDir, base, which, limitS, graceS, env, outputLimit, sudo, git,
 }) {
   if (!COMMANDS.includes(which)) {
     throw new TypeError(`runProductCommand: which must be one of ${COMMANDS.join(', ')}`);
   }
+  const adapter = await readAdapter({ repoDir, base, git });
   const [script, ...args] = adapter[which].command;
-  // A script whose last segment is `.` (from 4.3a's review), or with any empty, . or .. segment, is refused.
-  segmentsOf(script, `the adapter's ${which}.command[0]`);
-  if (!adapter.trustedPaths.some((entry) => isUnder(entry, script))) {
-    refuse(`the adapter's ${which}.command[0] is not under any of its trustedPaths`);
-  }
-  const archive = await trustedArchive({ repoDir, base, adapter, git });
+  const archive = await archiveOf({ repoDir, base, adapter, git });
   const unpacked = await execInTask({ container, sudo, limitS: UNPACK_LIMIT_S, input: archive, outputLimit: 4096,
     args: ['sh', '-c', UNPACK, 'factory-unpack'] });
   const dir = unpackedDir(unpacked);

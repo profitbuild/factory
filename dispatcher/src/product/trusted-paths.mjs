@@ -19,16 +19,12 @@
  */
 import { firstLines, runGit } from '../git/run-git.mjs';
 import { withTaskObjects } from '../git/task-objects.mjs';
+import { readAdapter } from './adapter-from-base.mjs';
 
 /** A task's branch changes what judges it. */
 export class TrustedPathsError extends Error {}
 
 const SHA = /^[0-9a-f]{40}$/;
-
-/** Whether `path` lies under the trusted entry `entry` (a directory ends with /), or is it. */
-export function isUnder(entry, path) {
-  return entry.endsWith('/') ? path.startsWith(entry) : path === entry;
-}
 
 /** Whether a change of `path` changes the trusted entry `entry`. */
 export function changesEntry(entry, path) {
@@ -75,13 +71,19 @@ export function checkChangedPaths({ adapter, changed }) {
 
 /**
  * The check of a task's commits before its gate: the bundle read into a repository made for the check, the changed
- * paths listed there and held to the base's adapter. No product code runs for it.
+ * paths listed there and held to the adapter of the task's base, which this function reads itself (readAdapter, at
+ * task.baseSha): no caller can hand it another, a branch's included (review round 1 of factory#20, e). No product
+ * code runs for it.
  *
  * @param {{ stateDir: string, repoDir: string, task: { runId: string, branch: string, baseSha: string },
- *   bundle: Buffer, sha: string, adapter: { trustedPaths: string[] }, uid?: number, git?: string }} options
+ *   bundle: Buffer, sha: string, uid?: number, git?: string }} options
  * @returns {Promise<string[]>} the changed paths, for 4.5's check of the owner's paths
  */
-export async function checkTaskPaths({ stateDir, repoDir, task, bundle, sha, adapter, uid, git }) {
+export async function checkTaskPaths({ stateDir, repoDir, task, bundle, sha, uid, git }) {
+  if (!SHA.test(task?.baseSha ?? '')) {
+    throw new TrustedPathsError(`the task ${task?.runId} has no base recorded`);
+  }
+  const adapter = await readAdapter({ repoDir, base: task.baseSha, git });
   return withTaskObjects({ stateDir, repoDir, task, bundle, sha, branch: task.branch, purpose: 'check', uid, git },
     async ({ repo }) => {
       const changed = await changedPathsOf({ gitDir: repo, base: task.baseSha, head: sha, git });

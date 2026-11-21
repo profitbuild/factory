@@ -14,7 +14,11 @@
  */
 import { AdapterError, checkAdapter } from '../adapter.mjs';
 import { BaseTreeError, MODES, readBlobs, resolveInBase, subtreeFiles } from './base-tree.mjs';
-import { isUnder } from './trusted-paths.mjs';
+
+/** Whether `path` lies under the trusted entry `entry` (a directory ends with /), or is it. */
+export function isUnder(entry, path) {
+  return entry.endsWith('/') ? path.startsWith(entry) : path === entry;
+}
 
 /** Where a product holds its adapter: the one path of a product the factory names. */
 export const ADAPTER_PATH = '.factory/adapter.json';
