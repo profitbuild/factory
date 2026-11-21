@@ -9,7 +9,9 @@
  * (config/builder-env.mjs). The environment holds no secret, of any variable: one shaped like a secret is refused by
  * its name (config/settings.mjs). `run`, in this order:
  *   1. the settings, every refusal by the variable's name, never its value;
- *   2. $FACTORY_STATE_DIR: a directory of this user's, 700 (made by the provisioning); $FACTORY_REPO_DIR a directory;
+ *   2. $FACTORY_STATE_DIR: a directory of this user's, 700 (made by the provisioning); $FACTORY_REPO_DIR a directory,
+ *      its objects the dispatcher's and the clone the dispatcher's alone, every directory on the way to it its
+ *      user's or root's and writable by no one else (git/task-objects.mjs checkRepoDir, #0-278 AC7);
  *   3. the lock ($FACTORY_STATE_DIR/lock): another run holding it refuses this one (state/lock.mjs);
  *   4. the breaker (state.json): tripped, or unreadable, refuses the run;
  *   5. the item and its base (incident-platform backlog #0-278, ADR-0060 D6 and D8 as amended). A new task

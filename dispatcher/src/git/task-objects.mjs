@@ -16,7 +16,7 @@
  */
 import { constants } from 'node:fs';
 import { lstat, mkdir, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 
 import { ensureOwnDirectory } from '../state/files.mjs';
 import { loadBundle } from './bundle.mjs';
@@ -43,16 +43,25 @@ async function isMissing(path) {
 
 /**
  * FACTORY_REPO_DIR is the dispatcher's alone (incident-platform backlog #0-278 AC7): through alternates its objects
- * feed every push, so no one else may write any file of it, a loose object's directory or a pack included. Held by
- * the directory that shields it: the clone itself or its parent (provision.sh makes it in the dispatcher's home, 700)
- * is a directory, not a symlink, owned by this process's user, with no bit for the group or others. Under it no other
- * user can reach, so what git writes there later (a new pack, a loose object's directory) is covered too, which a
- * walk of the files present could not be.
+ * feed every push, so no one else may write any file of it, a loose object's directory or a pack included. Two rules:
+ *  - the shield: the clone itself or its parent (provision.sh makes it in the dispatcher's home, 700) is a directory
+ *    owned by this process's user with no bit for the group or others. No other user can reach anything under it, so
+ *    what git writes there later (a new pack, a loose object's directory) is covered too, which a walk of the files
+ *    present could not be;
+ *  - the way to it, as sshd's StrictModes holds a key's: the clone and every directory above it up to /, each by
+ *    lstat (a symlink is refused), owned by this process's user or by root, and writable by neither the group nor
+ *    others (mode & 022 == 0). Otherwise another user could put a directory of their own in place of one on the way,
+ *    and with it the shield.
+ * The path must be absolute (FACTORY_REPO_DIR is, by its setting); a refusal names the directory, the dispatcher's own
+ * setting, never what it holds.
  *
  * @param {string} repoDir
  * @param {{ uid?: number, lstatOf?: typeof lstat }} [options] for the tests only
  */
 export async function checkOwnRepoDir(repoDir, { uid = process.getuid(), lstatOf = lstat } = {}) {
+  if (typeof repoDir !== 'string' || !isAbsolute(repoDir)) {
+    throw new TypeError('checkOwnRepoDir: repoDir must be an absolute path');
+  }
   const own = async (path) => {
     const stats = await lstatOf(path).catch(() => null);
     return { stats, shields: stats?.isDirectory() === true && stats.uid === uid && (stats.mode & 0o077) === 0 };
@@ -60,6 +69,23 @@ export async function checkOwnRepoDir(repoDir, { uid = process.getuid(), lstatOf
   const clone = await own(repoDir);
   if (!clone.stats?.isDirectory()) {
     throw new RepoDirError('FACTORY_REPO_DIR is not a directory (a symlink is refused)');
+  }
+  for (let path = repoDir, stats = clone.stats; ; path = dirname(path), stats = await lstatOf(path).catch(() => null)) {
+    if (!stats?.isDirectory()) {
+      throw new RepoDirError(`a directory on the way to FACTORY_REPO_DIR, ${path}, is not a directory (a symlink is `
+        + 'refused)');
+    }
+    if (stats.uid !== uid && stats.uid !== 0) {
+      throw new RepoDirError(`a directory on the way to FACTORY_REPO_DIR, ${path}, is owned by uid ${stats.uid}: `
+        + 'only this process\'s user or root may own one');
+    }
+    if ((stats.mode & 0o022) !== 0) {
+      throw new RepoDirError(`a directory on the way to FACTORY_REPO_DIR, ${path}, has mode `
+        + `${(stats.mode & 0o7777).toString(8)}: the group and others may not write one`);
+    }
+    if (path === dirname(path)) {
+      break;
+    }
   }
   if (clone.shields || (await own(dirname(repoDir))).shields) {
     return;

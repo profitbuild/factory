@@ -51,17 +51,24 @@ test('AC7: a bare clone in a home of 700 is the dispatcher\'s alone, its loose d
 test('AC7: a parent open to the group or others, or another user\'s, is refused unless the clone shields itself',
   async () => {
     const { dir, repo } = await home();
-    for (const mode of [0o750, 0o705, 0o770, 0o755]) {
+    for (const mode of [0o750, 0o705, 0o755]) {
       await chmod(dir, mode);
       await refused(checkOwnRepoDir(repo));
     }
+    // A parent its group may write is refused by the rule of the way to the clone already (review round 1, g).
+    await chmod(dir, 0o770);
+    await assert.rejects(checkOwnRepoDir(repo), /a directory on the way to FACTORY_REPO_DIR, .*, has mode 770/);
     await chmod(dir, 0o755);
     await chmod(repo, 0o700);
     await checkOwnRepoDir(repo);
     await chmod(repo, 0o755);
     await chmod(dir, 0o700);
-    await refused(checkOwnRepoDir(repo, { lstatOf: changed(dir, (s) => ({ uid: s.uid + 1 })) }));
-    await refused(checkOwnRepoDir(repo, { uid: process.getuid() + 1 }));
+    // Another user's parent, or a clone not this process's, is refused by the rule of the way (review round 1, g).
+    const notOwn = /is owned by uid \d+: only this process's user or root may own one$/;
+    await assert.rejects(checkOwnRepoDir(repo, { lstatOf: changed(dir, (s) => ({ uid: s.uid + 1 })) }), notOwn);
+    await assert.rejects(checkOwnRepoDir(repo, { uid: process.getuid() + 1 }), notOwn);
+    // Root's parent of 755 passes the way, and does not shield: the clone's 755 is refused by the shield.
+    await refused(checkOwnRepoDir(repo, { lstatOf: changed(dir, () => ({ uid: 0, mode: 0o40755 })) }));
   });
 
 test('AC7: a clone that is a symlink is refused, whatever its target; one missing too', async () => {
@@ -78,4 +85,34 @@ test('AC7: the push\'s check of the objects ends with it: a home open to others 
   const { dir, repo } = await home();
   await chmod(dir, 0o755);
   await refused(mainObjects(repo));
+});
+
+test('review round 1 g: every directory on the way to /, as sshd\'s StrictModes: one writable by others or its group is '
+  + 'refused, another user\'s is refused, root\'s 755 passes, a symlink on the way is refused', async () => {
+  const { dir, repo } = await home();
+  const outer = join(dir, 'outer');
+  await mkdir(join(outer, 'inner'), { recursive: true, mode: 0o700 });
+  const nested = join(outer, 'inner', 'repo');
+  git(dir, ['clone', '-q', '--bare', repo, nested]);
+  await chmod(outer, 0o755);
+  await checkOwnRepoDir(nested);
+  for (const mode of [0o757, 0o775, 0o777, 0o1777]) {
+    await chmod(outer, mode);
+    await assert.rejects(checkOwnRepoDir(nested), (error) => error instanceof RepoDirError
+      && error.message === `a directory on the way to FACTORY_REPO_DIR, ${outer}, has mode ${mode.toString(8)}: the `
+        + 'group and others may not write one', mode.toString(8));
+  }
+  await chmod(outer, 0o755);
+  await assert.rejects(checkOwnRepoDir(nested, { lstatOf: changed(outer, (s) => ({ uid: s.uid + 1 })) }),
+    (error) => error instanceof RepoDirError && /, outer, |outer, is owned by uid \d+: only this process's user or root/
+      .test(error.message));
+  await checkOwnRepoDir(nested, { lstatOf: changed(outer, () => ({ uid: 0 })) });
+  await checkOwnRepoDir(nested, { lstatOf: changed('/', () => ({ uid: 0, mode: 0o40755 })) });
+  await assert.rejects(checkOwnRepoDir(nested, { lstatOf: changed('/', () => ({ mode: 0o40777 })) }),
+    /a directory on the way to FACTORY_REPO_DIR, \/, has mode 777/);
+  const link = join(dir, 'via');
+  await symlink(join(outer, 'inner'), link);
+  await assert.rejects(checkOwnRepoDir(join(link, 'repo')), (error) => error instanceof RepoDirError
+    && error.message === `a directory on the way to FACTORY_REPO_DIR, ${link}, is not a directory (a symlink is refused)`);
+  await assert.rejects(checkOwnRepoDir('relative/repo'), TypeError);
 });

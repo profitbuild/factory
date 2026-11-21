@@ -3,10 +3,10 @@
 // factory. `state` says what the fake answers; each test resets it. The ids are a test's, not builder-app's.
 import { createVerify } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { appKeyPair, decodeJwt, startFakeGitHub } from './fake-github.mjs';
+import { TEST_ROOT } from './state-dir.mjs';
 
 export const APP_ID = 1001;
 export const INSTALLATION_ID = 2002;
@@ -119,7 +119,7 @@ export async function writeAppFiles(root, privateKey, { keyMode = 0o600, envText
   return { dir, keyPath, envPath, vars, env: { appId: APP_ID, installationId: INSTALLATION_ID, keyPath } };
 }
 
-export const makeRoot = (name) => mkdtemp(join(tmpdir(), `${name}-`));
+export const makeRoot = (name) => mkdtemp(join(TEST_ROOT, `${name}-`));
 
 /** Every file under `dir` whose bytes contain `needle`. */
 export async function filesContaining(dir, needle) {

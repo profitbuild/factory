@@ -198,6 +198,9 @@ test('#0-278 AC7: a FACTORY_REPO_DIR not the dispatcher\'s alone is refused befo
     const { stateDir, env, repoParent } = await setUp(t);
     await chmod(repoParent, 0o755);
     refusedWith(await cli(['run', '--item', '0-1'], env), /^dispatcher: FACTORY_REPO_DIR is not the dispatcher's alone: neither it nor its parent directory is owned by this process's user with mode 700/, [env.FACTORY_REPO_DIR]);
+    await chmod(repoParent, 0o757);
+    refusedWith(await cli(['run', '--item', '0-1'], env),
+      /^dispatcher: a directory on the way to FACTORY_REPO_DIR, .*, has mode 757: the group and others may not write one\n$/);
     await chmod(repoParent, 0o700);
     assert.deepEqual(await readdir(stateDir), []);
   });
