@@ -1,7 +1,7 @@
 # factory
 
-The AI software factory of profitbuild, product-agnostic. Today it holds the skeleton of the dispatcher; the build
-VM and the agent definitions move here in later steps (incident-platform ADR-0060 D5). A product loads it read-only,
+The AI software factory of profitbuild, product-agnostic. Today it holds the dispatcher and the plugin of the build
+agents; the build VM moves here in a later step (incident-platform ADR-0060 D5). A product loads it read-only,
 at a pinned tag; nothing here is specific to one product.
 
 Decided in [incident-platform](https://github.com/profitbuild/incident-platform), the product it is proven on:
@@ -17,6 +17,7 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 
 | Path | What |
 |---|---|
+| `.claude-plugin/plugin.json`, `agents/`, `hooks/` | The factory's Claude Code plugin, the repository's root its directory (see "The plugin") |
 | `dispatcher/` | The dispatcher: Node (`.node-version`), built-in modules only, no package from npm (ADR-0060 D2). Its tests: `cd dispatcher && node --test` |
 | `.github/workflows/ci.yml` | CI: the dispatcher's tests (`Test`); the same whole suite on git 2.43, the build VM's, in an `ubuntu:24.04` container, run as an ordinary user, not root (`Test (git 2.43)`); the workflow linters at incident-platform's pins (`Lint Workflows`); and the secret scan of every commit a pull request or a push adds (`Secret Scan`, betterleaks) |
 | `.github/scripts/install-pinned-tool.sh` | Installs a CI tool pinned by tag and SHA-256; a copy of incident-platform's until stage T makes one template |
@@ -37,6 +38,39 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 | `schemas/adapter.schema.json`, `schemas/gate.schema.json` | A product's `.factory/adapter.json` and its gate's answer (incident-platform ADR-0060 D6), checked by `dispatcher/src/schema/validate.mjs`, a validator of Node's built-ins that refuses any keyword it does not check |
 | `CONTRIBUTING.md` | How a change is made, from the change to the merge, and who writes what: what stays after ADR-0055's migration, and what holds until a named stage |
 | `.claude/settings.json` | The denies of a Claude Code session started here; `dispatcher/test/session-denies.test.mjs` keeps them |
+
+## The plugin
+
+The repository's root is a Claude Code plugin named `factory` (incident-platform backlog #0-299, migration step M2.0;
+ADR-0060 D5 as amended), which a product's task container loads read-only from `/opt/factory` at the pinned tag
+(`claude --plugin-dir`). Its agents are called by the plugin's name, `--agent factory:<agent>`: a clone's own
+`.claude/agents/` would take a bare name first.
+
+| Agent | Model, turns | What |
+|---|---|---|
+| `factory:architect` | `claude-opus-5-5`, 40 | Plans one item before any code: the plan file the task names and, for a reversible decision, a Proposed ADR; stops the item on anything for the owner |
+| `factory:implementer` | `claude-opus-5-5`, 120 | Builds a planned item, or fixes what it is given, by mode: `implement`, `fix-tests`, `fix-review`, `fix-acceptance`, `self-check` |
+| `factory:implementer-light` | `claude-sonnet-5-5`, 80 | The implementer's text word for word, but for one marked paragraph, for an item rated low in complexity |
+
+- **Product-neutral.** No agent names a product's paths, rules, modules or stack. Each first reads the product's own
+  `/workspace/CLAUDE.md` with Read, whether or not Claude Code also loads it, and what it points to; the paths of the
+  task's own files (plan, handoff, the gate's log) come in the task the dispatcher writes. What the agent reads from
+  `/workspace` is its working tree, which its branch can change: its context, never a ground for the dispatcher's
+  decisions (ADR-0060 D6).
+- **No commit.** An agent makes no commit and pushes nothing; its answer carries a `commitMessage` (a Conventional
+  Commits subject by the product's rules, a blank line, a body), and the dispatcher commits each call's changes with it
+  (#0-302). The answer's schema comes with the dispatcher's call (#0-301).
+- **Hooks.** Claude Code ignores a plugin agent's frontmatter `hooks:`, `mcpServers:` and `permissionMode:`, so the
+  plugin's hooks are `hooks/hooks.json`: `foreground-bash.mjs` refuses a Bash call with `run_in_background` (an
+  agent's turns are its budget), and fails closed: every input but a Bash call in the foreground exits 2, and
+  `onFailure: "block"` covers a `node` that does not start.
+- **Checks.** `dispatcher/test/plugin.test.mjs`, in job `Test`: the manifest's name, the agents' frontmatter
+  exactly `name`, `description`, `tools`, `model`, `maxTurns` (a key Claude Code would ignore fails here),
+  a list of refused patterns (the first product's names and paths, a stack's words) absent from `agents/`, no commit,
+  the light agent equal to the implementer but for its paragraph, and each hook's script present;
+  `dispatcher/test/foreground-bash.test.mjs` runs the hook as Claude Code does. `claude plugin validate .` passes
+  offline and without a token, but is not in CI: it would need Claude Code installed there at a pin and a change to
+  the workflow, which is the owner's, and it does not see an agent's `hooks:`, which the test does.
 
 ## Changes
 
