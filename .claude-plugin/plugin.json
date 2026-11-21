@@ -1,0 +1,5 @@
+{
+  "name": "factory",
+  "description": "The AI software factory's build agents (architect, implementer, implementer-light) and their hooks, product-neutral: each reads the product's own CLAUDE.md first.",
+  "license": "Apache-2.0"
+}
