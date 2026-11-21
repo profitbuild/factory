@@ -16,8 +16,13 @@
  *   joins it;
  * - removeOwnObjects: only what carries the run's label, for a run that a rollback stops after its network exists:
  *   then the rollback is running, and the daemon is not the run's to sweep.
- * Everything read from docker's output is untrusted: an id, a name, each line is held to a pattern, or refused; a
- * name is quoted in a refusal only when it is one.
+ * - checkDaemonOptions (#0-284, ADR-0062 point 6): `docker info`'s security options and default runtime, exactly the
+ *   VM's (rootless, seccomp's builtin profile, cgroup namespaces; runc), checked before the task's first container.
+ * Everything read from docker's output is untrusted: an id, a name, each line is held to a pattern, or refused. A
+ * refusal names what it found by the IDs the daemon gave (hex) and counts, never by a name (#0-284: a container's,
+ * a network's or a volume's name is the agent's side's to choose, and could carry what it read); only the rollback's
+ * refusal still names the containers, until M4 removes the rollback. Every call is the starter's, its stderr kept in
+ * $FACTORY_STATE_DIR (run-container.mjs), so every function takes `stateDir`.
  */
 import {
   DISPATCHER_ENV_FILE, FACTORY_CHECKOUT, M2_VOLUME, ROLLBACK_LABEL, TASK_LABEL, taskPaths,
@@ -42,7 +47,7 @@ const BUILTIN_NETWORKS = new Set(['bridge', 'host', 'none']);
  */
 export const SWEEP_COMMAND = `node --env-file=${DISPATCHER_ENV_FILE} ${FACTORY_CHECKOUT}/dispatcher/src/cli.mjs sweep`;
 
-const docker = (args, { sudo, input } = {}) => mustRun({ program: 'docker', args, input, sudo });
+const docker = (args, { sudo, stateDir, input } = {}) => mustRun({ program: 'docker', args, input, sudo, stateDir });
 
 /** Lines of `<id> <name>`, each held to the patterns. */
 function idsAndNames(stdout, what) {
@@ -64,42 +69,46 @@ function names(stdout, what) {
   });
 }
 
-const listed = (items) => items.map(({ id, name }) => `${name} (${id.slice(0, 12)})`).join(', ');
+/** The rollback's refusal's form, unchanged until M4 removes the rollback: each container's name and short ID. */
+const listedByName = (items) => items.map(({ id, name }) => `${name} (${id.slice(0, 12)})`).join(', ');
+/** Every other refusal's (#0-284): how many, and the daemon's IDs, short; never a name. */
+const listed = (items) => `${items.length} (${items.map(({ id }) => id.slice(0, 12)).join(', ')})`;
 
 /** Every container of the daemon, running or not, or those with `filter`. */
-export async function containers({ sudo, filter = [], all = true } = {}) {
+export async function containers({ sudo, stateDir, filter = [], all = true } = {}) {
   return idsAndNames((await docker(['ps', ...(all ? ['-a'] : []), '--no-trunc', ...filter.flatMap((f) => ['--filter', f]),
-    '--format', '{{.ID}} {{.Names}}'], { sudo })).stdout, 'containers');
+    '--format', '{{.ID}} {{.Names}}'], { sudo, stateDir })).stdout, 'containers');
 }
 
 /** The daemon's user-defined networks, or those with `filter`. */
-export async function networks({ sudo, filter = ['type=custom'] } = {}) {
+export async function networks({ sudo, stateDir, filter = ['type=custom'] } = {}) {
   return idsAndNames((await docker(['network', 'ls', '--no-trunc', ...filter.flatMap((f) => ['--filter', f]),
-    '--format', '{{.ID}} {{.Name}}'], { sudo })).stdout, 'networks')
+    '--format', '{{.ID}} {{.Name}}'], { sudo, stateDir })).stdout, 'networks')
     .filter(({ name }) => !BUILTIN_NETWORKS.has(name));
 }
 
 /** The daemon's volumes, or those with `filter`. */
-export async function volumes({ sudo, filter = [] } = {}) {
+export async function volumes({ sudo, stateDir, filter = [] } = {}) {
   return names((await docker(['volume', 'ls', ...filter.flatMap((f) => ['--filter', f]), '--format', '{{.Name}}'],
-    { sudo })).stdout, 'volumes');
+    { sudo, stateDir })).stdout, 'volumes');
 }
 
 /** The running containers labelled `factory.rollback`. */
-export function runningRollbacks({ sudo } = {}) {
-  return containers({ sudo, all: false, filter: [`label=${ROLLBACK_LABEL}`] });
+export function runningRollbacks({ sudo, stateDir } = {}) {
+  return containers({ sudo, stateDir, all: false, filter: [`label=${ROLLBACK_LABEL}`] });
 }
 
 /**
  * Refuses when a running container carries `factory.rollback`, naming it and the sweep.
  *
- * @param {{ sudo?: string, when: string }} options `when`: which check this is, for the refusal
+ * @param {{ stateDir: string, sudo?: string, when: string }} options `when`: which check this is, for the refusal
  */
-export async function refuseWhileRollback({ sudo, when }) {
-  const found = await runningRollbacks({ sudo });
+export async function refuseWhileRollback({ sudo, stateDir, when }) {
+  const found = await runningRollbacks({ sudo, stateDir });
   if (found.length > 0) {
-    throw new RollbackRunningError(`${when}: a running container carries ${ROLLBACK_LABEL}: ${listed(found)}. If it is `
-      + 'a rollback, end it (its container stopped) before the next run; if it is not (a killed run left it), clear it '
+    throw new RollbackRunningError(`${when}: a running container carries ${ROLLBACK_LABEL}: ${listedByName(found)}. `
+      + 'If it is a rollback, end it (its container stopped) before the next run; if it is not (a killed run left it), '
+      + 'clear it '
       + `with \`${SWEEP_COMMAND} --force\``);
   }
 }
@@ -108,45 +117,49 @@ export async function refuseWhileRollback({ sudo, when }) {
  * Removes every container, user-defined network and volume of the daemon but factory-dispatcher-m2, in that order,
  * then every work directory, and checks that nothing is left.
  *
- * @param {{ runId: string, helperImage: string, sudo?: string }} options `runId` labels the helper
+ * @param {{ runId: string, helperImage: string, stateDir: string, sudo?: string }} options `runId` labels the helper
  * @returns {Promise<{ containers: string[], networks: string[], volumes: string[] }>} what was removed, by name
  */
-export async function sweepDaemon({ runId, helperImage, sudo }) {
+export async function sweepDaemon({ runId, helperImage, stateDir, sudo }) {
   const removed = { containers: [], networks: [], volumes: [] };
-  const found = await containers({ sudo });
+  const found = await containers({ sudo, stateDir });
   if (found.length > 0) {
-    await docker(['rm', '-f', '-v', ...found.map(({ id }) => id)], { sudo });
+    await docker(['rm', '-f', '-v', ...found.map(({ id }) => id)], { sudo, stateDir });
     removed.containers = found.map(({ name }) => name);
   }
-  const nets = await networks({ sudo });
+  const nets = await networks({ sudo, stateDir });
   if (nets.length > 0) {
-    await docker(['network', 'rm', ...nets.map(({ id }) => id)], { sudo });
+    await docker(['network', 'rm', ...nets.map(({ id }) => id)], { sudo, stateDir });
     removed.networks = nets.map(({ name }) => name);
   }
-  const vols = (await volumes({ sudo })).filter((name) => name !== M2_VOLUME);
+  const vols = (await volumes({ sudo, stateDir })).filter((name) => name !== M2_VOLUME);
   if (vols.length > 0) {
-    await docker(['volume', 'rm', ...vols], { sudo });
+    await docker(['volume', 'rm', ...vols], { sudo, stateDir });
     removed.volumes = vols;
   }
-  await removeAllWorkDirs({ runId, image: helperImage, sudo });
-  await checkSwept({ sudo });
+  await removeAllWorkDirs({ runId, image: helperImage, sudo, stateDir });
+  await checkSwept({ sudo, stateDir });
   return removed;
 }
 
-/** No container, no user-defined network, no volume but factory-dispatcher-m2: or a SweepError naming what is left. */
-export async function checkSwept({ sudo } = {}) {
+/**
+ * No container, no user-defined network, no volume but factory-dispatcher-m2: or a SweepError saying what is left,
+ * containers and networks by count and the daemon's IDs, volumes by count (a volume has no ID but its name), never a
+ * name (#0-284).
+ */
+export async function checkSwept({ sudo, stateDir } = {}) {
   const left = [];
-  const c = await containers({ sudo });
+  const c = await containers({ sudo, stateDir });
   if (c.length > 0) {
     left.push(`containers ${listed(c)}`);
   }
-  const n = await networks({ sudo });
+  const n = await networks({ sudo, stateDir });
   if (n.length > 0) {
     left.push(`networks ${listed(n)}`);
   }
-  const v = (await volumes({ sudo })).filter((name) => name !== M2_VOLUME);
+  const v = (await volumes({ sudo, stateDir })).filter((name) => name !== M2_VOLUME);
   if (v.length > 0) {
-    left.push(`volumes ${v.join(', ')}`);
+    left.push(`volumes ${v.length} (by count: a volume's name is not quoted)`);
   }
   if (left.length > 0) {
     throw new SweepError(`the sweep left ${left.join('; ')} on factory's daemon: the run is refused until `
@@ -155,41 +168,85 @@ export async function checkSwept({ sudo } = {}) {
 }
 
 /** The task's network, labelled with the run: the run is visible from here on. */
-export async function createTaskNetwork({ runId, sudo }) {
+export async function createTaskNetwork({ runId, sudo, stateDir }) {
   const { network } = taskPaths(runId);
-  await docker(['network', 'create', '--label', `${TASK_LABEL}=${runId}`, network], { sudo });
+  await docker(['network', 'create', '--label', `${TASK_LABEL}=${runId}`, network], { sudo, stateDir });
   return network;
 }
 
 /** The task's volumes: its own ~/.claude, labelled with the run, and the shared ~/.m2 cache (made once, kept). */
-export async function createTaskVolumes({ runId, sudo }) {
+export async function createTaskVolumes({ runId, sudo, stateDir }) {
   const { claudeVolume } = taskPaths(runId);
-  await docker(['volume', 'create', '--label', `${TASK_LABEL}=${runId}`, claudeVolume], { sudo });
-  await docker(['volume', 'create', M2_VOLUME], { sudo });
+  await docker(['volume', 'create', '--label', `${TASK_LABEL}=${runId}`, claudeVolume], { sudo, stateDir });
+  await docker(['volume', 'create', M2_VOLUME], { sudo, stateDir });
 }
 
 /** Removes what carries the run's label alone: its containers, then its networks, then its volumes. */
-export async function removeOwnObjects({ runId, sudo }) {
+export async function removeOwnObjects({ runId, sudo, stateDir }) {
   const label = `label=${TASK_LABEL}=${runId}`;
-  const c = await containers({ sudo, filter: [label] });
+  const c = await containers({ sudo, stateDir, filter: [label] });
   if (c.length > 0) {
-    await docker(['rm', '-f', '-v', ...c.map(({ id }) => id)], { sudo });
+    await docker(['rm', '-f', '-v', ...c.map(({ id }) => id)], { sudo, stateDir });
   }
-  const n = await networks({ sudo, filter: [label] });
+  const n = await networks({ sudo, stateDir, filter: [label] });
   if (n.length > 0) {
-    await docker(['network', 'rm', ...n.map(({ id }) => id)], { sudo });
+    await docker(['network', 'rm', ...n.map(({ id }) => id)], { sudo, stateDir });
   }
-  const v = await volumes({ sudo, filter: [label] });
+  const v = await volumes({ sudo, stateDir, filter: [label] });
   if (v.length > 0) {
-    await docker(['volume', 'rm', ...v], { sudo });
+    await docker(['volume', 'rm', ...v], { sudo, stateDir });
   }
 }
 
 /** Kills the running containers that carry the run's label (a call past its time). */
-export async function killTask({ runId, sudo }) {
-  const c = await containers({ sudo, all: false, filter: [`label=${TASK_LABEL}=${runId}`] });
+export async function killTask({ runId, sudo, stateDir }) {
+  const c = await containers({ sudo, stateDir, all: false, filter: [`label=${TASK_LABEL}=${runId}`] });
   if (c.length > 0) {
-    await docker(['kill', ...c.map(({ id }) => id)], { sudo });
+    await docker(['kill', ...c.map(({ id }) => id)], { sudo, stateDir });
   }
   return c.map(({ name }) => name);
+}
+
+/** What factory's daemon must report (#0-284, ADR-0062 point 6 as amended): the build VM's, Docker 29.9.3's there. */
+export const DAEMON_SECURITY_OPTIONS = Object.freeze(['name=seccomp,profile=builtin', 'name=rootless',
+  'name=cgroupns']);
+export const DAEMON_DEFAULT_RUNTIME = 'runc';
+
+/** The daemon's options are not the VM's: no container of a task is made on it. */
+export class DaemonOptionsError extends Error {}
+
+/**
+ * `docker info`'s SecurityOptions, exactly DAEMON_SECURITY_OPTIONS (in any order, each once), and its DefaultRuntime,
+ * runc: a daemon that is not rootless, has seccomp off or another profile, or another runtime by default, is refused
+ * before the task's first container. What the daemon reported is not quoted: the refusal says which rule failed and how
+ * many entries it found.
+ *
+ * @param {{ stateDir: string, sudo?: string }} options
+ */
+export async function checkDaemonOptions({ stateDir, sudo }) {
+  const { stdout } = await docker(['info', '--format', '{{json .}}'], { sudo, stateDir });
+  let info;
+  try {
+    info = JSON.parse(stdout.toString('utf8'));
+  } catch {
+    throw new DockerOutputError('docker info\'s answer is not JSON');
+  }
+  const options = info?.SecurityOptions;
+  if (!Array.isArray(options) || !options.every((o) => typeof o === 'string')) {
+    throw new DaemonOptionsError('factory\'s daemon reports no list of security options: the task is refused before '
+      + 'its first container');
+  }
+  const missing = DAEMON_SECURITY_OPTIONS.filter((o) => !options.includes(o));
+  const other = options.filter((o) => !DAEMON_SECURITY_OPTIONS.includes(o)).length;
+  const twice = new Set(options).size !== options.length;
+  if (missing.length > 0 || other > 0 || twice) {
+    throw new DaemonOptionsError(`factory's daemon's security options are not the VM's (${DAEMON_SECURITY_OPTIONS
+      .join('; ')}): ${missing.length > 0 ? `missing ${missing.join('; ')}` : 'none missing'}, ${other} other `
+      + `entr${other === 1 ? 'y' : 'ies'} (not quoted)${twice ? ', one twice' : ''}: the task is refused before its `
+      + 'first container');
+  }
+  if (info.DefaultRuntime !== DAEMON_DEFAULT_RUNTIME) {
+    throw new DaemonOptionsError(`factory's daemon's default runtime is not ${DAEMON_DEFAULT_RUNTIME} (what it reports `
+      + 'is not quoted): the task is refused before its first container');
+  }
 }

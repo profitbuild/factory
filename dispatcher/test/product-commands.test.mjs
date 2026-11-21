@@ -38,13 +38,13 @@ async function setUp(productOptions) {
   const adapter = await readAdapter({ repoDir: product.repoDir, base: product.base, git: REAL_GIT });
   const ready = await setUpTaskContainer({ stateDir, repoDir: product.repoDir, adapter,
     task: await createTask(stateDir, { runId: RUN_ID, item: '0-278', baseSha: product.base }), helperImage: HELPER_IMAGE,
-    sudo: fake.sudo, git: REAL_GIT });
+    ...fake.runner, git: REAL_GIT });
   assert.ok(ready.container, ready.task.reason);
   const work = join(fake.tasks, RUN_ID, 'w');
   // No adapter and no base are given: runProductCommand reads the base from the task, and the base's adapter itself
   // (review round 1, e; round 2, 4).
   const run = (which = 'gate', extra = {}) => runProductCommand({ container: ready.container, repoDir: product.repoDir,
-    task: ready.task, which, limitS: 30, sudo: fake.sudo, git: REAL_GIT, ...extra });
+    task: ready.task, which, limitS: 30, ...fake.runner, git: REAL_GIT, ...extra });
   const onBase = (baseSha) => ({ task: { ...ready.task, baseSha } });
   return { dir, product, fake, container: ready.container, task: ready.task, work, run, onBase };
 }
@@ -115,8 +115,8 @@ test('G: a failure to unpack, or no directory printed, is refused without the ag
   const secret = 'ghs' + `_${'q'.repeat(36)}`;
   s.fake.update((state) => { state.scenario.execFails = { stderr: `tar: ${secret}`, code: 2 }; });
   await assert.rejects(s.run(), (error) => error instanceof ProductCommandError
-    && error.message === 'the trusted paths could not be put into the task container (exit 2); its stderr, the '
-      + 'agent\'s side\'s, is not quoted' && !error.message.includes(secret));
+    && /^the trusted paths could not be put into the task container \(exit 2\); its stderr, the agent's side's, is not quoted: it is kept in \S+$/
+      .test(error.message) && !error.message.includes(secret));
   s.fake.update((state) => { delete state.scenario.execFails; });
   await assert.rejects(s.run('queue'), TypeError);
 });
@@ -188,5 +188,7 @@ test('G: the directory the first call prints is used only in TRUSTED_DIR\'s shap
     assert.throws(() => unpackedDir(out(text)), (error) => error instanceof ProductCommandError
       && /no directory of \/tmp\/factory-trusted\.XXXXXXXX printed/.test(error.message), JSON.stringify(text));
   }
-  assert.throws(() => unpackedDir(out('/tmp/factory-trusted.AbC123xY\n', 1)), /\(exit 1\); its stderr/);
+  assert.throws(() => unpackedDir(out('/tmp/factory-trusted.AbC123xY\n', 1)), /\(exit 1\); it wrote nothing to stderr$/);
+  assert.throws(() => unpackedDir({ ...out('x', 2), stderrFile: '/state/stderr/x.log' }),
+    /\(exit 2\); its stderr, the agent's side's, is not quoted: it is kept in \/state\/stderr\/x\.log$/);
 });

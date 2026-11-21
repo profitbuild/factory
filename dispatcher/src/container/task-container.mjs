@@ -7,13 +7,20 @@
  * symlink, and its build context a directory that is not one (a symlink would point the build outside the clone);
  * parsed by jsonc.mjs and checked by task-config.mjs.
  *
- * upContainer: `devcontainer up --config <the override> --workspace-folder <the clone> --id-label
- * factory.task=<runId>` through the starter, as `factory` (`--config`, not `--override-config`: see upContainer and
- * work-dir.mjs); then the container is inspected and held to what the
- * dispatcher asked for: its label, not privileged, its capabilities the list's, its mounts exactly the dispatcher's
- * and the listed features' (so /opt/factory read-only, and no mount the product or its image chose); its image
- * recorded by its ID (sha256:<64 hex>) in task.json, and a task resumed runs a container of that ID, never a tag; the
- * image's devcontainer.metadata label held to the list; and `timeout` must be in the image (a probe through it).
+ * The image is checked before any container is made of it (incident-platform backlog #0-284, ADR-0062 point 4 as
+ * amended): buildImage is `devcontainer build --config <the build configuration> --image-name factory-task-<runId>`,
+ * a call of its own, its name unique to the run; imageIdOf reads the image's ID from that name once; from there on
+ * the image is named by its ID alone: checkImage holds its devcontainer.metadata label to the list (no lifecycle
+ * command and no entry of the label runs before), environment.mjs records the ID in task.json, and upContainer is
+ * `devcontainer up --config <the override> --workspace-folder <the clone> --id-label factory.task=<runId>`, the
+ * override `{ image: <ID> }` with neither a build nor a feature (`--config`, not `--override-config`: see
+ * upContainer and work-dir.mjs). Then the container is inspected and held to what the dispatcher asked for: its label,
+ * its image the ID (a container of another image is refused), its HostConfig field by field to host-config.mjs's
+ * closed table (not privileged, runc, its capabilities the configuration's, a feature's security options, Docker's
+ * defaults for the rest), its mounts exactly the dispatcher's and the listed features' (so /opt/factory read-only, and
+ * no mount the product or its image chose); and `timeout` must be in the image (a probe through it). A refusal names
+ * a position, a count or an ID the daemon gave (hex), never a value it returned: a label's key, a mount's target, a
+ * capability's name, a container's name are the agent's side's to choose (#0-284).
  *
  * execInTask: every call in the container is `docker exec ... timeout -s TERM -k <grace>s <limit>s <command>`, since
  * `docker exec` without a tty forwards no signal to what it started (probed 2026-11-20). Past the limit (timeout's 124,
@@ -31,18 +38,24 @@ import { MODES, blobOf, treeEntry } from '../product/base-tree.mjs';
 import { blockTask } from '../state/tasks.mjs';
 import { killTask } from './daemon.mjs';
 import { parseJsonc } from './jsonc.mjs';
-import { FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, TASK_LABEL, WORKSPACE, taskPaths } from './paths.mjs';
-import { ContainerTimeoutError, mustRun, runContainerCommand } from './run-container.mjs';
+import { hostConfigViolations } from './host-config.mjs';
+import { expectedMounts } from './mounts.mjs';
+import { TASK_LABEL, WORKSPACE, taskPaths } from './paths.mjs';
+import { ContainerTimeoutError, mustRun, runContainerCommand, stderrNote } from './run-container.mjs';
 import { checkImageMetadata, checkTaskConfig } from './task-config.mjs';
+
+export { expectedMounts };
 
 /** The container is not what the dispatcher asked for, or a file of the configuration is not in the base. */
 export class TaskContainerError extends Error {}
 /** A call in the container ran past its limit. */
 export class CallTimeoutError extends Error {}
 
-/** The longest `devcontainer up` may run: it builds the image. */
-export const UP_TIMEOUT_MS = 60 * 60 * 1000;
-/** The most of its output kept: a build's log. */
+/** The longest `devcontainer build` may run, and the most of its stdout kept: a build's log. */
+export const BUILD_TIMEOUT_MS = 60 * 60 * 1000;
+export const BUILD_MAX_OUTPUT = 64 * 1024 * 1024;
+/** The longest `devcontainer up` may run, from an image built already, and the most of its stdout kept. */
+export const UP_TIMEOUT_MS = 30 * 60 * 1000;
 export const UP_MAX_OUTPUT = 64 * 1024 * 1024;
 /** The dispatcher's margin past a call's limit and grace before it kills the task's containers itself. */
 export const CALL_MARGIN_S = 30;
@@ -91,28 +104,20 @@ export async function readTaskConfig({ repoDir, base, path, git }) {
   return carried;
 }
 
-/** The mounts the container must have, exactly: the dispatcher's and the listed features'. */
-export function expectedMounts(runId, carried) {
-  const { work, claudeVolume } = taskPaths(runId);
-  const home = `/home/${carried.remoteUser}`;
-  return [
-    { Type: 'bind', Source: work, Destination: WORKSPACE, RW: true },
-    { Type: 'bind', Source: FACTORY_CHECKOUT, Destination: FACTORY_MOUNT, RW: false },
-    { Type: 'volume', Source: claudeVolume, Destination: `${home}/.claude`, RW: true },
-    { Type: 'volume', Source: M2_VOLUME, Destination: `${home}/.m2`, RW: true },
-    ...carried.features.flatMap((f) => (f.metadata.mounts ?? []).map((m) => ({
-      Type: m.type, Source: m.source, Destination: m.target, RW: m.readonly !== true }))),
-  ];
-}
-
 const mountKey = (m) => JSON.stringify([m.Type, m.Source, m.Destination, m.RW]);
 
 /**
- * The container `info` (docker container inspect's) held to what the dispatcher asked for.
+ * The container `info` (docker container inspect's) held to what the dispatcher asked for (#0-284: its image the ID
+ * recorded, its HostConfig to the closed table). A refusal names positions and counts, never a value of `info`.
  *
+ * @param {object} info
+ * @param {{ containerId: string, runId: string, carried: object, imageId: string }} options
  * @returns {string} its image's ID
  */
-export function checkContainer(info, { containerId, runId, carried, imageId = null }) {
+export function checkContainer(info, { containerId, runId, carried, imageId }) {
+  if (!IMAGE_ID.test(imageId ?? '')) {
+    throw new TypeError('checkContainer: imageId must be the recorded image, sha256:<64 hex>');
+  }
   if (typeof info !== 'object' || info === null || info.Id !== containerId) {
     refuse('docker container inspect did not describe the container devcontainer up made');
   }
@@ -122,32 +127,42 @@ export function checkContainer(info, { containerId, runId, carried, imageId = nu
   if (!IMAGE_ID.test(info.Image ?? '')) {
     refuse('the task container\'s image is not an ID, sha256:<64 hex>');
   }
-  if (imageId !== null && info.Image !== imageId) {
-    refuse(`the task container runs ${info.Image}, not the image recorded for the task, ${imageId}`);
+  if (info.Image !== imageId) {
+    refuse(`the task container runs ${info.Image}, not the image checked and recorded for the task, ${imageId}`);
   }
   if (info.HostConfig?.Privileged !== false) {
     refuse('the task container is privileged');
   }
-  const caps = (info.HostConfig?.CapAdd ?? []).map((c) => String(c).replace(/^CAP_/, ''));
-  const extra = caps.filter((c) => !carried.capAdd.includes(c));
+  const caps = Array.isArray(info.HostConfig?.CapAdd) ? info.HostConfig.CapAdd : [];
+  const extra = caps.map((c, i) => ({ c: String(c).replace(/^CAP_/, ''), i }))
+    .filter(({ c }) => !carried.capAdd.includes(c));
   if (extra.length > 0) {
-    refuse(`the task container adds capabilities off the configuration's: ${extra.join(', ')}`);
+    refuse(`the task container adds ${extra.length} capabilit${extra.length === 1 ? 'y' : 'ies'} off the `
+      + `configuration's, at CapAdd[${extra.map(({ i }) => i).join('], [')}] (not named)`);
   }
-  const have = (info.Mounts ?? []).map((m) => mountKey({ Type: m.Type, Source: m.Type === 'volume' ? m.Name : m.Source,
-    Destination: m.Destination, RW: m.RW })).sort();
-  const want = expectedMounts(runId, carried).map(mountKey).sort();
-  if (JSON.stringify(have) !== JSON.stringify(want)) {
-    const unexpected = have.filter((k) => !want.includes(k)).map((k) => JSON.parse(k)[2]);
-    const missing = want.filter((k) => !have.includes(k)).map((k) => JSON.parse(k)[2]);
-    refuse(`the task container's mounts are not the dispatcher's: ${unexpected.length > 0
-      ? `unexpected at ${unexpected.join(', ')}` : ''}${unexpected.length > 0 && missing.length > 0 ? '; ' : ''}${
-      missing.length > 0 ? `missing at ${missing.join(', ')}` : ''}`);
+  const mounts = Array.isArray(info.Mounts) ? info.Mounts : [];
+  const have = mounts.map((m) => mountKey({ Type: m?.Type, Source: m?.Type === 'volume' ? m?.Name : m?.Source,
+    Destination: m?.Destination, RW: m?.RW }));
+  const want = expectedMounts(runId, carried);
+  const wanted = want.map(mountKey);
+  const unexpected = have.map((k, i) => ({ k, i })).filter(({ k }) => !wanted.includes(k)).map(({ i }) => i);
+  const missing = want.filter((m, i) => !have.includes(wanted[i])).map((m) => m.Destination);
+  if (unexpected.length > 0 || missing.length > 0 || have.length !== new Set(have).size) {
+    // The missing ones are the dispatcher's own targets, so they are named; an unexpected one is the daemon's answer.
+    refuse(`the task container's mounts are not the dispatcher's: ${[
+      unexpected.length > 0 ? `${unexpected.length} unexpected, at Mounts[${unexpected.join('], [')}] (not named)` : '',
+      missing.length > 0 ? `missing at ${missing.join(', ')}` : '',
+      have.length !== new Set(have).size ? 'one twice' : ''].filter(Boolean).join('; ')}`);
+  }
+  const violations = hostConfigViolations(info.HostConfig, { runId, carried });
+  if (violations.length > 0) {
+    refuse(`the task container's HostConfig is not the dispatcher's: ${violations.join('; ')}`);
   }
   return info.Image;
 }
 
-async function inspectJson(args, what, sudo) {
-  const { stdout } = await mustRun({ program: 'docker', args, sudo });
+async function inspectJson(args, what, { sudo, stateDir }) {
+  const { stdout } = await mustRun({ program: 'docker', args, sudo, stateDir });
   try {
     return JSON.parse(stdout.toString('utf8'));
   } catch {
@@ -155,47 +170,105 @@ async function inspectJson(args, what, sudo) {
   }
 }
 
+/** The CLI's last line of stdout, its JSON outcome. */
+function outcomeOf(stdout, what) {
+  try {
+    return JSON.parse(stdout.toString('utf8').trim().split('\n').at(-1));
+  } catch {
+    return refuse(`${what} did not end with its JSON outcome`);
+  }
+}
+
 /**
- * `devcontainer up` of the task, its container checked; the override written before (work-dir.mjs).
+ * `devcontainer build` of the task's image (#0-284): the build configuration (work-dir.mjs, writeBuildConfig) and
+ * the image's name, factory-task-<runId>, unique to the run; a call of its own, which makes no container and runs no
+ * lifecycle command.
  *
- * @param {{ runId: string, carried: object, imageId?: string | null, sudo?: string }} options
- * @returns {Promise<{ runId: string, id: string, imageId: string, remoteUser: string }>}
+ * @param {{ runId: string, stateDir: string, sudo?: string }} options
+ * @returns {Promise<string>} the image's name
  */
-export async function upContainer({ runId, carried, imageId = null, sudo }) {
+export async function buildImage({ runId, sudo, stateDir }) {
+  const { work, buildConfig, image } = taskPaths(runId);
+  const { stdout } = await mustRun({ program: 'devcontainer', sudo, stateDir, timeoutMs: BUILD_TIMEOUT_MS,
+    outputLimit: BUILD_MAX_OUTPUT,
+    args: ['build', '--config', buildConfig, '--workspace-folder', work, '--image-name', image, '--log-format',
+      'json'] });
+  const outcome = outcomeOf(stdout, 'devcontainer build');
+  if (outcome?.outcome !== 'success') {
+    refuse('devcontainer build did not report an image built');
+  }
+  return image;
+}
+
+/**
+ * The ID of the image named `name`, read once (#0-284): from here on the image is named by it alone.
+ *
+ * @param {{ name: string, stateDir: string, sudo?: string }} options
+ * @returns {Promise<string>} sha256:<64 hex>
+ */
+export async function imageIdOf({ name, sudo, stateDir }) {
+  const { stdout } = await mustRun({ program: 'docker', sudo, stateDir,
+    args: ['image', 'inspect', '--format', '{{.Id}}', name] });
+  const id = stdout.toString('utf8').trim();
+  if (!IMAGE_ID.test(id)) {
+    refuse('docker image inspect did not give the built image\'s ID, sha256:<64 hex>');
+  }
+  return id;
+}
+
+/**
+ * The image `imageId`'s devcontainer.metadata label held to the list (task-config.mjs, checkImageMetadata), before
+ * any container is made of it (#0-284): a label off the list ends the task with no container of the task's.
+ *
+ * @param {{ imageId: string, carried: object, stateDir: string, sudo?: string }} options
+ */
+export async function checkImage({ imageId, carried, sudo, stateDir }) {
+  if (!IMAGE_ID.test(imageId ?? '')) {
+    throw new TypeError('checkImage: imageId must be sha256:<64 hex>');
+  }
+  const labels = await inspectJson(['image', 'inspect', '--format', '{{json .Config.Labels}}', imageId],
+    'docker image inspect\'s answer', { sudo, stateDir });
+  checkImageMetadata(labels?.['devcontainer.metadata'], { carried });
+}
+
+/**
+ * `devcontainer up` of the task from the image `imageId`, checked and recorded before, its container checked; the
+ * override, `{ image: <ID> }` and the container's fields, written before (work-dir.mjs).
+ *
+ * @param {{ runId: string, carried: object, imageId: string, stateDir: string, sudo?: string }} options
+ * @returns {Promise<{ runId: string, id: string, imageId: string, remoteUser: string, stateDir: string }>} `stateDir`
+ *   where the stderr of every call in the container is kept
+ */
+export async function upContainer({ runId, carried, imageId, sudo, stateDir }) {
   const { work, override } = taskPaths(runId);
-  const { stdout } = await mustRun({ program: 'devcontainer', sudo, timeoutMs: UP_TIMEOUT_MS, outputLimit: UP_MAX_OUTPUT,
+  const { stdout } = await mustRun({ program: 'devcontainer', sudo, stateDir, timeoutMs: UP_TIMEOUT_MS,
+    outputLimit: UP_MAX_OUTPUT,
     // `--config`, not `--override-config`: the CLI writes the features' lockfile beside the configuration file, which
     // with `--override-config` is the clone's .devcontainer/devcontainer.json, and `factory` may not write in the clone
     // (work-dir.mjs). The override's paths are absolute already, and the product's devcontainer.json is not read.
     args: ['up', '--config', override, '--workspace-folder', work, '--id-label', `${TASK_LABEL}=${runId}`,
       '--log-format', 'json'] });
-  let outcome;
-  try {
-    outcome = JSON.parse(stdout.toString('utf8').trim().split('\n').at(-1));
-  } catch {
-    refuse('devcontainer up did not end with its JSON outcome');
-  }
+  const outcome = outcomeOf(stdout, 'devcontainer up');
   if (outcome?.outcome !== 'success' || !CONTAINER_ID.test(outcome.containerId ?? '')) {
     refuse('devcontainer up did not report a container made');
   }
   const info = await inspectJson(['container', 'inspect', '--format', '{{json .}}', outcome.containerId],
-    'docker container inspect\'s answer', sudo);
+    'docker container inspect\'s answer', { sudo, stateDir });
   const image = checkContainer(info, { containerId: outcome.containerId, runId, carried, imageId });
-  const labels = await inspectJson(['image', 'inspect', '--format', '{{json .Config.Labels}}', image],
-    'docker image inspect\'s answer', sudo);
-  checkImageMetadata(labels?.['devcontainer.metadata'], { carried });
-  return { runId, id: outcome.containerId, imageId: image, remoteUser: carried.remoteUser };
+  return { runId, id: outcome.containerId, imageId: image, remoteUser: carried.remoteUser, stateDir };
 }
 
 /**
  * A call in the task container under `timeout`; a call past its limit kills the task's containers and is a
  * CallTimeoutError.
  *
- * @param {{ container: { runId: string, id: string, remoteUser: string }, args: string[], limitS: number,
+ * @param {{ container: { runId: string, id: string, remoteUser: string, stateDir: string }, args: string[],
+ *   limitS: number,
  *   graceS?: number, input?: Buffer | string, env?: Record<string, string>, outputLimit?: number, sudo?: string,
  *   marginS?: number }} options `env` what the call is given (names and literal values, no secret: they are
  *   arguments of sudo's); `marginS` the dispatcher's own margin past the limit and the grace
- * @returns {Promise<{ code: number, stdout: Buffer, stderr: string }>}
+ * @returns {Promise<{ code: number, stdout: Buffer, stderrFile: string | null }>} the call's stderr kept in a file
+ *   of the state, never returned (#0-284)
  */
 export async function execInTask({
   container, args, limitS, graceS = 10, input, env = {}, outputLimit, sudo, marginS = CALL_MARGIN_S,
@@ -216,8 +289,9 @@ export async function execInTask({
     return ['-e', `${name}=${value}`];
   });
   const result = await runContainerCommand({
-    program: 'docker', sudo, input, outputLimit, timeoutMs: (limitS + graceS + marginS) * 1000,
-    onTimeout: () => killTask({ runId: container.runId, sudo }),
+    program: 'docker', sudo, stateDir: container.stateDir, input, outputLimit,
+    timeoutMs: (limitS + graceS + marginS) * 1000,
+    onTimeout: () => killTask({ runId: container.runId, sudo, stateDir: container.stateDir }),
     args: ['exec', '-i', '--user', container.remoteUser, '-w', WORKSPACE, ...flags, container.id,
       'timeout', '-s', 'TERM', '-k', `${graceS}s`, `${limitS}s`, ...args],
   }).catch((error) => {
@@ -228,7 +302,7 @@ export async function execInTask({
     throw error;
   });
   if (TIMED_OUT.has(result.code)) {
-    await killTask({ runId: container.runId, sudo });
+    await killTask({ runId: container.runId, sudo, stateDir: container.stateDir });
     throw new CallTimeoutError(`the call ${args[0]} in the task container ran past ${limitS} s (timeout's exit `
       + `${result.code}): its processes were ended`);
   }
@@ -256,7 +330,7 @@ export async function probeTimeout({ container, sudo }) {
   const result = await execInTask({ container, args: ['true'], limitS: 30, graceS: 5, sudo });
   if (result.code !== 0) {
     refuse(`the task image cannot run a call under timeout (exit ${result.code}): the image must hold coreutils' `
-      + 'timeout (its stderr, the agent\'s side\'s, is not quoted)');
+      + `timeout (${stderrNote(result.stderrFile)})`);
   }
 }
 
@@ -272,6 +346,6 @@ export async function probeTools({ container, sudo }) {
     args: ['sh', '-c', 'for t in "$@"; do command -v -- "$t" >/dev/null || exit 1; done', 'probe', ...TRUSTED_TOOLS] });
   if (result.code !== 0) {
     refuse(`the task image cannot run the product's commands from the base (exit ${result.code}): the image must hold `
-      + `${TRUSTED_TOOLS.join(', ')} (its stderr, the agent's side's, is not quoted)`);
+      + `${TRUSTED_TOOLS.join(', ')} (${stderrNote(result.stderrFile)})`);
   }
 }

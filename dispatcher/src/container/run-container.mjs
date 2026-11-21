@@ -17,17 +17,29 @@
  *   runcwd, /. The starter passes no variable, no directory and no -D: the rule decides all three;
  * - no argument shaped like a secret: sudo logs a command's arguments (4.6's token goes on stdin or the like). The
  *   refusal names the argument's position, never its value;
- * - its output bounded; its time bounded by a timer of its own: past it, `onTimeout` runs (the caller's kill of the
+ * - its stdout bounded; its time bounded by a timer of its own: past it, `onTimeout` runs (the caller's kill of the
  *   task's containers, through this starter), the child is signalled (sudo runs as root, so the signal may be refused:
  *   that is ignored), and the call is refused at once, its streams dropped, without waiting for them to close: an
- *   orphaned CLI can hold them open (ADR-0062 point 7).
+ *   orphaned CLI can hold them open (ADR-0062 point 7);
+ * - its stderr never returned (incident-platform backlog #0-284, ADR-0062 point 6): docker, devcontainer and the task
+ *   container all run as `factory`, the agent's side, so what they write there is the agent's, and from 4.6 on the
+ *   container holds a token its code could print. The starter keeps it, up to STDERR_KEPT bytes, in a file of its own,
+ *   `$FACTORY_STATE_DIR/stderr/<time>-<command>-<random>.log` (the directory 700, the file 600, made with O_EXCL and
+ *   O_NOFOLLOW), for the owner to read on the VM, and gives the caller only that file's path (`stderrFile`, null
+ *   when the call wrote nothing there). A refusal names the command, the exit code and the path; no module of src/
+ *   but this one holds the text (test/starter-stderr-static.test.mjs).
  * test/child-process-static.test.mjs holds that no other module of src/ starts a process but run-git.mjs (git) and
  * lock.mjs (flock); docker and devcontainer are never started but here.
  */
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { constants } from 'node:fs';
+import { open } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
 
 import { ConfigError, refuseSecretShaped } from '../config/settings.mjs';
 import { childEnv } from '../process/child-env.mjs';
+import { ensureOwnDirectory } from '../state/files.mjs';
 
 /** sudo, docker and the devcontainer CLI, by their full paths (the VM's provisioning installs them there). */
 export const SUDO = '/usr/bin/sudo';
@@ -39,6 +51,10 @@ export const SUDO_OPTIONS = Object.freeze(['-n', '-H', '-u', AS_USER, '--']);
 /** The longest a call may run, and the most of stdout and of stderr kept, unless the caller says otherwise. */
 export const CONTAINER_TIMEOUT_MS = 5 * 60 * 1000;
 export const CONTAINER_MAX_OUTPUT = 4 * 1024 * 1024;
+/** The most of a call's stderr its file keeps (#0-284): the rest is counted, not kept, and the call is not stopped. */
+export const STDERR_KEPT = 1024 * 1024;
+/** The directory of the stderr files, under $FACTORY_STATE_DIR. */
+export const STDERR_DIR = 'stderr';
 
 /** docker's management commands, named with their subcommand: `docker volume rm`. */
 const MANAGEMENT = new Set(['container', 'image', 'network', 'volume']);
@@ -47,19 +63,61 @@ const MANAGEMENT = new Set(['container', 'image', 'network', 'volume']);
 export const commandName = (program, args) => [program, args[0], ...(MANAGEMENT.has(args[0]) ? [args[1]] : [])]
   .join(' ');
 
+/**
+ * How a refusal points at a call's stderr: the file's path, never its text (#0-284). For a template literal: the path
+ * is the starter's result's `stderrFile`.
+ *
+ * @param {string | null} file
+ */
+export const stderrNote = (file) => (file === null ? 'it wrote nothing to stderr'
+  : `its stderr, the agent's side's, is not quoted: it is kept in ${file}`);
+
+/** The file name's part that says which call it was: the command's words, letters and digits only. */
+const fileWord = (what) => what.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
+
+/**
+ * Writes `kept` (the first STDERR_KEPT bytes) and a line for the `dropped` rest to a new file of the stderr
+ * directory, 600, never over another file nor through a link.
+ *
+ * @returns {Promise<string | null>} its path, or null when there was nothing
+ */
+async function keepStderr({ stateDir, what, kept, dropped }) {
+  if (kept.length === 0 && dropped === 0) {
+    return null;
+  }
+  const dir = join(stateDir, STDERR_DIR);
+  await ensureOwnDirectory(dir);
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  const path = join(dir, `${stamp}-${fileWord(what)}-${randomBytes(4).toString('hex')}.log`);
+  const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600);
+  try {
+    await handle.writeFile(kept);
+    if (dropped > 0) {
+      await handle.writeFile(`\n[the call wrote ${dropped} more bytes to stderr, not kept: the file keeps `
+        + `${STDERR_KEPT}]\n`);
+    }
+  } finally {
+    await handle.close();
+  }
+  return path;
+}
+
 /** A container command could not be run, wrote too much, or was refused before it ran. */
 export class ContainerRunError extends Error {}
 /** A container command ran past its time. */
 export class ContainerTimeoutError extends ContainerRunError {}
 
 /**
- * @param {{ program: 'docker' | 'devcontainer', args: string[], input?: Buffer | string, timeoutMs?: number,
- *   outputLimit?: number, onTimeout?: () => Promise<void>, baseEnv?: Record<string, string | undefined>,
- *   sudo?: string }} options `sudo` for the tests only (a fake that checks the rest of the command line)
- * @returns {Promise<{ code: number, stdout: Buffer, stderr: string }>}
+ * @param {{ program: 'docker' | 'devcontainer', args: string[], stateDir: string, input?: Buffer | string,
+ *   timeoutMs?: number, outputLimit?: number, onTimeout?: () => Promise<void>,
+ *   baseEnv?: Record<string, string | undefined>, sudo?: string }} options `stateDir` $FACTORY_STATE_DIR, where the
+ *   call's stderr is kept; `outputLimit` stdout's; `sudo` for the tests only (a fake that checks the rest of the
+ *   command line)
+ * @returns {Promise<{ code: number, stdout: Buffer, stderrFile: string | null }>} never the stderr's text (#0-284)
  */
 export function runContainerCommand({
-  program, args, input, timeoutMs = CONTAINER_TIMEOUT_MS, outputLimit = CONTAINER_MAX_OUTPUT, onTimeout,
+  program, args, stateDir, input, timeoutMs = CONTAINER_TIMEOUT_MS, outputLimit = CONTAINER_MAX_OUTPUT, onTimeout,
   baseEnv = process.env, sudo = SUDO,
 }) {
   if (!Object.hasOwn(PROGRAMS, program)) {
@@ -67,6 +125,9 @@ export function runContainerCommand({
   }
   if (!Array.isArray(args) || args.length === 0 || !args.every((a) => typeof a === 'string')) {
     throw new TypeError('runContainerCommand: args must be a non-empty array of strings');
+  }
+  if (typeof stateDir !== 'string' || !isAbsolute(stateDir)) {
+    throw new TypeError('runContainerCommand: stateDir must be $FACTORY_STATE_DIR, an absolute path');
   }
   try {
     refuseSecretShaped(Object.fromEntries(args.map((a, i) => [`argument ${i + 1}`, a])));
@@ -83,22 +144,32 @@ export function runContainerCommand({
       stdio: ['pipe', 'pipe', 'pipe'],
       env: childEnv({ allow: [], baseEnv }),
     });
-    const chunks = { stdout: [], stderr: [] };
-    const sizes = { stdout: 0, stderr: 0 };
+    const stdout = [];
+    let stdoutSize = 0;
+    const stderr = [];
+    let stderrSize = 0;
     let failure = null;
     let settled = false;
     let timedOut = false;
+    // Every end of the call keeps its stderr first, then settles: the refusal or the result names the file.
     const finish = (error, result) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
-      if (error) {
-        reject(error);
-      } else {
-        resolve(result);
-      }
+      const kept = Buffer.concat(stderr);
+      keepStderr({ stateDir, what, kept, dropped: stderrSize - kept.length }).then((stderrFile) => {
+        if (error) {
+          if (stderrFile !== null) {
+            error.message = `${error.message}; ${stderrNote(stderrFile)}`;
+          }
+          reject(error);
+        } else {
+          resolve({ ...result, stderrFile });
+        }
+      }, (keeping) => reject(new ContainerRunError(`${what}: its stderr could not be kept in ${STDERR_DIR}/ of the `
+        + `state (${keeping.code ?? keeping.message})`)));
     };
     const drop = () => {
       child.stdout.destroy();
@@ -125,10 +196,10 @@ export function runContainerCommand({
       }
       finish(new ContainerTimeoutError(`${what} ran past ${timeoutMs} ms: stopped, its output no longer read${killed}`));
     }, timeoutMs);
-    const keep = (stream) => (chunk) => {
-      sizes[stream] += chunk.length;
-      if (sizes[stream] > outputLimit) {
-        failure ??= new ContainerRunError(`${what} wrote more than ${outputLimit} bytes to its ${stream}: stopped`);
+    child.stdout.on('data', (chunk) => {
+      stdoutSize += chunk.length;
+      if (stdoutSize > outputLimit) {
+        failure ??= new ContainerRunError(`${what} wrote more than ${outputLimit} bytes to its stdout: stopped`);
         try {
           child.kill('SIGKILL');
         } catch {
@@ -138,10 +209,16 @@ export function runContainerCommand({
         finish(failure);
         return;
       }
-      chunks[stream].push(chunk);
-    };
-    child.stdout.on('data', keep('stdout'));
-    child.stderr.on('data', keep('stderr'));
+      stdout.push(chunk);
+    });
+    // Up to STDERR_KEPT bytes kept, the rest counted: a call is never stopped for what it writes there.
+    child.stderr.on('data', (chunk) => {
+      const room = STDERR_KEPT - stderrSize;
+      if (room > 0) {
+        stderr.push(chunk.length <= room ? chunk : chunk.subarray(0, room));
+      }
+      stderrSize += chunk.length;
+    });
     child.on('error', (error) => finish(new ContainerRunError(`${sudo} could not be run: ${error.code ?? error.message}`)));
     child.stdin.on('error', () => {});
     child.on('close', (code, signal) => {
@@ -151,7 +228,7 @@ export function runContainerCommand({
       if (signal) {
         finish(failure ?? new ContainerRunError(`${what} was ended by ${signal}`));
       } else {
-        finish(failure, { code, stdout: Buffer.concat(chunks.stdout), stderr: Buffer.concat(chunks.stderr).toString('utf8') });
+        finish(failure, { code, stdout: Buffer.concat(stdout) });
       }
     });
     child.stdin.end(input);
@@ -160,16 +237,16 @@ export function runContainerCommand({
 
 /**
  * A call that must succeed: its exit code 0, or a ContainerRunError naming the command (the program and its
- * subcommand, never an argument, which can carry data) and the exit code. What the call wrote to stderr is the agent's
- * side's (docker, devcontainer and the task container all run as factory), so it is never quoted, in a refusal nor in
- * a task's reason (review round 1 N1, SEC-31): from 4.6 on, the container holds a token its code could print there.
- * run-git.mjs keeps a remote's words out of a push's refusal the same way.
+ * subcommand, never an argument, which can carry data), the exit code and the file its stderr is kept in. What the
+ * call wrote to stderr is the agent's side's (docker, devcontainer and the task container all run as factory), so it
+ * is never quoted, in a refusal nor in a task's reason (review round 1 N1, SEC-31; #0-284: the starter never returns
+ * it). run-git.mjs keeps a remote's words out of a push's refusal the same way.
  */
 export async function mustRun(options) {
   const result = await runContainerCommand(options);
   if (result.code !== 0) {
-    throw new ContainerRunError(`${commandName(options.program, options.args)} failed (exit ${result.code}); its `
-      + 'stderr, the agent\'s side\'s, is not quoted');
+    throw new ContainerRunError(`${commandName(options.program, options.args)} failed (exit ${result.code}); `
+      + `${stderrNote(result.stderrFile)}`);
   }
   return result;
 }

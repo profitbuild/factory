@@ -13,6 +13,14 @@
 //  - `docker exec ... <id> <command>` runs the command for real (`timeout` included), in the container's workspace
 //    as mapped (an argument that is /workspace mapped too, and /tmp/ to the test's own directory, mapped back in what
 //    it prints), with the -e variables it was given;
+//  - `docker info` answers as the VM's rootless Docker 29.9.3 (docker-hostconfig.mjs), unless the scenario says
+//    otherwise (scenario.info: fields replaced);
+//  - `devcontainer build` (#0-284) reads its configuration (`--config`), writes the features' lockfile beside it as
+//    up does, and makes an image tagged with `--image-name` whose devcontainer.metadata label is what the real CLI
+//    would write (the features' entries, then the configuration's own), unless the scenario says otherwise;
+//    `docker image inspect --format {{.Id}} <name>` gives its ID;
+//  - `docker container inspect` gives a HostConfig as Docker 29.9.3 does (docker-hostconfig.mjs) with what the run
+//    set (capabilities, security options, extra hosts, mounts), and what scenario.hostConfig changes;
 //  - `devcontainer up` reads the override (`--config`) and, as the real CLI does, writes the features' lockfile
 //    beside the configuration file it was given, failing when that is in the clone or cannot be written; it makes a
 //    container from the override (mounts from workspaceMount, the `--mount=` run arguments and those of the image's
@@ -27,6 +35,7 @@ import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } fro
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { VM_DOCKER_INFO, dockerDefaultHostConfig } from './docker-hostconfig.mjs';
 import { labelEntry } from './feature-artifact.mjs';
 import { checkShellSafe } from './state-dir.mjs';
 
@@ -50,6 +59,11 @@ export function makeFakeDaemon(root, initial = {}) {
   mkdirSync(shims, { recursive: true });
   mkdirSync(tmp, { recursive: true, mode: 0o700 });
   mkdirSync(tasks, { recursive: true, mode: 0o700 });
+  // $FACTORY_STATE_DIR as the starter is given it (#0-284: where it keeps each call's stderr): the test's own state
+  // directory when it is made under the same root, 700.
+  const stateDir = join(root, 'state');
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  chmodSync(stateDir, 0o700);
   const config = { dir, tasks, shims, tmp, state: join(dir, 'state.json'), calls: join(dir, 'calls.jsonl') };
   writeFileSync(join(shims, 'chown'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(join(dir, 'chown.log'))}\n`);
   chmodSync(join(shims, 'chown'), 0o755);
@@ -60,12 +74,15 @@ export function makeFakeDaemon(root, initial = {}) {
   const state = {
     containers: [], networks: [{ id: hex(), name: 'bridge', labels: {} }, { id: hex(), name: 'host', labels: {} },
       { id: hex(), name: 'none', labels: {} }],
-    volumes: [], images: {}, scenario: {}, ...initial,
+    volumes: [], images: {}, tags: {}, scenario: {}, ...initial,
   };
   writeFileSync(config.state, JSON.stringify(state));
   const read = () => JSON.parse(readFileSync(config.state, 'utf8'));
   return {
     sudo,
+    stateDir,
+    /** What every starter call of a test is given: the fake's sudo and the state directory. */
+    runner: { sudo, stateDir },
     tasks,
     tmp,
     /** A path of the container's /tmp/ as the host holds it, under the test's own directory. */
@@ -267,6 +284,10 @@ async function docker(context, takesInput) {
     out(`${name}\n`);
     return;
   }
+  if (command === 'info') {
+    out(`${JSON.stringify({ ...VM_DOCKER_INFO, ...state.scenario.info })}\n`);
+    return;
+  }
   if (sub.startsWith('container inspect')) {
     const c = state.containers.find((x) => x.id === rest.at(-1));
     if (!c) {
@@ -274,18 +295,22 @@ async function docker(context, takesInput) {
       return;
     }
     out(`${JSON.stringify({
-      Id: c.id, Image: c.image, Config: { Labels: c.labels }, HostConfig: { Privileged: c.privileged, CapAdd: c.capAdd },
+      Id: c.id, Image: c.image, Config: { Labels: c.labels }, HostConfig: c.hostConfig ?? { Privileged: c.privileged,
+        CapAdd: c.capAdd },
       Mounts: c.mounts,
     })}\n`);
     return;
   }
   if (sub.startsWith('image inspect')) {
-    const image = state.images[rest.at(-1)];
+    const ref = rest.at(-1);
+    const id = state.images[ref] ? ref : state.tags?.[ref];
+    const image = id === undefined ? undefined : state.images[id];
     if (!image) {
       fail('Error: No such image');
       return;
     }
-    out(`${JSON.stringify(image.labels)}\n`);
+    const format = rest[rest.indexOf('--format') + 1];
+    out(format === '{{.Id}}' ? `${id}\n` : `${JSON.stringify(image.labels)}\n`);
     return;
   }
   if (command === 'run' || command === 'exec') {
@@ -418,9 +443,9 @@ function metadataMounts(label) {
  */
 function defaultMetadata(override) {
   const features = Object.keys(override.features ?? {}).map((ref) => labelEntry(ref.split('@')[1], ref));
-  const own = { remoteUser: override.remoteUser, capAdd: override.capAdd, containerEnv: override.containerEnv,
-    updateRemoteUserUID: override.updateRemoteUserUID, containerUser: override.containerUser };
-  for (const name of ['postCreateCommand', 'postStartCommand']) {
+  const own = {};
+  for (const name of ['remoteUser', 'capAdd', 'containerEnv', 'updateRemoteUserUID', 'containerUser',
+    'postCreateCommand', 'postStartCommand']) {
     if (override[name] !== undefined) {
       own[name] = override[name];
     }
@@ -428,9 +453,85 @@ function defaultMetadata(override) {
   return [...features, own];
 }
 
+/** The features' lockfile, written beside the configuration file as the real CLI (0.89.0) does; false if it failed. */
+function writeLock(config, configFile, workspace, override) {
+  // In the clone, `dev`'s (1000:1000, a subuid on the host), `factory` may not write, so the CLI fails there (EACCES,
+  // the VM's run of 2026-11-20): the fake fails too, and when the directory cannot be written.
+  const lockName = basename(configFile).startsWith('.') ? '.devcontainer-lock.json' : 'devcontainer-lock.json';
+  const lockFile = join(dirname(configFile), lockName);
+  if (lockFile.startsWith(`${workspace}/`)) {
+    fail(`Error: EACCES: permission denied, open '${lockFile}'`);
+    return false;
+  }
+  const lock = { features: Object.fromEntries(Object.keys(override.features ?? {})
+    .map((ref) => [ref, { resolved: ref, integrity: ref.split('@')[1] }])) };
+  try {
+    writeFileSync(host(config, lockFile), `${JSON.stringify(lock, null, 2)}\n`);
+  } catch (error) {
+    fail(`Error: ${error.code}: could not write '${lockFile}'`);
+    return false;
+  }
+  return true;
+}
+
+/** An image made from `override` (a build, or up given one to build), its label the real CLI's or the scenario's. */
+function makeImage(state, override) {
+  const image = state.scenario.imageId
+    ?? `sha256:${createHash('sha256').update(JSON.stringify(override) + hex()).digest('hex')}`;
+  state.images[image] = { labels: state.scenario.imageLabels
+    ?? { 'devcontainer.metadata': JSON.stringify(defaultMetadata(override)) } };
+  return image;
+}
+
+/** `devcontainer build --config <file> --workspace-folder <dir> --image-name <name>` (#0-284). */
+function build(context) {
+  const { args, config, state, save } = context;
+  const option = (name) => args[args.indexOf(name) + 1];
+  if (state.scenario.buildFails) {
+    fail(typeof state.scenario.buildFails === 'string' ? state.scenario.buildFails : 'devcontainer build: failed');
+    return;
+  }
+  const configFile = option('--config');
+  const override = JSON.parse(readFileSync(host(config, configFile), 'utf8'));
+  if (!writeLock(config, configFile, option('--workspace-folder'), override)) {
+    return;
+  }
+  const image = makeImage(state, override);
+  state.tags[option('--image-name')] = image;
+  save();
+  out(`${JSON.stringify({ outcome: 'success', imageName: [option('--image-name')] })}\n`);
+}
+
+/** HostConfig as Docker 29.9.3 gives it for the container up makes: its defaults, and what the run set. */
+function hostConfigOf(override, metadata, mounts, scenario) {
+  const entries = (() => {
+    try {
+      return [JSON.parse(metadata ?? '[]')].flat();
+    } catch {
+      return [];
+    }
+  })();
+  const capAdd = [...new Set([...(override.capAdd ?? []), ...entries.flatMap((e) => e?.capAdd ?? [])])];
+  const securityOpt = [...new Set(entries.flatMap((e) => (Array.isArray(e?.securityOpt) ? e.securityOpt : [])))];
+  const extraHosts = (override.runArgs ?? []).filter((a) => a.startsWith('--add-host=')).map((a) => a.slice(11));
+  return {
+    ...dockerDefaultHostConfig(),
+    CapAdd: capAdd.length > 0 ? capAdd.map((c) => `CAP_${c}`) : null,
+    SecurityOpt: securityOpt.length > 0 ? securityOpt : null,
+    ExtraHosts: extraHosts.length > 0 ? extraHosts : null,
+    Privileged: scenario.privileged ?? false,
+    Mounts: mounts.map((m) => ({ Type: m.Type, Source: m.Type === 'volume' ? m.Name : m.Source, Target: m.Destination,
+      ...(m.RW ? {} : { ReadOnly: true }) })),
+    ...scenario.hostConfig,
+  };
+}
+
 function devcontainer(context) {
   const { args, config, state, save } = context;
   const option = (name) => args[args.indexOf(name) + 1];
+  if (args[0] === 'build') {
+    return build(context);
+  }
   if (args[0] !== 'up') {
     fail(`the fake devcontainer has no command ${args[0]}`);
     return;
@@ -445,29 +546,17 @@ function devcontainer(context) {
   const given = args.includes('--config') ? '--config' : '--override-config';
   const configFile = given === '--config' ? option('--config') : `${workspace}/.devcontainer/devcontainer.json`;
   const override = JSON.parse(readFileSync(host(config, option(given)), 'utf8'));
-  // The real CLI (0.89.0) writes the features' lockfile beside the configuration file. In the clone, `dev`'s
-  // (1000:1000, a subuid on the host), `factory` may not write, so the CLI fails there (EACCES, the VM's run of
-  // 2026-11-20): the fake fails too, and when the directory cannot be written.
-  const lockName = basename(configFile).startsWith('.') ? '.devcontainer-lock.json' : 'devcontainer-lock.json';
-  const lockFile = join(dirname(configFile), lockName);
-  if (lockFile.startsWith(`${workspace}/`)) {
-    fail(`Error: EACCES: permission denied, open '${lockFile}'`);
-    return;
-  }
-  const lock = { features: Object.fromEntries(Object.keys(override.features ?? {})
-    .map((ref) => [ref, { resolved: ref, integrity: ref.split('@')[1] }])) };
-  try {
-    writeFileSync(host(config, lockFile), `${JSON.stringify(lock, null, 2)}\n`);
-  } catch (error) {
-    fail(`Error: ${error.code}: could not write '${lockFile}'`);
+  if (!writeLock(config, configFile, workspace, override)) {
     return;
   }
   const [labelKey, labelValue] = option('--id-label').split('=');
-  const image = override.image ?? state.scenario.imageId
-    ?? `sha256:${createHash('sha256').update(JSON.stringify(override)).digest('hex')}`;
+  // As the real CLI: a configuration with a build or features is built again, into a new image; one with an image
+  // alone runs it.
+  const builds = override.build !== undefined || Object.keys(override.features ?? {}).length > 0;
+  const image = !builds && override.image !== undefined ? override.image : makeImage(state, override);
   if (!state.images[image]) {
-    state.images[image] = { labels: state.scenario.imageLabels
-      ?? { 'devcontainer.metadata': JSON.stringify(defaultMetadata(override)) } };
+    fail(`Error: No such image: ${image}`);
+    return;
   }
   const mounts = [
     parseMount(override.workspaceMount),
@@ -482,6 +571,7 @@ function devcontainer(context) {
     volumes: mounts.filter((m) => m.Type === 'volume').map((m) => m.Name), anonymous: [],
     privileged: state.scenario.privileged ?? false, capAdd: override.capAdd ?? [],
     workspace: /source=([^,]+)/.exec(override.workspaceMount)[1],
+    hostConfig: hostConfigOf(override, state.images[image].labels?.['devcontainer.metadata'], mounts, state.scenario),
   };
   state.containers.push(container);
   after(context, 'up');

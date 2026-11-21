@@ -15,7 +15,7 @@ import { RollbackRunningError } from '../src/container/daemon.mjs';
 import { inTaskEnvironment, setUpTaskContainer } from '../src/container/environment.mjs';
 import { bundleFromTask } from '../src/container/task-bundle.mjs';
 import { CallTimeoutError, callInTask, execInTask, readTaskConfig } from '../src/container/task-container.mjs';
-import { TASK_CONFIG_LIST, buildOverride } from '../src/container/task-config.mjs';
+import { TASK_CONFIG_LIST, buildOverride, imageBuildConfig } from '../src/container/task-config.mjs';
 import { initBare } from '../src/git/config-allowlist.mjs';
 import { loadBundle } from '../src/git/bundle.mjs';
 import { createTask, loadTask, updateTask } from '../src/state/tasks.mjs';
@@ -41,7 +41,7 @@ async function setUp({ product: productOptions, initial } = {}) {
   const product = await makeTaskProduct(dir, productOptions);
   const fake = makeFakeDaemon(dir, initial);
   const options = { stateDir, repoDir: product.repoDir, adapter: { taskImage: CONFIG_PATH }, helperImage: HELPER_IMAGE,
-    sudo: fake.sudo, git: REAL_GIT };
+    ...fake.runner, git: REAL_GIT };
   return { dir, stateDir, product, fake, options };
 }
 
@@ -67,13 +67,14 @@ async () => {
   } });
   await mkdir(join(fake.tasks, OLD_RUN, 'w', '.git'), { recursive: true });
   let seen;
-  const { result, swept } = await inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, sudo: fake.sudo },
+  const { result, swept } = await inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner },
     async () => {
       const ready = await setUpTaskContainer({ ...options, task: await createTask(stateDir, { runId: RUN_ID }) });
       const state = fake.read();
       const container = state.containers.find((c) => c.labels['factory.task'] === RUN_ID);
       seen = { ready, container, override: JSON.parse(await readFile(join(fake.tasks, RUN_ID, 'devcontainer.json'), 'utf8')),
-        lock: JSON.parse(await readFile(join(fake.tasks, RUN_ID, 'devcontainer-lock.json'), 'utf8')),
+        build: JSON.parse(await readFile(join(fake.tasks, RUN_ID, 'build', 'devcontainer.json'), 'utf8')),
+        lock: JSON.parse(await readFile(join(fake.tasks, RUN_ID, 'build', 'devcontainer-lock.json'), 'utf8')),
         clone: git(join(fake.tasks, RUN_ID, 'w'), ['status', '--porcelain', '--ignored']),
         head: git(join(fake.tasks, RUN_ID, 'w'), ['rev-parse', 'HEAD']), networks: state.networks.map((x) => x.name),
         volumes: state.volumes.map((v) => v.name) };
@@ -87,14 +88,19 @@ async () => {
   assert.match(result.imageId, /^sha256:[0-9a-f]{64}$/);
   assert.deepEqual(await loadTask(stateDir, RUN_ID), result);
   const carried = await readTaskConfig({ repoDir: product.repoDir, base: product.base, path: CONFIG_PATH, git: REAL_GIT });
-  assert.deepEqual(seen.override, buildOverride(carried, { runId: RUN_ID }));
+  // #0-284: the build's configuration, then the override up reads, the image by the ID the build gave.
+  assert.deepEqual(seen.build, imageBuildConfig(carried, { runId: RUN_ID }));
+  assert.deepEqual(seen.override, buildOverride(carried, { runId: RUN_ID, imageId: result.imageId }));
   // `--config` with the task's override, never `--override-config`: the CLI writes its lockfile beside the
   // configuration file, and `factory` may not write in the clone (the VM's run of 2026-11-20).
-  const [up] = fake.calls().filter((c) => c.program === 'devcontainer');
+  const [build, up] = fake.calls().filter((c) => c.program === 'devcontainer');
+  assert.deepEqual(build.args, ['build', '--config', `/home/factory/tasks/${RUN_ID}/build/devcontainer.json`,
+    '--workspace-folder', `/home/factory/tasks/${RUN_ID}/w`, '--image-name', 'factory-task-20261120t101500z-3f9a1c',
+    '--log-format', 'json']);
   assert.deepEqual(up.args.slice(0, 5), ['up', '--config', `/home/factory/tasks/${RUN_ID}/devcontainer.json`,
     '--workspace-folder', `/home/factory/tasks/${RUN_ID}/w`]);
   assert.ok(!up.args.includes('--override-config'), up.args.join(' '));
-  assert.deepEqual(Object.keys(seen.lock.features), [FEATURE_REF], 'the CLI\'s lockfile, beside the override');
+  assert.deepEqual(Object.keys(seen.lock.features), [FEATURE_REF], 'the CLI\'s lockfile, beside the build\'s configuration');
   assert.equal(seen.clone, '', 'the clone is left as it was cloned');
   const mounts = seen.container.mounts.map((m) => `${m.Type} ${m.Name ?? m.Source} ${m.Destination} ${m.RW ? 'rw' : 'ro'}`);
   assert.deepEqual(mounts.sort(), [
@@ -114,7 +120,14 @@ async () => {
   assert.ok(first('rm') < network && first('run') < network, 'the sweep before the run is visible');
   assert.equal(order[network + 1], 'ps (rollback)', 'the second check right after the network');
   assert.ok(network < first('devcontainer up'), 'and before the task container');
-  assert.ok(first('exec') > first('image inspect'), 'the probe of timeout after the checks');
+  // #0-284: the daemon's options before the task's first container; the build, the ID, the label, then up.
+  const info = first('info');
+  assert.ok(info > network && info < first('run', network), 'docker info before the work directory\'s helper');
+  const built = first('devcontainer build');
+  assert.ok(built > info && first('image inspect', built) > built, 'the ID read after the build');
+  assert.ok(first('image inspect', first('image inspect', built) + 1) < first('devcontainer up'),
+    'the label checked before up');
+  assert.ok(first('exec') > first('container inspect'), 'the probe of timeout after the checks');
   assert.ok(first('rm', first('devcontainer up')) > 0, 'the sweep at the end');
   await isEmpty(fake);
 });
@@ -127,7 +140,7 @@ test('AC13: a rollback starting while the run builds is seen by the second check
     volumes: [{ name: 'incident-platform-gh', labels: {} }, { name: 'incident-platform-claude', labels: {} }],
   } });
   let inside = false;
-  const env = { runId: RUN_ID, helperImage: HELPER_IMAGE, sudo: fake.sudo };
+  const env = { runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner };
   fake.update((s) => {
     s.volumes = [];
     s.scenario.after = { 'network create': [rollback] };
@@ -157,7 +170,7 @@ test('review round 1 gen-5c1e: the second check\'s refusal wins when the run\'s 
     s.scenario.afterVolumes = { 'network create': [{ name: 'incident-platform-gh', labels: {} },
       { name: 'incident-platform-claude', labels: {} }] };
   });
-  const env = { runId: RUN_ID, helperImage: HELPER_IMAGE, sudo: fake.sudo };
+  const env = { runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner };
   await assert.rejects(inTaskEnvironment(env, async () => {}), (error) => {
     assert.ok(error instanceof RollbackRunningError, `${error.constructor.name}: ${error.message}`);
     assert.match(error.message, /^the run is refused after its network was made: a running container carries factory\.rollback: rollback .*; and the run's own objects could not all be removed: docker network rm failed \(exit 1\)/);
@@ -174,7 +187,7 @@ test('review round 1 gen-5c1e: the second check\'s refusal wins when the run\'s 
 test('AC13: a running rollback refuses the run at its start, and nothing is removed', async () => {
   const { fake } = await setUp({ initial: { containers: [plantedContainer({ name: 'rollback',
     labels: { 'factory.rollback': '1' } }), plantedContainer({ name: 'testcontainers' })] } });
-  await assert.rejects(inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, sudo: fake.sudo }, async () => {}),
+  await assert.rejects(inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner }, async () => {}),
     /^RollbackRunningError|the run is refused: a running container carries factory\.rollback: rollback/);
   assert.deepEqual(steps(fake), ['ps (rollback)']);
   assert.equal(fake.read().containers.length, 2);
@@ -205,7 +218,7 @@ function running(pid) {
 async function blocked(setup, pattern, change = () => {}) {
   const { stateDir, fake, options } = setup;
   change(fake);
-  const { result } = await inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, sudo: fake.sudo },
+  const { result } = await inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner },
     async () => (await setUpTaskContainer({ ...options, task: await createTask(stateDir, { runId: RUN_ID }) })).task);
   assert.equal(result.status, 'blocked');
   assert.match(result.reason, pattern);
@@ -260,18 +273,18 @@ test('AC9, AC3: the built image\'s metadata off the list, a mount, privilege or 
       securityOpt: ['label=disable'], privileged: true,
       mounts: [{ source: '/var/run/docker.sock', target: '/var/run/docker-host.sock', type: 'bind' }] }]) }; });
   });
-  await blocked(await setUp(), /devcontainer\.metadata\[2\]\.mounts is not on the list/, (fake) => {
+  await blocked(await setUp(), /devcontainer\.metadata\[2\] holds a key off the list, its key 0 \(not named\)/, (fake) => {
     fake.update((s) => { s.scenario.imageLabels = { 'devcontainer.metadata': JSON.stringify([{ id: FEATURE_REF,
       ...TASK_CONFIG_LIST.features[FEATURE].digests[FEATURE_DIGEST].metadata }, { remoteUser: 'dev' },
     { mounts: ['type=bind,source=/,target=/host'] }]) }; });
   });
-  await blocked(await setUp(), /the task container's mounts are not the dispatcher's: unexpected at \/state/, (fake) => {
+  await blocked(await setUp(), /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[5\] \(not named\)$/, (fake) => {
     fake.update((s) => { s.scenario.extraMounts = [{ Type: 'bind', Source: '/srv/state', Destination: '/state', RW: true }]; });
   });
   await blocked(await setUp(), /the task container is privileged/, (fake) => {
     fake.update((s) => { s.scenario.privileged = true; });
   });
-  await blocked(await setUp(), /devcontainer up failed \(exit 1\); its stderr, the agent's side's, is not quoted$/, (fake) => {
+  await blocked(await setUp(), /devcontainer up failed \(exit 1\); its stderr, the agent's side's, is not quoted: it is kept in \S+$/, (fake) => {
     fake.update((s) => { s.scenario.upFails = true; });
   });
   await blocked(await setUp(), /the work directory of .* could not be made/, (fake) => {
@@ -299,7 +312,7 @@ test('AC5: a task resumed runs a container of the image it recorded, never one i
   const resumed = await updateTask(other.stateDir, await createTask(other.stateDir, { runId: RUN_ID }), { imageId });
   const refused = await setUpTaskContainer({ ...other.options, task: resumed });
   assert.equal(refused.task.status, 'blocked');
-  assert.match(refused.task.reason, /runs sha256:d{64}, not the image recorded for the task, sha256:c{64}/);
+  assert.match(refused.task.reason, /runs sha256:d{64}, not the image checked and recorded for the task, sha256:c{64}/);
 });
 
 test('AC11: a call that ignores SIGTERM is killed after its grace, leaves no process, and blocks the task',
@@ -308,7 +321,7 @@ test('AC11: a call that ignores SIGTERM is killed after its grace, leaves no pro
     const { task, container } = await setUpTaskContainer({ ...options,
       task: await createTask(stateDir, { runId: RUN_ID }) });
     const work = join(fake.tasks, RUN_ID, 'w');
-    const left = await callInTask({ stateDir, task, container, sudo: fake.sudo, limitS: 1, graceS: 1,
+    const left = await callInTask({ stateDir, task, container, ...fake.runner, limitS: 1, graceS: 1,
       args: ['sh', '-c', "trap '' TERM; echo $$ > pid; while :; do sleep 1; done"] });
     assert.equal(left.result, null);
     assert.equal(left.task.status, 'blocked');
@@ -327,7 +340,7 @@ test('AC11: a call whose CLI hangs, an orphan holding its output, is ended by th
     const { stateDir, fake, options } = await setUp();
     const { container } = await setUpTaskContainer({ ...options, task: await createTask(stateDir, { runId: RUN_ID }) });
     fake.update((s) => { s.scenario.execHangs = true; });
-    await assert.rejects(execInTask({ container, sudo: fake.sudo, limitS: 1, graceS: 1, marginS: 1, args: ['sleep', '9'] }),
+    await assert.rejects(execInTask({ container, ...fake.runner, limitS: 1, graceS: 1, marginS: 1, args: ['sleep', '9'] }),
       (error) => {
         assert.ok(error instanceof CallTimeoutError);
         assert.match(error.message, /ran past 1 s and was killed: docker exec ran past 3000 ms: stopped/);
@@ -337,7 +350,7 @@ test('AC11: a call whose CLI hangs, an orphan holding its output, is ended by th
     assert.equal(orphans.running, false, 'killed by the label');
     assert.deepEqual(orphans.pids, []);
     await assert.rejects(execInTask({ container, args: ['x'], limitS: 0 }), TypeError);
-    await assert.rejects(execInTask({ container, sudo: fake.sudo, args: ['x'], limitS: 1, env: { 'A B': 'x' } }),
+    await assert.rejects(execInTask({ container, ...fake.runner, args: ['x'], limitS: 1, env: { 'A B': 'x' } }),
       /is not a variable's name/);
   });
 
@@ -351,7 +364,7 @@ test('AC6: the task\'s commits leave as git bundle create - on exec\'s stdout, i
   git(work, ['commit', '-q', '-m', 'a task\'s commit']);
   const sha = git(work, ['rev-parse', 'HEAD']);
   const { path, bundle } = await bundleFromTask({ stateDir, container, prerequisite: product.base,
-    ref: 'refs/heads/base', sudo: fake.sudo });
+    ref: 'refs/heads/base', ...fake.runner });
   assert.ok(path.startsWith(join(stateDir, 'tasks', RUN_ID, 'bundles') + '/'));
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.deepEqual(await readFile(path), bundle);
@@ -365,7 +378,7 @@ test('AC6: the task\'s commits leave as git bundle create - on exec\'s stdout, i
   await loadBundle({ gitDir: repo, bundle, prerequisite: product.base, ref: { sha, name: 'refs/heads/base' }, git: REAL_GIT });
   for (const bad of [{ prerequisite: 'x' }, { ref: 'main' }, { ref: 'refs/heads/../x' }, { ref: '-x' }]) {
     await assert.rejects(bundleFromTask({ stateDir, container, prerequisite: product.base, ref: 'refs/heads/base',
-      sudo: fake.sudo, ...bad }), TypeError);
+      ...fake.runner, ...bad }), TypeError);
   }
 });
 
@@ -375,21 +388,20 @@ test('review round 1 N1: what devcontainer, docker or the task container write t
   const secret = 'ghs' + `_${'q'.repeat(36)}`;
   const leaked = (text) => text.includes(secret) || text.includes('ghs_');
   const up = await setUp();
-  const fromUp = await blocked(up, /^the task container: devcontainer up failed \(exit 1\); its stderr, the agent's side's, is not quoted$/,
+  const fromUp = await blocked(up, /^the task container: devcontainer up failed \(exit 1\); its stderr, the agent's side's, is not quoted: it is kept in \S+$/,
     (fake) => { fake.update((s) => { s.scenario.upFails = `error: ${secret}`; }); });
   assert.ok(fromUp);
   assert.ok(!leaked(await readFile(join(up.stateDir, 'tasks', RUN_ID, 'task.json'), 'utf8')));
   const probe = await setUp();
-  await blocked(probe, /^the task container: the task image cannot run a call under timeout \(exit 3\): the image must hold coreutils' timeout \(its stderr, the agent's side's, is not quoted\)$/,
+  await blocked(probe, /^the task container: the task image cannot run a call under timeout \(exit 3\): the image must hold coreutils' timeout \(its stderr, the agent's side's, is not quoted: it is kept in \S+\)$/,
     (fake) => { fake.update((s) => { s.scenario.execFails = { stderr: `timeout: ${secret}`, code: 3 }; }); });
   assert.ok(!leaked(await readFile(join(probe.stateDir, 'tasks', RUN_ID, 'task.json'), 'utf8')));
   const out = await setUp();
   const { container } = await setUpTaskContainer({ ...out.options, task: await createTask(out.stateDir, { runId: RUN_ID }) });
   out.fake.update((s) => { s.scenario.execFails = { stderr: `fatal: ${secret}`, code: 128 }; });
   await assert.rejects(bundleFromTask({ stateDir: out.stateDir, container, prerequisite: out.product.base,
-    ref: 'refs/heads/base', sudo: out.fake.sudo }), (error) => {
-    assert.equal(error.message, 'git bundle create in the task container failed (exit 128); its stderr, the agent\'s '
-      + 'side\'s, is not quoted');
+    ref: 'refs/heads/base', ...out.fake.runner }), (error) => {
+    assert.match(error.message, /^git bundle create in the task container failed \(exit 128\); its stderr, the agent's side's, is not quoted: it is kept in \S+$/);
     assert.ok(!leaked(error.message));
     return true;
   });
@@ -398,8 +410,8 @@ test('review round 1 N1: what devcontainer, docker or the task container write t
 test('a call that exits 124, timeout\'s own code for its limit, is taken as its timeout', async () => {
   const { stateDir, options, fake } = await setUp();
   const { container } = await setUpTaskContainer({ ...options, task: await createTask(stateDir, { runId: RUN_ID }) });
-  assert.equal((await execInTask({ container, sudo: fake.sudo, limitS: 5, args: ['sh', '-c', 'exit 123'] })).code, 123);
-  await assert.rejects(execInTask({ container, sudo: fake.sudo, limitS: 5, args: ['sh', '-c', 'exit 124'] }),
+  assert.equal((await execInTask({ container, ...fake.runner, limitS: 5, args: ['sh', '-c', 'exit 123'] })).code, 123);
+  await assert.rejects(execInTask({ container, ...fake.runner, limitS: 5, args: ['sh', '-c', 'exit 124'] }),
     /^Error: the call sh in the task container ran past 5 s \(timeout's exit 124\): its processes were ended$/);
   assert.equal(fake.read().containers.find((c) => c.id === container.id).running, false, 'killed by the label');
 });
@@ -411,7 +423,143 @@ test('#0-278: a task image without the tools the product\'s commands run with bl
   const { task, container } = await setUpTaskContainer({ ...options, task: await createTask(stateDir, { runId: RUN_ID }) });
   assert.equal(container, null);
   assert.equal(task.status, 'blocked');
-  assert.equal(task.reason, 'the task container: the task image cannot run the product\'s commands from the base (exit 1): '
-    + 'the image must hold sh, mktemp, tar, rm (its stderr, the agent\'s side\'s, is not quoted)');
+  assert.match(task.reason, /^the task container: the task image cannot run the product's commands from the base \(exit 1\): the image must hold sh, mktemp, tar, rm \(its stderr, the agent's side's, is not quoted: it is kept in \S+\)$/);
+  assert.ok(!task.reason.includes('ghs_'));
   assert.ok(fake.calls().filter((c) => c.args[0] === 'exec').length >= 2, 'after the probe of timeout');
+});
+
+// incident-platform backlog #0-284: the task container is checked before anything runs in it.
+
+const SECRET = () => 'ghs' + `_${'s'.repeat(36)}`;
+
+test('#0-284 AC1: the build is a call of its own, to a name unique to the run; a label off the list ends the task with '
+  + 'no container of the task\'s, no lifecycle command and no ID recorded', async () => {
+  const setup = await setUp();
+  const fake = await blocked(setup, /^the task container: the image's devcontainer\.metadata\[1\] holds a key off the list/,
+    (f) => {
+      f.update((s) => {
+        s.scenario.imageLabels = { 'devcontainer.metadata': JSON.stringify([{ id: FEATURE_REF,
+          ...TASK_CONFIG_LIST.features[FEATURE].digests[FEATURE_DIGEST].metadata },
+        { initializeCommand: 'touch /tmp/ran', postCreateCommand: 'touch /tmp/ran' }]) };
+      });
+    });
+  const order = steps(fake);
+  assert.ok(order.includes('devcontainer build'), order.join());
+  assert.ok(!order.includes('devcontainer up'), 'no up: no container of the task\'s, no lifecycle command');
+  assert.ok(!order.slice(order.indexOf('devcontainer build')).includes('exec'), 'nothing runs in a container');
+  const build = fake.calls().find((c) => c.program === 'devcontainer');
+  assert.equal(build.args[build.args.indexOf('--image-name') + 1], 'factory-task-20261120t101500z-3f9a1c');
+  assert.equal((await loadTask(setup.stateDir, RUN_ID)).imageId, null, 'an image refused is not recorded');
+  // Another run's build has its own name.
+  const other = await setUp();
+  const second = '20261120T101600Z-0a1b2c';
+  await setUpTaskContainer({ ...other.options, task: await createTask(other.stateDir, { runId: second }) });
+  const otherBuild = other.fake.calls().find((c) => c.program === 'devcontainer');
+  assert.equal(otherBuild.args[otherBuild.args.indexOf('--image-name') + 1], 'factory-task-20261120t101600z-0a1b2c');
+});
+
+test('#0-284 AC2: a new task and a resumed one start the same way, from the image\'s ID: up\'s configuration has the '
+  + 'image and no build nor feature, and a container of another image is refused', async () => {
+  const fresh = await setUp();
+  const made = await setUpTaskContainer({ ...fresh.options, task: await createTask(fresh.stateDir, { runId: RUN_ID }) });
+  assert.equal(made.task.status, 'running', made.task.reason);
+  const upConfig = JSON.parse(await readFile(join(fresh.fake.tasks, RUN_ID, 'devcontainer.json'), 'utf8'));
+  assert.equal(upConfig.image, made.task.imageId);
+  assert.equal(upConfig.build, undefined);
+  assert.equal(upConfig.features, undefined);
+  const tagged = fresh.fake.read().tags['factory-task-20261120t101500z-3f9a1c'];
+  assert.equal(made.task.imageId, tagged, 'the ID read from the build\'s name');
+  assert.equal(made.container.imageId, tagged);
+  // Resumed: the same calls but the build and the reading of the ID, the same configuration for up.
+  const again = await setUp();
+  again.fake.update((s) => { s.images[made.task.imageId] = fresh.fake.read().images[made.task.imageId]; });
+  const resumed = await setUpTaskContainer({ ...again.options,
+    task: await updateTask(again.stateDir, await createTask(again.stateDir, { runId: RUN_ID }),
+      { imageId: made.task.imageId }) });
+  assert.equal(resumed.task.status, 'running', resumed.task.reason);
+  assert.deepEqual(JSON.parse(await readFile(join(again.fake.tasks, RUN_ID, 'devcontainer.json'), 'utf8')), upConfig);
+  const without = (fake) => steps(fake).filter((x) => x !== 'devcontainer build' && x !== 'run');
+  assert.deepEqual(without(again.fake), without(fresh.fake).filter((x, i, all) => !(x === 'image inspect'
+    && all.indexOf('image inspect') === i)), 'the same steps, the ID read once for the new task alone');
+  // A container of another image, new or resumed, is refused.
+  for (const resume of [false, true]) {
+    const other = await setUp();
+    other.fake.update((s) => { s.scenario.runImage = `sha256:${'d'.repeat(64)}`; });
+    let task = await createTask(other.stateDir, { runId: RUN_ID });
+    if (resume) {
+      other.fake.update((s) => { s.images[made.task.imageId] = fresh.fake.read().images[made.task.imageId]; });
+      task = await updateTask(other.stateDir, task, { imageId: made.task.imageId });
+    }
+    const refused = await setUpTaskContainer({ ...other.options, task });
+    assert.equal(refused.task.status, 'blocked');
+    assert.match(refused.task.reason, /runs sha256:d{64}, not the image checked and recorded for the task, sha256:/);
+  }
+});
+
+test('#0-284 AC3: a daemon whose security options or default runtime are not the VM\'s is refused before the task\'s '
+  + 'first container', async () => {
+  const vm = ['name=seccomp,profile=builtin', 'name=rootless', 'name=cgroupns'];
+  for (const [info, pattern] of [
+    [{ SecurityOptions: ['name=rootless', 'name=cgroupns'] }, /missing name=seccomp,profile=builtin, 0 other entries/],
+    [{ SecurityOptions: ['name=seccomp,profile=builtin', 'name=cgroupns'] }, /missing name=rootless, 0 other/],
+    [{ SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless'] }, /missing name=cgroupns, 0 other/],
+    [{ SecurityOptions: ['name=seccomp,profile=unconfined', 'name=rootless', 'name=cgroupns'] },
+      /missing name=seccomp,profile=builtin, 1 other entry \(not quoted\)/],
+    [{ SecurityOptions: [...vm, 'name=userns'] }, /none missing, 1 other entry \(not quoted\)/],
+    [{ SecurityOptions: [...vm, 'name=rootless'] }, /none missing, 0 other entries \(not quoted\), one twice/],
+    [{ SecurityOptions: null }, /reports no list of security options/],
+    [{ DefaultRuntime: 'runsc' }, /default runtime is not runc \(what it reports is not quoted\)/],
+    [{ DefaultRuntime: SECRET() }, /default runtime is not runc/],
+  ]) {
+    const setup = await setUp();
+    const fake = await blocked(setup, new RegExp(`^the task container: factory's daemon(?:'s)? .*${pattern.source}`),
+      (f) => { f.update((s) => { s.scenario.info = info; }); });
+    const order = steps(fake);
+    const at = order.indexOf('info', order.indexOf('network create'));
+    assert.ok(at > 0, order.join());
+    // From the refusal to the end sweep, whose first step is its list of containers.
+    const before = order.slice(at + 1, order.indexOf('ps', at));
+    assert.ok(!before.some((x) => ['run', 'devcontainer build', 'devcontainer up', 'volume create'].includes(x)),
+      `nothing made after the refusal: ${before}`);
+    assert.ok(!(await loadTask(setup.stateDir, RUN_ID)).reason.includes('ghs_'));
+  }
+});
+
+test('#0-284 AC4: a value the daemon returned reaches no refusal and no task.json: a label\'s key, a mount\'s target, '
+  + 'a capability\'s name', async () => {
+  const secret = SECRET();
+  const feature = { id: FEATURE_REF, ...TASK_CONFIG_LIST.features[FEATURE].digests[FEATURE_DIGEST].metadata };
+  for (const [change, pattern] of [
+    [(s) => { s.scenario.imageLabels = { 'devcontainer.metadata': JSON.stringify([feature, { [secret]: 'x' }]) }; },
+      /devcontainer\.metadata\[1\] holds a key off the list, its key 0 \(not named\)$/],
+    [(s) => { s.scenario.imageLabels = { 'devcontainer.metadata': JSON.stringify([feature,
+      { containerEnv: { [secret]: 'x' } }]) }; }, /devcontainer\.metadata\[1\]\.containerEnv\.<key 0> is not a key/],
+    [(s) => { s.scenario.imageLabels = { 'devcontainer.metadata': JSON.stringify([{ ...feature, [secret]: 1 }]) }; },
+      /no key of the list's differs; 1 key off the list \(not named\)$/],
+    [(s) => { s.scenario.extraMounts = [{ Type: 'bind', Source: '/', Destination: `/${secret}`, RW: true }]; },
+      /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[5\] \(not named\)$/],
+    [(s) => { s.scenario.hostConfig = { CapAdd: ['CAP_NET_ADMIN', `CAP_${secret}`] }; },
+      /adds 1 capability off the configuration's, at CapAdd\[1\] \(not named\)$/],
+    [(s) => { s.scenario.hostConfig = { [`X${secret}`]: secret }; },
+      /HostConfig holds 1 field off the dispatcher's table with a value other than its zero, at position \d+ of its keys \(not named\)/],
+  ]) {
+    const setup = await setUp();
+    await blocked(setup, pattern, (f) => f.update(change));
+    const text = await readFile(join(setup.stateDir, 'tasks', RUN_ID, 'task.json'), 'utf8');
+    assert.ok(!text.includes('ghs_'), text);
+  }
+});
+
+test('#0-284 AC6: a failed call\'s stderr, the agent\'s side\'s, is in a file 600 of the state, which the task\'s reason '
+  + 'names, and not in the reason', async () => {
+  const secret = SECRET();
+  const setup = await setUp();
+  await blocked(setup, /devcontainer build failed \(exit 1\); its stderr, the agent's side's, is not quoted: it is kept in /,
+    (f) => { f.update((s) => { s.scenario.buildFails = `error: ${secret}`; }); });
+  const { reason } = await loadTask(setup.stateDir, RUN_ID);
+  const file = /kept in (\S+)$/.exec(reason)[1];
+  assert.ok(file.startsWith(`${join(setup.stateDir, 'stderr')}/`), file);
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.equal(await readFile(file, 'utf8'), `error: ${secret}\n`, 'kept for the owner, whole');
+  assert.ok(!reason.includes('ghs_'));
 });

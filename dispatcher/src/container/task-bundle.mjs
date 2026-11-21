@@ -12,7 +12,7 @@ import { join } from 'node:path';
 
 import { MAX_BUNDLE_BYTES } from '../git/bundle.mjs';
 import { ensureOwnDirectory } from '../state/files.mjs';
-import { ContainerRunError } from './run-container.mjs';
+import { ContainerRunError, stderrNote } from './run-container.mjs';
 import { execInTask } from './task-container.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -36,8 +36,8 @@ export async function bundleFromTask({ stateDir, container, prerequisite, ref, l
     args: ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=', 'bundle', 'create', '-',
       `${prerequisite}..${ref}`] });
   if (result.code !== 0) {
-    throw new ContainerRunError(`git bundle create in the task container failed (exit ${result.code}); its stderr, `
-      + 'the agent\'s side\'s, is not quoted');
+    throw new ContainerRunError(`git bundle create in the task container failed (exit ${result.code}); `
+      + `${stderrNote(result.stderrFile)}`);
   }
   const dir = join(stateDir, 'tasks', container.runId, 'bundles');
   await ensureOwnDirectory(join(stateDir, 'tasks'));

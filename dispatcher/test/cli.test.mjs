@@ -79,7 +79,7 @@ async function setUpDaemon(t, initial, { product: productOptions = {} } = {}) {
   const env = { ...validEnv(state.dir, product.repoDir), BUILDER_APP_ID: String(APP_ID),
     BUILDER_APP_INSTALLATION_ID: String(INSTALLATION_ID), BUILDER_APP_KEY: app.keyPath };
   const lines = [];
-  const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) }, sudo: fake.sudo,
+  const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) }, ...fake.runner,
     apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
   const advance = async (change = { files: { 'src/merged.txt': 'merged\n' } }) => {
     const sha = await commit(product.work, change);
@@ -237,7 +237,7 @@ test('review round 1 c: a revoke that fails is one line on stderr naming its kin
   github.state.failRevoke = true;
   const errors = [];
   const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) },
-    err: { write: (line) => errors.push(line) }, sudo: fake.sudo, apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
+    err: { write: (line) => errors.push(line) }, ...fake.runner, apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
   const left = await call(['run', '--item', '0-1']);
   assert.equal(left.status, 'running', left.reason);
   assert.equal(left.baseSha, product.base);
@@ -254,7 +254,7 @@ test('review round 2, 3: a write to stderr that throws, after a revoke that fail
   github.state.failRevoke = true;
   let writes = 0;
   const broken = { write: () => { writes += 1; throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }); } };
-  const call = (args, err) => main(args, { env, out: { write: (line) => lines.push(line) }, err, sudo: fake.sudo,
+  const call = (args, err) => main(args, { env, out: { write: (line) => lines.push(line) }, err, ...fake.runner,
     apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
   const left = await call(['run', '--item', '0-1'], broken);
   assert.equal(left.status, 'running', left.reason);
@@ -344,8 +344,9 @@ test('--resume <branch> takes the running task on it, in a container of the imag
   assert.equal(resumed.runId, first.runId);
   assert.equal(resumed.status, 'running', resumed.reason);
   assert.equal(resumed.imageId, first.imageId);
-  const ups = fake.calls().filter((c) => c.program === 'devcontainer');
-  assert.equal(ups.length, 2);
+  // #0-284: one build, the new task's; both runs up from the image's ID.
+  const devcontainer = fake.calls().filter((c) => c.program === 'devcontainer').map((c) => c.args[0]);
+  assert.deepEqual(devcontainer, ['build', 'up', 'up']);
   await assert.rejects(call(['run', '--resume', 'factory/none']),
     /no task is on the branch factory\/none/);
 });

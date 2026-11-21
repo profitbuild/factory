@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  TaskConfigError, buildOverride, checkImageMetadata, checkList, checkTaskConfig, TASK_CONFIG_LIST,
+  TaskConfigError, buildOverride, checkImageMetadata, checkList, checkTaskConfig, imageBuildConfig, TASK_CONFIG_LIST,
 } from '../src/container/task-config.mjs';
 import { LABEL_FIELDS, artifact, labelEntry } from '../testing/feature-artifact.mjs';
 import { CONFIG, CONFIG_PATH, FEATURE, FEATURE_DIGEST, FEATURE_REF, LOCK } from '../testing/task-product.mjs';
@@ -152,13 +152,26 @@ test('the list itself is held to its shape', () => {
   }
 });
 
-test('the override: what was carried, with absolute paths into the clone, the features by digest, and the '
-  + 'dispatcher\'s mounts, workspace and users', () => {
+test('#0-284: the build\'s configuration is the build, the features by digest and the users, and nothing that runs',
+  () => {
+    const work = `/home/factory/tasks/${RUN_ID}/w`;
+    assert.deepEqual(imageBuildConfig(check(CONFIG), { runId: RUN_ID }), {
+      build: { dockerfile: `${work}/.devcontainer/Dockerfile`, context: `${work}/.devcontainer` },
+      features: { [FEATURE_REF]: { moby: false } },
+      remoteUser: 'dev',
+      updateRemoteUserUID: false,
+      containerUser: 'root',
+    });
+    assert.throws(() => imageBuildConfig(check(CONFIG), { runId: '../x' }), TypeError);
+  });
+
+test('#0-284 AC2: the override up reads: the image by its ID and never a build nor a feature, what was carried for '
+  + 'the container, and the dispatcher\'s mounts, workspace and users', () => {
   const work = `/home/factory/tasks/${RUN_ID}/w`;
-  const override = buildOverride(check(CONFIG), { runId: RUN_ID });
+  const id = `sha256:${'b'.repeat(64)}`;
+  const override = buildOverride(check(CONFIG), { runId: RUN_ID, imageId: id });
   assert.deepEqual(override, {
-    build: { dockerfile: `${work}/.devcontainer/Dockerfile`, context: `${work}/.devcontainer` },
-    features: { [FEATURE_REF]: { moby: false } },
+    image: id,
     postCreateCommand: ['echo', 'created'],
     postStartCommand: CONFIG.postStartCommand,
     remoteUser: 'dev',
@@ -173,13 +186,11 @@ test('the override: what was carried, with absolute paths into the clone, the fe
     updateRemoteUserUID: false,
     containerUser: 'root',
   });
-  const id = `sha256:${'b'.repeat(64)}`;
-  const resumed = buildOverride(check(CONFIG), { runId: RUN_ID, imageId: id });
-  assert.equal(resumed.image, id);
-  assert.equal(resumed.build, undefined);
-  assert.equal(resumed.features, undefined, 'a resumed task runs the image it recorded, its features in it');
+  assert.equal(override.build, undefined);
+  assert.equal(override.features, undefined, 'with either the CLI would build an image over the one checked');
+  assert.throws(() => buildOverride(check(CONFIG), { runId: RUN_ID }), TypeError, 'an ID always, a new task too');
   assert.throws(() => buildOverride(check(CONFIG), { runId: RUN_ID, imageId: 'ubuntu:24.04' }), TypeError);
-  assert.throws(() => buildOverride(check(CONFIG), { runId: '../x' }), TypeError);
+  assert.throws(() => buildOverride(check(CONFIG), { runId: '../x', imageId: id }), TypeError);
 });
 
 const carried = check(CONFIG);
@@ -233,17 +244,18 @@ test('the review of #0-282: a feature\'s entry is taken only when it is, value b
 test('an entry that is no feature\'s holds only the carried fields by their rules and the dispatcher\'s at its values',
   () => {
     for (const [entry, pattern] of [
-      [{ mounts: ['type=bind,source=/,target=/host'] }, /\.mounts is not on the list/],
-      [{ initializeCommand: 'curl evil' }, /\.initializeCommand is not on the list/],
-      [{ entrypoint: '/x' }, /\.entrypoint is not on the list/],
-      [{ privileged: true }, /\.privileged is not on the list/],
-      [{ securityOpt: ['label=disable'] }, /\.securityOpt is not on the list/],
-      [{ runArgs: ['--privileged'] }, /\.runArgs is not on the list/],
+      // #0-284: a key off the list by its position, never its name (the label is the daemon's answer).
+      [{ mounts: ['type=bind,source=/,target=/host'] }, /\[1\] holds a key off the list, its key 0 \(not named\)$/],
+      [{ initializeCommand: 'curl evil' }, /holds a key off the list, its key 0 \(not named\)$/],
+      [{ entrypoint: '/x' }, /holds a key off the list, its key 0/],
+      [{ privileged: true }, /holds a key off the list, its key 0/],
+      [{ securityOpt: ['label=disable'] }, /holds a key off the list, its key 0/],
+      [{ remoteUser: 'dev', runArgs: ['--privileged'] }, /holds a key off the list, its key 1 \(not named\)$/],
       [{ remoteUser: 'root' }, /\.remoteUser must be the agents' user/],
       [{ containerUser: 'dev' }, /\.containerUser is not the dispatcher's value/],
       [{ updateRemoteUserUID: true }, /\.updateRemoteUserUID is not the dispatcher's value/],
       [{ capAdd: ['SYS_ADMIN'] }, /\.capAdd\[0\] is not one of the list's/],
-      [{ containerEnv: { GIT_AUTHOR_NAME: 'x' } }, /\.containerEnv\.GIT_AUTHOR_NAME is not a key/],
+      [{ containerEnv: { GIT_AUTHOR_NAME: 'x' } }, /\.containerEnv\.<key 0> is not a key/],
       [{ postStartCommand: 'echo ${localEnv:HOME}' }, /\.postStartCommand names the host's/],
       [{ postCreateCommand: { a: 'x' } }, /\.postCreateCommand must be a command/],
     ]) {
@@ -263,4 +275,27 @@ test('review round 1 arc-c7d1: the list holds, for the feature at its digest, wh
   for (const id of [FEATURE_REF, FEATURE]) {
     assert.equal(checkImageMetadata(label([labelEntry(FEATURE_DIGEST, id), own]), { carried }).length, 2, id);
   }
+});
+
+test('#0-284 AC7: a feature\'s entry that differs names the list\'s keys whose values differ, and counts the keys off '
+  + 'the list without naming them', () => {
+  // Put together at run time from two parts, so that no file of the repository holds text shaped like a secret.
+  const secret = 'ghs' + `_${'f'.repeat(36)}`;
+  const message = (entry) => {
+    try {
+      checkImageMetadata(label([entry, own]), { carried });
+    } catch (error) {
+      assert.ok(error instanceof TaskConfigError);
+      assert.ok(!error.message.includes('ghs_'), error.message);
+      return error.message.replace(/^.* is not what the feature declares at sha256:[0-9a-f]{64}: /, '');
+    }
+    return assert.fail('refused');
+  };
+  assert.equal(message({ ...feature, entrypoint: secret }), 'the list\'s entrypoint differs; 0 keys off the list (not named)');
+  assert.equal(message({ ...feature, entrypoint: '/x', securityOpt: [] }),
+    'the list\'s securityOpt, entrypoint differ; 0 keys off the list (not named)');
+  assert.equal(message({ ...feature, privileged: true, [secret]: 1 }),
+    'no key of the list\'s differs; 2 keys off the list (not named)');
+  assert.equal(message({ id: feature.id, entrypoint: feature.entrypoint, mounts: feature.mounts, init: true }),
+    'the list\'s securityOpt, customizations differ; 1 key off the list (not named)');
 });

@@ -162,10 +162,11 @@ async function itemAndBase(settings, args, { builder, apiBase, gitBase, fetchImp
 
 /** `sweep [--force]`: the sweep alone, under the lock. */
 async function sweep(settings, { force, runId, sudo }) {
+  const { stateDir } = settings;
   if (!force) {
-    await refuseWhileRollback({ sudo, when: 'the sweep is refused' });
+    await refuseWhileRollback({ sudo, stateDir, when: 'the sweep is refused' });
   }
-  return sweepDaemon({ runId, helperImage: settings.helperImage, sudo });
+  return sweepDaemon({ runId, helperImage: settings.helperImage, sudo, stateDir });
 }
 
 /**
@@ -203,7 +204,8 @@ export async function main(argv, {
     const { resumed, base, adapter } = await itemAndBase(settings, args,
       { builder, apiBase, gitBase, fetchImpl, keep });
     const runId = resumed?.runId ?? newRunId({ now, random });
-    const { result: left } = await inTaskEnvironment({ runId, helperImage: settings.helperImage, sudo }, async () => {
+    const { result: left } = await inTaskEnvironment({ runId, helperImage: settings.helperImage,
+      stateDir: settings.stateDir, sudo }, async () => {
       const task = resumed ?? await createTask(settings.stateDir, { runId, item: args.item, baseSha: base });
       const ready = await setUpTaskContainer({ stateDir: settings.stateDir, repoDir: settings.repoDir, task, adapter,
         helperImage: settings.helperImage, sudo });

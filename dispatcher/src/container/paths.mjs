@@ -40,6 +40,10 @@ export function taskPaths(runId) {
     dir,
     work: `${dir}/w`,
     override: `${dir}/devcontainer.json`,
+    // The build's configuration, in a directory of its own (#0-284), and the image's name: unique to the run, in the
+    // lower case a reference must be (a runId has T and Z).
+    buildConfig: `${dir}/build/devcontainer.json`,
+    image: `factory-task-${runId.toLowerCase()}`,
     network: `factory-task-${runId}`,
     claudeVolume: `factory-task-${runId}-claude`,
   };

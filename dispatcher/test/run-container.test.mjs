@@ -3,14 +3,16 @@
 // of the dispatcher's; no argument is shaped like a secret (sudo logs them); a call past its time is refused at once,
 // without waiting for an orphan that holds its output, and the caller's kill runs; output is bounded; a sudo that
 // refuses (no rule) is a refusal naming the command and its exit code; what a call writes to stderr, the agent's
-// side's, is never quoted, nor an argument of it (review round 1 N1).
+// side's, is never quoted, nor an argument of it (review round 1 N1); and (incident-platform backlog #0-284 AC5, AC6)
+// the starter's result holds no stderr, only the path of the file it is kept in: 600, in $FACTORY_STATE_DIR/stderr/
+// (700), at most STDERR_KEPT bytes of it, the path named by a failed call's refusal.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
-  ContainerRunError, ContainerTimeoutError, PROGRAMS, SUDO, SUDO_OPTIONS, mustRun, runContainerCommand,
+  ContainerRunError, ContainerTimeoutError, PROGRAMS, STDERR_KEPT, SUDO, SUDO_OPTIONS, mustRun, runContainerCommand,
 } from '../src/container/run-container.mjs';
 import { makeFakeDaemon } from '../testing/fake-daemon.mjs';
 import { makeStateDir } from '../testing/state-dir.mjs';
@@ -31,7 +33,7 @@ test('every call is sudo -n -H -u factory -- and docker or devcontainer by its f
   assert.deepEqual(PROGRAMS, { docker: '/usr/bin/docker', devcontainer: '/usr/local/bin/devcontainer' });
   assert.deepEqual(SUDO_OPTIONS, ['-n', '-H', '-u', 'factory', '--']);
   const fake = makeFakeDaemon(join(root.dir, 'argv'));
-  await mustRun({ program: 'docker', args: ['volume', 'ls', '--format', '{{.Name}}'], sudo: fake.sudo,
+  await mustRun({ program: 'docker', args: ['volume', 'ls', '--format', '{{.Name}}'], ...fake.runner,
     baseEnv: { PATH: '/usr/bin', HOME: '/home/dispatcher', BUILDER_APP_KEY: '/k', OTHER: 'o' } });
   const [call] = fake.calls();
   assert.deepEqual(call.argv, ['-n', '-H', '-u', 'factory', '--', '/usr/bin/docker', 'volume', 'ls', '--format',
@@ -41,7 +43,7 @@ test('every call is sudo -n -H -u factory -- and docker or devcontainer by its f
   }
   const dumped = join(root.dir, 'argv.txt');
   const recorder = await script('recorder', `printf '%s\\n' "$@" > ${dumped}`);
-  await mustRun({ program: 'devcontainer', args: ['up', '--x'], sudo: recorder });
+  await mustRun({ program: 'devcontainer', args: ['up', '--x'], sudo: recorder, stateDir: root.dir });
   assert.deepEqual((await readFile(dumped, 'utf8')).trim().split('\n'),
     ['-n', '-H', '-u', 'factory', '--', '/usr/local/bin/devcontainer', 'up', '--x']);
   assert.throws(() => runContainerCommand({ program: 'sh', args: ['-c', 'x'] }), TypeError);
@@ -54,7 +56,7 @@ test('an argument shaped like a secret is refused before anything runs, by its p
     const ran = join(root.dir, 'ran');
     const recorder = await script('ran-recorder', `touch ${ran}`);
     const secret = 'ghs' + `_${'y'.repeat(36)}`;
-    assert.throws(() => runContainerCommand({ program: 'docker', args: ['exec', '-e', `T=${secret}`, 'c'], sudo: recorder }),
+    assert.throws(() => runContainerCommand({ program: 'docker', args: ['exec', '-e', `T=${secret}`, 'c'], sudo: recorder, stateDir: root.dir }),
       (error) => {
         assert.ok(error instanceof ContainerRunError);
         assert.match(error.message, /^docker exec: argument 3 holds a value shaped like a secret: sudo logs the /);
@@ -70,7 +72,7 @@ test('a call past its time is refused at once, though an orphan holds its output
     const pidFile = join(root.dir, 'orphan.pid');
     const orphaned = await script('orphaned', `sleep 30 & echo $! > ${pidFile}\nexit 0`);
     let killed = 0;
-    await assert.rejects(runContainerCommand({ program: 'docker', args: ['exec'], sudo: orphaned, timeoutMs: 300,
+    await assert.rejects(runContainerCommand({ program: 'docker', args: ['exec'], sudo: orphaned, stateDir: root.dir, timeoutMs: 300,
       onTimeout: async () => { killed += 1; } }), (error) => {
       assert.ok(error instanceof ContainerTimeoutError);
       assert.match(error.message, /^docker exec ran past 300 ms: stopped, its output no longer read$/);
@@ -79,7 +81,7 @@ test('a call past its time is refused at once, though an orphan holds its output
     assert.equal(killed, 1);
     process.kill(Number((await readFile(pidFile, 'utf8')).trim()), 'SIGKILL');
     const hung = await script('hung', 'exec sleep 30');
-    await assert.rejects(runContainerCommand({ program: 'docker', args: ['exec'], sudo: hung, timeoutMs: 200,
+    await assert.rejects(runContainerCommand({ program: 'docker', args: ['exec'], sudo: hung, stateDir: root.dir, timeoutMs: 200,
       onTimeout: async () => { throw new Error('docker kill failed'); } }),
     /ran past 200 ms: stopped, its output no longer read; and the kill after it failed: docker kill failed$/);
   });
@@ -87,16 +89,16 @@ test('a call past its time is refused at once, though an orphan holds its output
 test('output past the bound is refused; stdin reaches the command; a sudo with no rule is a refusal naming the command',
   async () => {
     const flood = await script('flood', 'head -c 100000 /dev/zero');
-    await assert.rejects(runContainerCommand({ program: 'docker', args: ['logs'], sudo: flood, outputLimit: 1000 }),
+    await assert.rejects(runContainerCommand({ program: 'docker', args: ['logs'], sudo: flood, stateDir: root.dir, outputLimit: 1000 }),
       /^Error: docker logs wrote more than 1000 bytes to its stdout: stopped$/);
     const cat = await script('cat', 'cat');
-    const { code, stdout } = await runContainerCommand({ program: 'docker', args: ['run'], sudo: cat, input: 'bytes' });
+    const { code, stdout } = await runContainerCommand({ program: 'docker', args: ['run'], sudo: cat, stateDir: root.dir, input: 'bytes' });
     assert.deepEqual([code, stdout.toString()], [0, 'bytes']);
     const fake = makeFakeDaemon(join(root.dir, 'norule'));
     const noRule = await script('no-rule-sudo', 'echo "sudo: a password is required" >&2; exit 1');
-    await assert.rejects(mustRun({ program: 'docker', args: ['ps'], sudo: noRule }),
-      /^Error: docker ps failed \(exit 1\); its stderr, the agent's side's, is not quoted$/);
-    await assert.rejects(runContainerCommand({ program: 'docker', args: ['ps'], sudo: join(root.dir, 'none') }),
+    await assert.rejects(mustRun({ program: 'docker', args: ['ps'], sudo: noRule, stateDir: root.dir }),
+      /^Error: docker ps failed \(exit 1\); its stderr, the agent's side's, is not quoted: it is kept in \/.*\/stderr\/[^/]+-docker-ps-[0-9a-f]{8}\.log$/);
+    await assert.rejects(runContainerCommand({ program: 'docker', args: ['ps'], sudo: join(root.dir, 'none'), stateDir: root.dir }),
       /could not be run: ENOENT$/);
     assert.equal(fake.calls().length, 0);
   });
@@ -106,11 +108,65 @@ test('review round 1 N1: what the agent\'s side writes to stderr is not quoted, 
   const secret = 'ghs' + `_${'z'.repeat(36)}`;
   const leaky = await script('leaky', `echo "fatal: token ${secret}" >&2; echo "${secret}"; exit 2`);
   await assert.rejects(mustRun({ program: 'docker', args: ['exec', '-i', 'container-name-with-data', 'cat'],
-    sudo: leaky }), (error) => {
-    assert.equal(error.message, 'docker exec failed (exit 2); its stderr, the agent\'s side\'s, is not quoted');
+    sudo: leaky, stateDir: root.dir }), (error) => {
+    assert.match(error.message, /^docker exec failed \(exit 2\); its stderr, the agent's side's, is not quoted: it is kept in /);
     assert.ok(!error.message.includes('ghs_') && !error.message.includes('container-name-with-data'));
     return true;
   });
-  await assert.rejects(mustRun({ program: 'docker', args: ['volume', 'rm', 'v'], sudo: leaky }),
+  await assert.rejects(mustRun({ program: 'docker', args: ['volume', 'rm', 'v'], sudo: leaky, stateDir: root.dir }),
     /^Error: docker volume rm failed \(exit 2\); its stderr/);
+});
+
+test('#0-284 AC5: the starter\'s result holds no stderr: its code, its stdout and the file the stderr is kept in',
+  async () => {
+    const stateDir = join(root.dir, 'shape');
+    await mkdir(stateDir, { mode: 0o700 });
+    const both = await script('both', 'echo out; echo err >&2; exit 3');
+    const result = await runContainerCommand({ program: 'docker', args: ['exec', 'x'], sudo: both, stateDir });
+    assert.deepEqual(Object.keys(result).sort(), ['code', 'stderrFile', 'stdout']);
+    assert.equal(result.code, 3);
+    assert.equal(result.stdout.toString(), 'out\n');
+    assert.equal(await readFile(result.stderrFile, 'utf8'), 'err\n');
+    const quiet = await script('quiet', 'echo out');
+    const silent = await runContainerCommand({ program: 'docker', args: ['ps'], sudo: quiet, stateDir });
+    assert.deepEqual(Object.keys(silent).sort(), ['code', 'stderrFile', 'stdout']);
+    assert.equal(silent.stderrFile, null, 'no file for a call that wrote nothing there');
+    await assert.rejects(mustRun({ program: 'docker', args: ['ps'], sudo: await script('fails-quietly', 'exit 4'),
+      stateDir }), /^Error: docker ps failed \(exit 4\); it wrote nothing to stderr$/);
+    assert.throws(() => runContainerCommand({ program: 'docker', args: ['ps'], sudo: quiet }), /stateDir must be/);
+    assert.throws(() => runContainerCommand({ program: 'docker', args: ['ps'], sudo: quiet, stateDir: 'rel' }),
+      /stateDir must be/);
+  });
+
+test('#0-284 AC6: a failed call\'s stderr is in a file 600 in the state\'s stderr/ (700), at most STDERR_KEPT bytes, '
+  + 'and the refusal names that file', async () => {
+  const stateDir = join(root.dir, 'kept');
+  await mkdir(stateDir, { mode: 0o700 });
+  // Put together at run time from two parts, so that no file of the repository holds text shaped like a secret.
+  const secret = 'ghs' + `_${'k'.repeat(36)}`;
+  const flood = await script('stderr-flood', `printf '%s' "${secret}" >&2; head -c ${STDERR_KEPT * 2} /dev/zero >&2; exit 7`);
+  let refusal;
+  await assert.rejects(mustRun({ program: 'docker', args: ['volume', 'rm', 'v'], sudo: flood, stateDir }), (error) => {
+    refusal = error;
+    return error instanceof ContainerRunError;
+  });
+  const match = /^docker volume rm failed \(exit 7\); its stderr, the agent's side's, is not quoted: it is kept in (\S+)$/
+    .exec(refusal.message);
+  assert.ok(match, refusal.message);
+  const [, file] = match;
+  assert.ok(!refusal.message.includes('ghs_'));
+  assert.equal(file.startsWith(`${join(stateDir, 'stderr')}/`), true, 'in the state\'s stderr/');
+  assert.deepEqual(await readdir(join(stateDir, 'stderr')), [file.slice(file.lastIndexOf('/') + 1)]);
+  assert.equal((await stat(join(stateDir, 'stderr'))).mode & 0o777, 0o700);
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  const kept = await readFile(file);
+  assert.ok(kept.subarray(0, secret.length).toString() === secret, 'kept as it was written, for the owner');
+  const trailer = `\n[the call wrote ${STDERR_KEPT * 2 + secret.length - STDERR_KEPT} more bytes to stderr, not kept: `
+    + `the file keeps ${STDERR_KEPT}]\n`;
+  assert.equal(kept.length, STDERR_KEPT + Buffer.byteLength(trailer), 'the limit, and a line for the rest');
+  assert.equal(kept.subarray(STDERR_KEPT).toString(), trailer);
+  // A call past its time keeps what it wrote too, and its refusal names the file.
+  const slow = await script('stderr-slow', 'echo started >&2; exec sleep 30');
+  await assert.rejects(runContainerCommand({ program: 'docker', args: ['exec'], sudo: slow, stateDir, timeoutMs: 300 }),
+    /^Error: docker exec ran past 300 ms: stopped, its output no longer read; its stderr, the agent's side's, is not quoted: it is kept in \S+-docker-exec-[0-9a-f]{8}\.log$/);
 });
