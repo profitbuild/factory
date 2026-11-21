@@ -12,7 +12,8 @@ import { chmod, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promis
 import { join } from 'node:path';
 
 import {
-  ContainerRunError, ContainerTimeoutError, PROGRAMS, STDERR_KEPT, SUDO, SUDO_OPTIONS, mustRun, runContainerCommand,
+  ContainerRunError, ContainerTimeoutError, PROGRAMS, STDERR_KEPT, SUDO, SUDO_OPTIONS, StderrKeepError, mustRun,
+  runContainerCommand,
 } from '../src/container/run-container.mjs';
 import { makeFakeDaemon } from '../testing/fake-daemon.mjs';
 import { makeStateDir } from '../testing/state-dir.mjs';
@@ -169,4 +170,73 @@ test('#0-284 AC6: a failed call\'s stderr is in a file 600 in the state\'s stder
   const slow = await script('stderr-slow', 'echo started >&2; exec sleep 30');
   await assert.rejects(runContainerCommand({ program: 'docker', args: ['exec'], sudo: slow, stateDir, timeoutMs: 300 }),
     /^Error: docker exec ran past 300 ms: stopped, its output no longer read; its stderr, the agent's side's, is not quoted: it is kept in \S+-docker-exec-[0-9a-f]{8}\.log$/);
+});
+
+test('review round 1 of factory#22, GEN-31: a stderr that cannot be kept fails closed: an exit of 0 is refused, a '
+  + 'failure keeps its class with the original as its cause, and neither quotes the stderr', { timeout: 20_000 },
+async () => {
+  // Put together at run time from two parts, so that no file of the repository holds text shaped like a secret.
+  const secret = 'ghs' + `_${'u'.repeat(36)}`;
+  // stderr/ a file, not the state's directory: the state's own refusal.
+  const notDir = join(root.dir, 'keep-not-dir');
+  await mkdir(notDir, { mode: 0o700 });
+  await writeFile(join(notDir, 'stderr'), '');
+  // stderr/ the dispatcher's 700 directory, but not writable: EACCES (CI runs the tests as a user, not root).
+  const readOnly = join(root.dir, 'keep-read-only');
+  await mkdir(join(readOnly, 'stderr'), { recursive: true, mode: 0o700 });
+  await chmod(readOnly, 0o700);
+  await chmod(join(readOnly, 'stderr'), 0o500);
+  const ok = await script('keep-ok', `echo "${secret}" >&2; echo out; exit 0`);
+  for (const [stateDir, why] of [[notDir, 'StateError'], [readOnly, process.getuid() === 0 ? null : 'EACCES']]) {
+    if (why === null) {
+      continue;
+    }
+    await assert.rejects(runContainerCommand({ program: 'docker', args: ['ps'], sudo: ok, stateDir }), (error) => {
+      assert.ok(error instanceof StderrKeepError && error instanceof ContainerRunError, error.constructor.name);
+      assert.equal(error.message, `docker ps ended (exit 0), but its stderr could not be kept in stderr/ of the state `
+        + `(${why}): the call is refused whatever it did, the state of the VM not certain`);
+      assert.ok(error.cause instanceof Error);
+      assert.ok(!error.message.includes('ghs_'));
+      return true;
+    });
+    const failed = await script(`keep-failed-${why}`, `echo "${secret}" >&2; exit 3`);
+    await assert.rejects(mustRun({ program: 'docker', args: ['ps'], sudo: failed, stateDir }),
+      (error) => error instanceof StderrKeepError && error.message.startsWith('docker ps ended (exit 3), but '));
+    const slow = await script(`keep-slow-${why}`, `echo "${secret}" >&2; exec sleep 30`);
+    await assert.rejects(runContainerCommand({ program: 'docker', args: ['exec'], sudo: slow, stateDir, timeoutMs: 300 }),
+      (error) => {
+        assert.ok(error instanceof ContainerTimeoutError, error.constructor.name);
+        assert.ok(error.cause instanceof ContainerTimeoutError, 'the original as its cause');
+        assert.equal(error.message, `docker exec ran past 300 ms: stopped, its output no longer read; and its stderr `
+          + `could not be kept in stderr/ of the state (${why}) (the call ended in ContainerTimeoutError)`);
+        assert.ok(!error.message.includes('ghs_'));
+        return true;
+      });
+  }
+  await chmod(join(readOnly, 'stderr'), 0o700);
+});
+
+test('review round 1 of factory#22, GEN-31: in the task container, a stderr that cannot be kept ends the task BLOCKED, '
+  + 'and a call past its time is still a CallTimeoutError', { timeout: 20_000 }, async () => {
+  const { CallTimeoutError, callInTask, execInTask } = await import('../src/container/task-container.mjs');
+  const { createTask, loadTask } = await import('../src/state/tasks.mjs');
+  const stateDir = join(root.dir, 'keep-task');
+  await mkdir(stateDir, { mode: 0o700 });
+  await writeFile(join(stateDir, 'stderr'), '');
+  const runId = '20261120T101500Z-3f9a1c';
+  // docker exec writes to stderr; a docker ps (the kill's list of the task's containers) answers at once.
+  const sudo = await script('keep-exec', 'for a in "$@"; do [ "$a" = ps ] && exit 0; done\necho noise >&2\n'
+    + 'for a in "$@"; do [ "$a" = hang ] && exec sleep 30; done\nexit 0');
+  const container = { runId, id: 'c'.repeat(64), remoteUser: 'dev', stateDir };
+  const task = await createTask(stateDir, { runId });
+  const blocked = await callInTask({ stateDir, task, container, sudo, limitS: 5, args: ['true'] });
+  assert.equal(blocked.result, null);
+  assert.equal(blocked.task.status, 'blocked');
+  assert.match(blocked.task.reason, /^docker exec ended \(exit 0\), but its stderr could not be kept in stderr\/ of the state \(StateError\)/);
+  assert.deepEqual(await loadTask(stateDir, runId), blocked.task);
+  await assert.rejects(execInTask({ container, sudo, limitS: 1, graceS: 1, marginS: 1, args: ['hang'] }), (error) => {
+    assert.ok(error instanceof CallTimeoutError, error.constructor.name);
+    assert.match(error.message, /ran past 1 s and was killed: docker exec ran past 3000 ms: stopped, its output no longer read; and its stderr could not be kept/);
+    return true;
+  });
 });

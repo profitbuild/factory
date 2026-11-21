@@ -107,6 +107,8 @@ async function keepStderr({ stateDir, what, kept, dropped }) {
 export class ContainerRunError extends Error {}
 /** A container command ran past its time. */
 export class ContainerTimeoutError extends ContainerRunError {}
+/** A call ended, but its stderr could not be kept: none of its result is taken (fail closed, factory#22 GEN-31). */
+export class StderrKeepError extends ContainerRunError {}
 
 /**
  * @param {{ program: 'docker' | 'devcontainer', args: string[], stateDir: string, input?: Buffer | string,
@@ -152,6 +154,13 @@ export function runContainerCommand({
     let settled = false;
     let timedOut = false;
     // Every end of the call keeps its stderr first, then settles: the refusal or the result names the file.
+    //
+    // A stderr that cannot be kept (a full disk, a stderr/ that is not the dispatcher's 700 directory) fails closed
+    // (review round 1 of factory#22, GEN-31, the owner's rule (b)): the VM's state is not certain, so no result of the
+    // call is taken, even an exit of 0, which comes back as a ContainerRunError and so ends a task BLOCKED. A call
+    // that had failed already keeps its own class (a ContainerTimeoutError stays one, which execInTask turns into a
+    // CallTimeoutError), with the original error as `cause`. Either refusal names the original's class and why the
+    // file could not be written (an errno or the state's own refusal), never the stderr's text.
     const finish = (error, result) => {
       if (settled) {
         return;
@@ -168,8 +177,17 @@ export function runContainerCommand({
         } else {
           resolve({ ...result, stderrFile });
         }
-      }, (keeping) => reject(new ContainerRunError(`${what}: its stderr could not be kept in ${STDERR_DIR}/ of the `
-        + `state (${keeping.code ?? keeping.message})`)));
+      }, (keeping) => {
+        const why = `its stderr could not be kept in ${STDERR_DIR}/ of the state (${keeping.code
+          ?? keeping.constructor.name})`;
+        if (error) {
+          const Kind = error.constructor;
+          reject(new Kind(`${error.message}; and ${why} (the call ended in ${Kind.name})`, { cause: error }));
+        } else {
+          reject(new StderrKeepError(`${what} ended (exit ${result.code}), but ${why}: the call is refused `
+            + 'whatever it did, the state of the VM not certain', { cause: keeping }));
+        }
+      });
     };
     const drop = () => {
       child.stdout.destroy();

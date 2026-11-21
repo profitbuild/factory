@@ -41,7 +41,7 @@ import { parseJsonc } from './jsonc.mjs';
 import { hostConfigViolations } from './host-config.mjs';
 import { expectedMounts, mountKey } from './mounts.mjs';
 import { TASK_LABEL, WORKSPACE, taskPaths } from './paths.mjs';
-import { ContainerTimeoutError, mustRun, runContainerCommand, stderrNote } from './run-container.mjs';
+import { ContainerTimeoutError, StderrKeepError, mustRun, runContainerCommand, stderrNote } from './run-container.mjs';
 import { checkImageMetadata, checkTaskConfig } from './task-config.mjs';
 
 export { expectedMounts };
@@ -299,7 +299,8 @@ export async function execInTask({
 }
 
 /**
- * A call through execInTask whose timeout ends the task BLOCKED, with the reason.
+ * A call through execInTask whose timeout, or whose stderr that could not be kept (fail closed: the VM's state is not
+ * certain, review round 1 of factory#22, GEN-31), ends the task BLOCKED, with the reason.
  *
  * @returns {Promise<{ task: object, result: object | null }>}
  */
@@ -307,7 +308,7 @@ export async function callInTask({ stateDir, task, ...call }) {
   try {
     return { task, result: await execInTask(call) };
   } catch (error) {
-    if (error instanceof CallTimeoutError) {
+    if (error instanceof CallTimeoutError || error instanceof StderrKeepError) {
       return { task: await blockTask(stateDir, task, error.message), result: null };
     }
     throw error;
