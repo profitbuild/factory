@@ -29,7 +29,9 @@ export const FUNCTIONS = Object.freeze(['pushTask', 'runGit', 'initBare', 'readC
   'docker', 'containers', 'networks', 'volumes', 'runningRollbacks', 'refuseWhileRollback', 'sweepDaemon', 'checkSwept',
   'createTaskNetwork', 'createTaskVolumes', 'removeOwnObjects', 'killTask', 'readTaskConfig', 'treeEntry', 'blobOf',
   'upContainer', 'inspectJson', 'execInTask', 'callInTask', 'probeTimeout', 'bundleFromTask', 'setUpTaskContainer',
-  'inTaskEnvironment', 'mainCommit', 'makeBaseBundle', 'inRepo', 'sweep', 'main']);
+  'inTaskEnvironment', 'mainCommit', 'makeBaseBundle', 'inRepo', 'sweep', 'main',
+  // #0-278: the read of a task's commits.
+  'withTaskObjects', 'checkOwnRepoDir']);
 /**
  * The modules that run git, push, or run a container command, and the options of a test's each may forward: all but
  * `sudo` for #0-276's, `git` and `sudo` for #0-277's (the task container's), and `sudo` alone for the CLI's main, which a
@@ -42,6 +44,7 @@ export const CHAIN = Object.freeze({
   'git/base-bundle.mjs': TASK, 'container/run-container.mjs': TASK, 'container/work-dir.mjs': TASK,
   'container/daemon.mjs': TASK, 'container/task-container.mjs': TASK, 'container/task-bundle.mjs': TASK,
   'container/environment.mjs': TASK, 'cli.mjs': Object.freeze(['sudo']),
+  'git/task-objects.mjs': ALL,
 });
 
 /**

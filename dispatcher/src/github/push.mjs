@@ -7,15 +7,15 @@
  * pushTask, in order, each step refusing before the next, and no token asked for before the last check:
  *  1. the token source is the repository's; `sha` is 40 hex digits, `branch` the task's own and a valid branch (no +,
  *     :, ..), the task's base recorded;
- *  2. $FACTORY_STATE_DIR/tasks/<runId>/push/, 700, made fresh: one left by a killed run is removed first;
- *  3. FACTORY_REPO_DIR's objects (the dispatcher's clone of main, for the base's objects), and their info/ and pack/,
- *     are directories of the dispatcher's, not symlinks, writable by no one else, with no alternates of their own
- *     (alternates chain);
- *  4. two bare repositories, `git init --bare --template=`: the push repository and a reference, by the same git;
- *  5. the push repository's config is exactly the reference's (config-allowlist.mjs), a first time;
- *  6. its objects/info/alternates names FACTORY_REPO_DIR's objects, and nothing else;
- *  7. the bundle is read in (git/bundle.mjs): its prerequisite the task's base, its one ref refs/heads/<branch> at
- *     `sha`, its own objects strictly checked, `sha` a descendant of the base; no ref written;
+ *  2-7. the push repository, made by git/task-objects.mjs's withTaskObjects (purpose `push`), which the check of
+ *     the trusted paths shares (incident-platform backlog #0-278): $FACTORY_STATE_DIR/tasks/<runId>/push/, 700, made
+ *     fresh; FACTORY_REPO_DIR's objects, and their info/ and pack/, directories of the dispatcher's, not symlinks,
+ *     writable by no one else, with no alternates of their own (alternates chain), and the clone the dispatcher's
+ *     alone (#0-278 AC7); two bare repositories, `git init --bare --template=`, the push repository and a
+ *     reference; the push repository's config exactly the reference's, a first time; its objects/info/alternates
+ *     naming FACTORY_REPO_DIR's objects, and nothing else; the bundle read in (git/bundle.mjs): its prerequisite the
+ *     task's base, its one ref refs/heads/<branch> at `sha`, its own objects strictly checked, `sha` a descendant
+ *     of the base; no ref written;
  *  8. the config is checked again, right before the token is asked for;
  *  9. the token, and `git push --porcelain <url> <sha>:refs/heads/factory/<branch>`, built by gitPushCommand, to
  *     pushUrl(repository) on GitHub: the URL is never the caller's (a test gives its loopback server, `gitBase`, over
@@ -24,15 +24,12 @@
  *     remote's text (a reason recorded for a task, 4.4, holds no text of GitHub's).
  * The push directory is removed after every push, refused or not: nothing of a push lives on to the next.
  */
-import { constants } from 'node:fs';
-import { lstat, mkdir, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-
-import { loadBundle } from '../git/bundle.mjs';
-import { checkPushConfig, initBare } from '../git/config-allowlist.mjs';
+import { checkPushConfig } from '../git/config-allowlist.mjs';
 import { runGit } from '../git/run-git.mjs';
-import { ensureOwnDirectory } from '../state/files.mjs';
+import { mainObjects, withTaskObjects } from '../git/task-objects.mjs';
 import { GIT_HOST, checkTaskBranch, gitHost, gitPushCommand, pushUrl } from './builder-token.mjs';
+
+export { mainObjects };
 
 /** The longest a push may run. */
 export const PUSH_TIMEOUT_MS = 10 * 60 * 1000;
@@ -65,53 +62,6 @@ function checkTarget({ task, sha, branch, repository, tokens }) {
   if (!SHA.test(task.baseSha ?? '')) {
     throw new PushRefusedError(`the task ${task.runId} has no base recorded`);
   }
-}
-
-async function isMissing(path) {
-  try {
-    await lstat(path);
-    return false;
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      return true;
-    }
-    throw error;
-  }
-}
-
-/**
- * The objects directory of FACTORY_REPO_DIR, the dispatcher's clone of main (a work tree's .git/objects, or a bare
- * clone's objects), refused unless it is the dispatcher's own and holds no alternates of its own.
- *
- * @param {string} repoDir
- * @param {{ uid?: number, lstatOf?: typeof lstat }} [options] `lstatOf` for the tests only: one directory's owner
- *   given apart from another's, which a test cannot `chown`
- */
-export async function mainObjects(repoDir, { uid = process.getuid(), lstatOf = lstat } = {}) {
-  const dotGit = await lstatOf(join(repoDir, '.git')).catch(() => null);
-  const objects = dotGit?.isDirectory() ? join(repoDir, '.git', 'objects') : join(repoDir, 'objects');
-  if (dotGit && !dotGit.isDirectory()) {
-    throw new PushRefusedError('FACTORY_REPO_DIR/.git is not a directory (a gitfile or a symlink is refused)');
-  }
-  for (const [path, what] of [[objects, 'objects'], [join(objects, 'info'), 'objects/info'], [join(objects, 'pack'), 'objects/pack']]) {
-    const stats = await lstatOf(path).catch(() => null);
-    if (!stats?.isDirectory()) {
-      throw new PushRefusedError(`FACTORY_REPO_DIR holds no ${what} directory (a symlink is refused)`);
-    }
-    if (stats.uid !== uid) {
-      throw new PushRefusedError(`${what} of FACTORY_REPO_DIR is owned by uid ${stats.uid}, not by this process's`);
-    }
-    if ((stats.mode & 0o022) !== 0) {
-      throw new PushRefusedError(`${what} of FACTORY_REPO_DIR has mode ${(stats.mode & 0o777).toString(8)}: no one but `
-        + 'its owner may write it');
-    }
-  }
-  for (const name of ['alternates', 'http-alternates']) {
-    if (!await isMissing(join(objects, 'info', name))) {
-      throw new PushRefusedError(`FACTORY_REPO_DIR's objects have info/${name}: their objects would come from elsewhere`);
-    }
-  }
-  return objects;
 }
 
 /**
@@ -170,33 +120,15 @@ export async function pushTask({
 }) {
   checkTarget({ task, sha, branch, repository, tokens });
   const { url } = pushTarget(repository, gitBase);
-  const taskDir = join(stateDir, 'tasks', task.runId);
-  const dir = join(taskDir, 'push');
-  await ensureOwnDirectory(join(stateDir, 'tasks'), { uid });
-  await ensureOwnDirectory(taskDir, { uid });
-  await rm(dir, { recursive: true, force: true });
-  await ensureOwnDirectory(dir, { exclusive: true, uid });
-  try {
-    const objects = await mainObjects(repoDir, { uid });
-    const repo = join(dir, 'repo.git');
-    const reference = join(dir, 'reference.git');
-    await initBare(dir, repo, { git });
-    await initBare(dir, reference, { git });
-    await hooks.afterInit?.(repo);
-    await checkPushConfig(repo, reference, { git });
-    await mkdir(join(repo, 'objects', 'info'), { recursive: true, mode: 0o700 });
-    await writeFile(join(repo, 'objects', 'info', 'alternates'), `${objects}\n`,
-      { mode: 0o600, flag: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW });
-    await loadBundle({ gitDir: repo, bundle, prerequisite: task.baseSha, ref: { sha, name: `refs/heads/${branch}` }, git });
-    await hooks.beforeToken?.(repo);
-    await checkPushConfig(repo, reference, { git });
-    const command = gitPushCommand({ token: await tokens.getToken(), sha, branch, url });
-    const result = await runGit({
-      cwd: repo, gitDir: repo, git, args: command.args, allow: command.allow, set: command.set, baseEnv,
-      timeoutMs: PUSH_TIMEOUT_MS,
+  return withTaskObjects({ stateDir, repoDir, task, bundle, sha, branch, purpose: 'push', uid, git, hooks },
+    async ({ repo, reference }) => {
+      await hooks.beforeToken?.(repo);
+      await checkPushConfig(repo, reference, { git });
+      const command = gitPushCommand({ token: await tokens.getToken(), sha, branch, url });
+      const result = await runGit({
+        cwd: repo, gitDir: repo, git, args: command.args, allow: command.allow, set: command.set, baseEnv,
+        timeoutMs: PUSH_TIMEOUT_MS,
+      });
+      return readPushResult(result, command.ref);
     });
-    return readPushResult(result, command.ref);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 }
