@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 
 import { HOST_CONFIG_FIELDS, MASKED_PATHS, hostConfigViolations } from '../src/container/host-config.mjs';
 import { expectedMounts } from '../src/container/mounts.mjs';
+import { TaskContainerError, checkContainer } from '../src/container/task-container.mjs';
 import { checkTaskConfig } from '../src/container/task-config.mjs';
 import { dockerDefaultHostConfig } from '../testing/docker-hostconfig.mjs';
 import { CONFIG, CONFIG_PATH, LOCK } from '../testing/task-product.mjs';
@@ -98,8 +99,9 @@ for (const field of HOST_CONFIG_FIELDS) {
     const hostConfig = goodHostConfig();
     hostConfig[field] = wrong(field, hostConfig[field]);
     const found = hostConfigViolations(hostConfig, { runId: RUN_ID, carried: carriedConfig() });
-    assert.deepEqual(found, [`HostConfig.${field} is neither what the dispatcher set nor Docker's default (its value `
-      + 'is not quoted)']);
+    assert.deepEqual(found, [field === 'CapAdd'
+      ? 'HostConfig.CapAdd adds 1 capability off the configuration\'s and its features\', at CapAdd[1] (not named)'
+      : `HostConfig.${field} is neither what the dispatcher set nor Docker's default (its value is not quoted)`]);
     assert.ok(found.every((line) => !line.includes('ghs_')), found.join());
   });
 }
@@ -139,3 +141,31 @@ test('#0-284 AC3: the capabilities may be fewer than the configuration\'s, never
   }
 });
 
+
+test('review round 1 of factory#22, ARC-02: one rule of the capabilities, the table\'s: a listed feature\'s capAdd '
+  + 'passes, a capability off the configuration\'s and its features\' is refused once, by its position', () => {
+  const base = carriedConfig();
+  // A feature of the list that declares a capability (none does today: the one listed declares none).
+  const withFeatureCap = { ...base, features: base.features.map((f) => ({ ...f,
+    metadata: { ...f.metadata, capAdd: ['SYS_PTRACE'] } })) };
+  const hostConfig = { ...goodHostConfig(withFeatureCap), CapAdd: ['CAP_NET_ADMIN', 'CAP_NET_RAW', 'CAP_SYS_PTRACE'] };
+  assert.deepEqual(hostConfigViolations(hostConfig, { runId: RUN_ID, carried: withFeatureCap }), []);
+  const containerId = 'c'.repeat(64);
+  const imageId = `sha256:${'a'.repeat(64)}`;
+  const info = (hc, c) => ({ Id: containerId, Image: imageId, Config: { Labels: { 'factory.task': RUN_ID } },
+    HostConfig: hc, Mounts: expectedMounts(RUN_ID, c).map((m) => ({ Type: m.Type, Source: m.Source,
+      Name: m.Type === 'volume' ? m.Source : undefined, Destination: m.Destination, RW: m.RW })) });
+  assert.equal(checkContainer(info(hostConfig, withFeatureCap), { containerId, runId: RUN_ID, carried: withFeatureCap,
+    imageId }), imageId, 'checkContainer takes the feature\'s capability too');
+  const off = { ...hostConfig, CapAdd: ['CAP_NET_ADMIN', `CAP_${SECRET}`] };
+  assert.throws(() => checkContainer(info(off, withFeatureCap), { containerId, runId: RUN_ID, carried: withFeatureCap,
+    imageId }), (error) => {
+    assert.ok(error instanceof TaskContainerError);
+    assert.equal(error.message, 'the task container\'s HostConfig is not the dispatcher\'s: HostConfig.CapAdd adds 1 '
+      + 'capability off the configuration\'s and its features\', at CapAdd[1] (not named)');
+    return true;
+  });
+  const privileged = { ...hostConfig, Privileged: true };
+  assert.throws(() => checkContainer(info(privileged, withFeatureCap), { containerId, runId: RUN_ID,
+    carried: withFeatureCap, imageId }), /: HostConfig\.Privileged is neither what the dispatcher set nor Docker's default \(its value is not quoted\)$/);
+});

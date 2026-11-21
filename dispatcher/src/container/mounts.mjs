@@ -5,6 +5,12 @@
  */
 import { FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, WORKSPACE, taskPaths } from './paths.mjs';
 
+/**
+ * The one key of a mount, whichever form docker gives it in (review round 1 of factory#22, ARC-02): the container's
+ * Mounts and HostConfig.Mounts are each mapped to { Type, Source, Destination, RW } first, a volume by its name.
+ */
+export const mountKey = (m) => JSON.stringify([m?.Type, m?.Source, m?.Destination, m?.RW === true]);
+
 /** The mounts the container must have, exactly: the dispatcher's and the listed features'. */
 export function expectedMounts(runId, carried) {
   const { work, claudeVolume } = taskPaths(runId);

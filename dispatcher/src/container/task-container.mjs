@@ -39,7 +39,7 @@ import { blockTask } from '../state/tasks.mjs';
 import { killTask } from './daemon.mjs';
 import { parseJsonc } from './jsonc.mjs';
 import { hostConfigViolations } from './host-config.mjs';
-import { expectedMounts } from './mounts.mjs';
+import { expectedMounts, mountKey } from './mounts.mjs';
 import { TASK_LABEL, WORKSPACE, taskPaths } from './paths.mjs';
 import { ContainerTimeoutError, mustRun, runContainerCommand, stderrNote } from './run-container.mjs';
 import { checkImageMetadata, checkTaskConfig } from './task-config.mjs';
@@ -104,8 +104,6 @@ export async function readTaskConfig({ repoDir, base, path, git }) {
   return carried;
 }
 
-const mountKey = (m) => JSON.stringify([m.Type, m.Source, m.Destination, m.RW]);
-
 /**
  * The container `info` (docker container inspect's) held to what the dispatcher asked for (#0-284: its image the ID
  * recorded, its HostConfig to the closed table). A refusal names positions and counts, never a value of `info`.
@@ -130,19 +128,10 @@ export function checkContainer(info, { containerId, runId, carried, imageId }) {
   if (info.Image !== imageId) {
     refuse(`the task container runs ${info.Image}, not the image checked and recorded for the task, ${imageId}`);
   }
-  if (info.HostConfig?.Privileged !== false) {
-    refuse('the task container is privileged');
-  }
-  const caps = Array.isArray(info.HostConfig?.CapAdd) ? info.HostConfig.CapAdd : [];
-  const extra = caps.map((c, i) => ({ c: String(c).replace(/^CAP_/, ''), i }))
-    .filter(({ c }) => !carried.capAdd.includes(c));
-  if (extra.length > 0) {
-    refuse(`the task container adds ${extra.length} capabilit${extra.length === 1 ? 'y' : 'ies'} off the `
-      + `configuration's, at CapAdd[${extra.map(({ i }) => i).join('], [')}] (not named)`);
-  }
   const mounts = Array.isArray(info.Mounts) ? info.Mounts : [];
   const have = mounts.map((m) => mountKey({ Type: m?.Type, Source: m?.Type === 'volume' ? m?.Name : m?.Source,
     Destination: m?.Destination, RW: m?.RW }));
+  // Privilege and capabilities are HostConfig's, and so the table's alone (host-config.mjs).
   const want = expectedMounts(runId, carried);
   const wanted = want.map(mountKey);
   const unexpected = have.map((k, i) => ({ k, i })).filter(({ k }) => !wanted.includes(k)).map(({ i }) => i);

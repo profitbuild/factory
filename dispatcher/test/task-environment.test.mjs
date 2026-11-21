@@ -283,7 +283,7 @@ test('AC9, AC3: the built image\'s metadata off the list, a mount, privilege or 
   await blocked(await setUp(), /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[5\] \(not named\)$/, (fake) => {
     fake.update((s) => { s.scenario.extraMounts = [{ Type: 'bind', Source: '/srv/state', Destination: '/state', RW: true }]; });
   });
-  await blocked(await setUp(), /the task container is privileged/, (fake) => {
+  await blocked(await setUp(), /HostConfig\.Privileged is neither what the dispatcher set nor Docker's default/, (fake) => {
     fake.update((s) => { s.scenario.privileged = true; });
   });
   await blocked(await setUp(), /devcontainer up failed \(exit 1\); its stderr, the agent's side's, is not quoted: it is kept in \S+$/, (fake) => {
@@ -548,7 +548,7 @@ test('#0-284 AC4: a value the daemon returned reaches no refusal and no task.jso
     [(s) => { s.scenario.extraMounts = [{ Type: 'bind', Source: '/', Destination: `/${secret}`, RW: true }]; },
       /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[5\] \(not named\)$/],
     [(s) => { s.scenario.hostConfig = { CapAdd: ['CAP_NET_ADMIN', `CAP_${secret}`] }; },
-      /adds 1 capability off the configuration's, at CapAdd\[1\] \(not named\)$/],
+      /HostConfig\.CapAdd adds 1 capability off the configuration's and its features', at CapAdd\[1\] \(not named\)$/],
     [(s) => { s.scenario.hostConfig = { [`X${secret}`]: secret }; },
       /HostConfig holds 1 field off the dispatcher's table with a value other than its zero, at position \d+ of its keys \(not named\)/],
   ]) {

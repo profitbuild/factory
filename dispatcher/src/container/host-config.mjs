@@ -15,7 +15,8 @@
  *  - (daemon/create_unix.go) MaskedPaths and ReadonlyPaths, when not given, oci.DefaultSpec()'s
  *    (daemon/pkg/oci/defaults.go): the masked paths below, and one /sys/devices/system/cpu/cpu<N>/thermal_throttle for
  *    each possible CPU that has it, which depends on the host;
- *  - Runtime runc, the daemon's default runtime (checked in `docker info` before, daemon.mjs, checkDaemonOptions);
+ *  - Runtime runc, the daemon's default runtime, DAEMON_DEFAULT_RUNTIME (checked in `docker info` before, daemon.mjs,
+ *    checkDaemonOptions);
  *  - what the Docker CLI sends for `docker run` with no option: RestartPolicy "no", ConsoleSize [0, 0], empty lists.
  * The VM's container made with no option (2026-11-21): Runtime runc, SecurityOpt null, CgroupnsMode private, IpcMode
  * private, NetworkMode bridge. A field whose value Docker writes as null or as an empty list or object, by version, is
@@ -26,7 +27,8 @@
  */
 import { isDeepStrictEqual } from 'node:util';
 
-import { expectedMounts } from './mounts.mjs';
+import { DAEMON_DEFAULT_RUNTIME } from './daemon.mjs';
+import { expectedMounts, mountKey } from './mounts.mjs';
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 /** null, absent, [] or {}: the forms of an empty list or map across Docker's versions. */
@@ -59,7 +61,8 @@ const RUN_ARG_RULES = [
 ];
 
 /** HostConfig.Mounts as the CLI's --mount gives it: Type, Source (a volume's name), Target and ReadOnly when set. */
-const mountKey = (m) => JSON.stringify([m.Type, m.Source, m.Target, m.ReadOnly === true]);
+const configMountKey = (m) => mountKey({ Type: m?.Type, Source: m?.Source, Destination: m?.Target,
+  RW: m?.ReadOnly !== true });
 
 /**
  * What the dispatcher set, for the fields it sets: from the carried configuration and its features.
@@ -81,25 +84,47 @@ export function dispatcherSet(runId, carried) {
     capAdd: [...new Set([...carried.capAdd, ...carried.features.flatMap((f) => f.metadata.capAdd ?? [])])],
     securityOpt: [...new Set(carried.features.flatMap((f) => f.metadata.securityOpt ?? []))],
     extraHosts,
-    mounts: expectedMounts(runId, carried).map((m) => mountKey({ Type: m.Type, Source: m.Source, Target: m.Destination,
-      ReadOnly: !m.RW })).sort(),
+    mounts: expectedMounts(runId, carried).map(mountKey).sort(),
   };
 }
 
-/** Each field of HostConfig the table knows: a test of its value, given what the dispatcher set. */
+/**
+ * HostConfig.CapAdd, the one rule of the capabilities (review round 1 of factory#22, ARC-02: checkContainer had a
+ * second, narrower one): each the configuration's or a listed feature's, `CAP_` or not, each once. A refusal names the
+ * positions of those off it, never a capability.
+ */
+function capAdd(value, set) {
+  if (empty(value)) {
+    return true;
+  }
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  const names = value.map((c) => (typeof c === 'string' ? c.replace(/^CAP_/, '') : null));
+  const off = names.map((c, i) => ({ c, i })).filter(({ c }) => c === null || !set.capAdd.includes(c)).map(({ i }) => i);
+  if (off.length > 0) {
+    return `HostConfig.CapAdd adds ${off.length} capabilit${off.length === 1 ? 'y' : 'ies'} off the configuration's and `
+      + `its features', at CapAdd[${off.join('], [')}] (not named)`;
+  }
+  return new Set(names).size === names.length ? true : 'HostConfig.CapAdd holds a capability twice (not named)';
+}
+
+/**
+ * Each field of HostConfig the table knows: a test of its value, given what the dispatcher set. It gives true, false
+ * (the field's refusal), or a refusal of its own that says more, by position, never by value.
+ */
 const TABLE = {
   // The dispatcher's.
-  CapAdd: (value, set) => empty(value) || (Array.isArray(value) && new Set(value).size === value.length
-    && value.every((c) => typeof c === 'string' && set.capAdd.includes(c.replace(/^CAP_/, '')))),
+  CapAdd: capAdd,
   SecurityOpt: (value, set) => sameSet(value, set.securityOpt),
   ExtraHosts: (value, set) => sameSet(value, set.extraHosts),
   Mounts: (value, set) => Array.isArray(value) && value.every((m) => isObject(m)
     && Object.keys(m).every((k) => ['Type', 'Source', 'Target', 'ReadOnly'].includes(k)))
-    && isDeepStrictEqual(value.map(mountKey).sort(), set.mounts),
+    && isDeepStrictEqual(value.map(configMountKey).sort(), set.mounts),
   Binds: empty,
   // Docker's defaults (see above).
   Privileged: is(false),
-  Runtime: is('runc'),
+  Runtime: is(DAEMON_DEFAULT_RUNTIME),
   NetworkMode: is('bridge'),
   IpcMode: is('private'),
   CgroupnsMode: is('private'),
@@ -189,7 +214,10 @@ export function hostConfigViolations(hostConfig, { runId, carried }) {
   }
   const found = [];
   for (const [field, test] of Object.entries(TABLE)) {
-    if (!test(hostConfig[field], set)) {
+    const verdict = test(hostConfig[field], set);
+    if (typeof verdict === 'string') {
+      found.push(verdict);
+    } else if (!verdict) {
       found.push(`HostConfig.${field} is neither what the dispatcher set nor Docker's default (its value is not `
         + 'quoted)');
     }
