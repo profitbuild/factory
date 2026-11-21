@@ -64,6 +64,10 @@ ADR-0060 D5 as amended), which a product's task container loads read-only from `
   plugin's hooks are `hooks/hooks.json`: `foreground-bash.mjs` refuses a Bash call with `run_in_background` (an
   agent's turns are its budget), and fails closed: every input but a Bash call in the foreground exits 2, and
   `onFailure: "block"` covers a `node` that does not start.
+  The architect has no boundary hooks on this path: the old path's `readonly-bash` and `write-scope` are not
+  ported (migration step M2.0's decision), so in the container nothing limits what it writes. The dispatcher's own
+  check of the paths each call's commit changed replaces them (`writeScopes`, fail closed, incident-platform backlog
+  #0-302); until then the architect's text alone asks it to write only its plan file and an ADR.
 - **Checks.** `dispatcher/test/plugin.test.mjs`, in job `Test`: the manifest's name, the agents' frontmatter
   exactly `name`, `description`, `tools`, `model`, `maxTurns` (a key Claude Code would ignore fails here),
   a list of refused patterns (the first product's names and paths, a stack's words) absent from `agents/`, no commit,
