@@ -2,8 +2,8 @@
 /**
  * Proves builder-app against GitHub, on the build VM as the dispatcher's user (incident-platform backlog #0-271):
  *
- *   node --env-file=/home/dispatcher/.config/factory/env dispatcher/bin/check-app.mjs --repository <owner/name> \
- *     [--api <url>]
+ *   node --env-file=/home/dispatcher/.config/factory/env dispatcher/bin/check-app.mjs \
+ *     --adapter-from-repo | --repository <owner/name> [--api <url>]
  *
  * Its settings come from the environment only (ADR-0055): BUILDER_APP_ID, BUILDER_APP_INSTALLATION_ID and
  * BUILDER_APP_KEY (src/config/builder-env.mjs). Node's own --env-file loads them from the dispatcher's env file; no
@@ -11,12 +11,17 @@
  * the file's value. The file is trusted as code is (it can set NODE_OPTIONS): builder-env.mjs says why and who may
  * write it.
  *
- * `--repository` is the product's, as its adapter's `repository` has it (the shape is the adapter schema's), and is
- * required (incident-platform backlog #0-276): no product is named in the code. It mints a token after every check
- * (the key is a regular file of this user, readable by no one else; the installation on the repository is
- * BUILDER_APP_INSTALLATION_ID, of BUILDER_APP_ID, holding exactly
- * Contents write, Pull requests write and Metadata read; the token is narrowed to that repository, reaches only it
- * and holds the same three), expects 404 for the app's installation on profitbuild/factory, and revokes the token.
+ * The repository the token is narrowed to is the product's, and no product is named in the code (incident-platform
+ * backlog #0-276). `--adapter-from-repo` (#0-278 AC8) takes it from the adapter's `repository`, the adapter read as
+ * the dispatcher reads it: `.factory/adapter.json` at refs/heads/main of FACTORY_REPO_DIR (from the same env file,
+ * with every other FACTORY_* setting; the clone checked first as cli.mjs checks it, git/task-objects.mjs checkRepoDir),
+ * a blob of the base, checked against its schema and the base's tree
+ * (src/product/adapter-from-base.mjs); nothing is fetched. `--repository <owner/name>` names it, in the adapter
+ * schema's shape, until the VM's install-builder-app.sh passes none of its own (then it goes); exactly one of the two.
+ * It mints a token after every check (the key is a regular file of this user, readable by no one else; the
+ * installation on the repository is BUILDER_APP_INSTALLATION_ID, of BUILDER_APP_ID, holding exactly Contents write,
+ * Pull requests write and Metadata read; the token is narrowed to that repository, reaches only it and holds the same
+ * three), expects 404 for the app's installation on profitbuild/factory, and revokes the token.
  * Each check passed is a line on stdout; the first that fails is a line on stderr, and the exit code 1. No token is
  * printed. `--api` is GitHub's API, https://api.github.com, or a test's http:// origin on a loopback address, and no
  * other host, HTTPS or not: the app's JWT goes to it (url-policy.mjs, incident-platform backlog #0-276).
@@ -26,28 +31,43 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { readBuilderEnv } from '../src/config/builder-env.mjs';
+import { readFactoryEnv } from '../src/config/factory-env.mjs';
+import { mainCommit } from '../src/git/base-bundle.mjs';
+import { checkRepoDir } from '../src/git/task-objects.mjs';
 import { GITHUB_API } from '../src/github/app-token.mjs';
 import { checkApiUrl } from '../src/github/checked-token.mjs';
 import { parseRepository } from '../src/github/builder-token.mjs';
 import { checkApp } from '../src/github/check-app.mjs';
+import { readAdapter } from '../src/product/adapter-from-base.mjs';
 
 const say = (stream, line) => stream.write(`check-app: ${line}\n`);
 
 export async function main(argv, env = process.env, fetchImpl = fetch) {
   const { values } = parseArgs({
     args: argv,
-    options: { api: { type: 'string', default: GITHUB_API }, repository: { type: 'string' } },
+    options: { api: { type: 'string', default: GITHUB_API }, repository: { type: 'string' },
+      'adapter-from-repo': { type: 'boolean' } },
     strict: true,
     allowPositionals: false,
   });
   checkApiUrl(values.api);
-  if (values.repository === undefined) {
-    throw new Error('--repository <owner/name> is required: the product\'s repository, as its adapter has it');
+  const fromRepo = values['adapter-from-repo'] === true;
+  if ((values.repository === undefined) === !fromRepo) {
+    throw new Error('exactly one of --adapter-from-repo and --repository <owner/name> is required: the product\'s '
+      + 'repository, as its adapter has it');
   }
-  parseRepository(values.repository);
   const settings = readBuilderEnv(env);
+  let repository = values.repository;
+  if (fromRepo) {
+    const { repoDir } = readFactoryEnv(env);
+    // The clone checked as cli.mjs checks it, before any git runs in it (review round 1 of factory#20, d).
+    await checkRepoDir(repoDir);
+    repository = (await readAdapter({ repoDir, base: await mainCommit(repoDir) })).repository;
+    say(process.stdout, `repository from the adapter at FACTORY_REPO_DIR's main: ${repository}`);
+  }
+  parseRepository(repository);
   say(process.stdout, `settings: app ${settings.appId}, installation ${settings.installationId}`);
-  await checkApp({ env: settings, repository: values.repository, baseUrl: values.api, fetchImpl,
+  await checkApp({ env: settings, repository, baseUrl: values.api, fetchImpl,
     report: (line) => say(process.stdout, line) });
   say(process.stdout, 'all checks passed');
 }

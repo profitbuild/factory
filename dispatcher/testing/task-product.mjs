@@ -2,7 +2,7 @@
 // #0-277 AC9): a generic one, named after no product. Its main holds `.devcontainer/task.json` (JSONC: comments and
 // trailing commas), the lockfile devcontainer reads beside it, and a Dockerfile; made by the test's git, as
 // FACTORY_REPO_DIR would hold it, a bare clone.
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { git } from './git-fixtures.mjs';
@@ -50,11 +50,12 @@ export const CONFIG = {
 
 /**
  * A product's clone (a work tree, for the test's git) and a bare clone of it, FACTORY_REPO_DIR, whose main holds
- * `files` (path -> text), by default the configuration, its lockfile and a Dockerfile.
+ * `files` (path -> text, null for none), by default the configuration, its lockfile and a Dockerfile; `executable`
+ * the paths written with mode 755 (a script the adapter names), `links` symlinks (path -> target).
  *
  * @returns {Promise<{ work: string, repoDir: string, base: string }>}
  */
-export async function makeTaskProduct(root, { files = {}, links = {} } = {}) {
+export async function makeTaskProduct(root, { files = {}, links = {}, executable = [] } = {}) {
   const work = join(root, 'product');
   await mkdir(work, { recursive: true });
   git(work, ['init', '-q', '-b', 'main']);
@@ -71,6 +72,9 @@ export async function makeTaskProduct(root, { files = {}, links = {} } = {}) {
     }
     await mkdir(join(work, path, '..'), { recursive: true });
     await writeFile(join(work, path), text);
+    if (executable.includes(path)) {
+      await chmod(join(work, path), 0o755);
+    }
   }
   for (const [path, target] of Object.entries(links)) {
     await mkdir(join(work, path, '..'), { recursive: true });

@@ -11,7 +11,8 @@
 //    real, with /home/factory/tasks mapped to the test's tasks/ and a `chown` that records its arguments (a test is
 //    not root): the clone is a real git's, the removal a real rm's;
 //  - `docker exec ... <id> <command>` runs the command for real (`timeout` included), in the container's workspace
-//    as mapped, with the -e variables it was given;
+//    as mapped (an argument that is /workspace mapped too, and /tmp/ to the test's own directory, mapped back in what
+//    it prints), with the -e variables it was given;
 //  - `devcontainer up` reads the override (`--config`) and, as the real CLI does, writes the features' lockfile
 //    beside the configuration file it was given, failing when that is in the clone or cannot be written; it makes a
 //    container from the override (mounts from workspaceMount, the `--mount=` run arguments and those of the image's
@@ -27,6 +28,7 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { labelEntry } from './feature-artifact.mjs';
+import { checkShellSafe } from './state-dir.mjs';
 
 const PROGRAMS = { '/usr/bin/docker': 'docker', '/usr/local/bin/devcontainer': 'devcontainer' };
 const TASKS_ROOT = '/home/factory/tasks';
@@ -42,9 +44,13 @@ export function makeFakeDaemon(root, initial = {}) {
   const dir = join(root, 'fake');
   const tasks = join(root, 'tasks');
   const shims = join(dir, 'shims');
+  const tmp = join(dir, 'tmp');
+  // Refused before anything is made or run: the container's /tmp/ goes unquoted into the unpacking script's text.
+  checkShellSafe(tmp, 'the fake daemon\'s /tmp/ (config.tmp)');
   mkdirSync(shims, { recursive: true });
+  mkdirSync(tmp, { recursive: true, mode: 0o700 });
   mkdirSync(tasks, { recursive: true, mode: 0o700 });
-  const config = { dir, tasks, shims, state: join(dir, 'state.json'), calls: join(dir, 'calls.jsonl') };
+  const config = { dir, tasks, shims, tmp, state: join(dir, 'state.json'), calls: join(dir, 'calls.jsonl') };
   writeFileSync(join(shims, 'chown'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(join(dir, 'chown.log'))}\n`);
   chmodSync(join(shims, 'chown'), 0o755);
   const sudo = join(dir, 'sudo.mjs');
@@ -61,6 +67,9 @@ export function makeFakeDaemon(root, initial = {}) {
   return {
     sudo,
     tasks,
+    tmp,
+    /** A path of the container's /tmp/ as the host holds it, under the test's own directory. */
+    hostTmp: (path) => path.replace(/^\/tmp\//, `${tmp}/`),
     read,
     write: (next) => writeFileSync(config.state, JSON.stringify(next)),
     update(change) {
@@ -334,9 +343,21 @@ function exec(context, input) {
     fail(`Error response from daemon: container ${args[i]} is not running`);
     return undefined;
   }
-  const command = args.slice(i + 1);
-  if (state.scenario.execFails) {
-    // The call ran and failed, writing what the scenario gives to stderr: the agent's side's words.
+  // An argument naming the container's /workspace is the workspace as mapped, as its -w is (#0-278: the product's
+  // command is run with the clone as its directory). The container's /tmp/ is the test's own directory (review
+  // round 1 of factory#20, f): every /tmp/ in an argument, a script's text included, is mapped there, and mapped
+  // back in what the call prints, so the call sees /tmp/ and the host's /tmp is never touched.
+  const mapsTmp = args.slice(i + 1).some((a) => a.includes('/tmp/'));
+  if (mapsTmp) {
+    // Again where it is used: a config written by hand could hold another (review round 2 of factory#20, 1).
+    checkShellSafe(config.tmp, 'the fake daemon\'s /tmp/ (config.tmp)');
+  }
+  const command = args.slice(i + 1).map((a) => (a === '/workspace' ? host(config, container.workspace)
+    : a.replaceAll('/tmp/', `${config.tmp}/`)));
+  if (state.scenario.execFails && (state.scenario.execFails.when === undefined
+    || command.some((a) => a.includes(state.scenario.execFails.when)))) {
+    // The call ran and failed, writing what the scenario gives to stderr: the agent's side's words (`when`: only a
+    // call with an argument holding it).
     fail(state.scenario.execFails.stderr, state.scenario.execFails.code);
     return undefined;
   }
@@ -350,13 +371,20 @@ function exec(context, input) {
   }
   return new Promise((resolve) => {
     const child = spawn(command[0], command.slice(1), {
-      cwd: host(config, container.workspace), stdio: ['pipe', 'inherit', 'inherit'], env, detached: true,
+      cwd: host(config, container.workspace), stdio: ['pipe', mapsTmp ? 'pipe' : 'inherit', 'inherit'], env,
+      detached: true,
     });
     container.pids = [...(container.pids ?? []), child.pid];
     save();
+    const out = [];
+    child.stdout?.on('data', (chunk) => out.push(chunk));
     child.stdin.on('error', () => {});
     child.stdin.end(input);
     child.on('close', (code, signal) => {
+      if (mapsTmp) {
+        process.stdout.write(Buffer.from(Buffer.concat(out).toString('latin1').split(`${config.tmp}/`).join('/tmp/'),
+          'latin1'));
+      }
       process.exitCode = code ?? (signal === 'SIGKILL' ? 137 : 1);
       resolve();
     });

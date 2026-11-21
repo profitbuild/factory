@@ -26,8 +26,8 @@
  */
 import { basename, posix } from 'node:path';
 
-import { firstLines as gitLines, runGit } from '../git/run-git.mjs';
 import { childEnv } from '../process/child-env.mjs';
+import { MODES, blobOf, treeEntry } from '../product/base-tree.mjs';
 import { blockTask } from '../state/tasks.mjs';
 import { killTask } from './daemon.mjs';
 import { parseJsonc } from './jsonc.mjs';
@@ -50,9 +50,6 @@ export const CALL_MARGIN_S = 30;
 const TIMED_OUT = new Set([124, 137]);
 
 const SHA = /^[0-9a-f]{40}$/;
-/** A tree's entries by git's modes, written as octal numbers (a mode as text is six digits). */
-const MODES = Object.freeze({ file: (0o100644).toString(8), executable: (0o100755).toString(8),
-  tree: (0o40000).toString(8).padStart(6, '0') });
 const IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
 const CONTAINER_ID = /^[0-9a-f]{64}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -66,34 +63,6 @@ export function lockPath(configPath) {
   const name = basename(configPath).startsWith('.') ? '.devcontainer-lock.json' : 'devcontainer-lock.json';
   const dir = posix.dirname(configPath);
   return dir === '.' ? name : `${dir}/${name}`;
-}
-
-/** The entry of `path` in the base's tree: `{ mode, type, oid }`, or null when the tree holds no such path. */
-async function treeEntry({ repoDir, base, path, git }) {
-  const result = await runGit({ cwd: repoDir, gitDir: repoDir, git, args: ['ls-tree', '-z', '--full-tree', base, '--',
-    path] });
-  if (result.code !== 0) {
-    refuse(`git ls-tree of the base failed (exit ${result.code}): ${gitLines(result.stderr) || 'no message'}`);
-  }
-  const entries = result.stdout.toString('utf8').split('\0').filter(Boolean);
-  const match = entries.map((e) => /^([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40})\t([\s\S]*)$/.exec(e))
-    .find((m) => m && m[4] === path);
-  return match ? { mode: match[1], type: match[2], oid: match[3] } : null;
-}
-
-async function blobOf({ repoDir, base, path, git, what, optional = false }) {
-  const entry = await treeEntry({ repoDir, base, path, git });
-  if (entry === null && optional) {
-    return null;
-  }
-  if (entry === null || entry.type !== 'blob' || ![MODES.file, MODES.executable].includes(entry.mode)) {
-    refuse(`${what} is not a file of the base (a symlink is refused)`);
-  }
-  const result = await runGit({ cwd: repoDir, gitDir: repoDir, git, args: ['cat-file', 'blob', entry.oid] });
-  if (result.code !== 0) {
-    refuse(`${what} cannot be read from the base`);
-  }
-  return result.stdout.toString('utf8');
 }
 
 /**
@@ -288,5 +257,21 @@ export async function probeTimeout({ container, sudo }) {
   if (result.code !== 0) {
     refuse(`the task image cannot run a call under timeout (exit ${result.code}): the image must hold coreutils' `
       + 'timeout (its stderr, the agent\'s side\'s, is not quoted)');
+  }
+}
+
+/** What the image needs to run a product's command from the base's blobs (product/commands.mjs). */
+export const TRUSTED_TOOLS = Object.freeze(['sh', 'mktemp', 'tar', 'rm']);
+
+/**
+ * The probe of the tools the product's commands are run with (incident-platform backlog #0-278): a missing one is
+ * found when the container is set up, not when the gate is run.
+ */
+export async function probeTools({ container, sudo }) {
+  const result = await execInTask({ container, limitS: 30, graceS: 5, sudo,
+    args: ['sh', '-c', 'for t in "$@"; do command -v -- "$t" >/dev/null || exit 1; done', 'probe', ...TRUSTED_TOOLS] });
+  if (result.code !== 0) {
+    refuse(`the task image cannot run the product's commands from the base (exit ${result.code}): the image must hold `
+      + `${TRUSTED_TOOLS.join(', ')} (its stderr, the agent's side's, is not quoted)`);
   }
 }

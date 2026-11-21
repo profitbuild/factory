@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/profitbuild/factory/blob/main/schemas/adapter.schema.json",
   "title": "A product's adapter, .factory/adapter.json",
-  "description": "What the factory needs to know of a product (incident-platform ADR-0060 D6, stage-4.md \"4.3\", backlog #0-275). Every field is required and no other is allowed. A command is a list of arguments, run without a shell; a path is relative to the product's root and never leaves it. The dispatcher reads this file and runs the product's commands from the product's main only (4.3d). Checked by dispatcher/src/schema/validate.mjs, which refuses any keyword it does not check.",
+  "description": "What the factory needs to know of a product (incident-platform ADR-0060 D6, stage-4.md \"4.3\", backlog #0-275). Every field is required and no other is allowed. A command is a list of arguments, run without a shell; a path is relative to the product's root and never leaves it. The dispatcher reads this file, as a blob, from the base commit of its own clone of the product's main, never from a checkout nor from a task's branch, and checks every path it names against that base's tree: no symlink on the way or at it (backlog #0-278); the schema checks the spelling only. The product's commands run in the task container only, from the base's blobs of trustedPaths. Checked by dispatcher/src/schema/validate.mjs, which refuses any keyword it does not check.",
   "type": "object",
   "required": ["repository", "gate", "changedPaths", "queue", "protectedPaths", "trustedPaths", "taskImage", "profile",
     "factoryVersion"],
@@ -14,7 +14,7 @@
       "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/(?!\\.{1,2}$)[A-Za-z0-9._-]+$"
     },
     "gate": {
-      "description": "The product's test gate: the command, and the contract its JSON answer keeps (schemas/gate.schema.json).",
+      "description": "The product's test gate: the command, and the contract its JSON answer keeps (schemas/gate.schema.json). Its script runs in the task container from a fresh directory holding the base's blobs of trustedPaths, with the task's clone (/workspace) as its working directory: only what the script reads relative to itself ($(dirname \"$0\")) is the base's; a file it reads by a path relative to the clone is the copy in the agent's working tree (backlog #0-278).",
       "type": "object",
       "required": ["command", "contract"],
       "additionalProperties": false,
@@ -24,7 +24,7 @@
       }
     },
     "changedPaths": {
-      "description": "The command that lists the paths a branch changes and classifies them (Owner-only, needs a human).",
+      "description": "The product's command that lists the paths a branch changes and classifies them (areas, rule files, reviewers): advisory, run in the task container, and no refusal of the dispatcher rests on it (backlog #0-278). Its script runs in the task container from a fresh directory holding the base's blobs of trustedPaths, with the task's clone (/workspace) as its working directory: only what the script reads relative to itself ($(dirname \"$0\")) is the base's; a file it reads by a path relative to the clone is the copy in the agent's working tree (backlog #0-278).",
       "type": "object",
       "required": ["command"],
       "additionalProperties": false,
@@ -52,7 +52,7 @@
       }
     },
     "trustedPaths": {
-      "description": "The product's paths the dispatcher runs from main, which a task branch may not change (a directory ends with /).",
+      "description": "The product's paths that judge a task, which its branch may not change (a directory ends with /): the dispatcher refuses a branch that changes one, by its own check against the base's adapter, and puts the base's blobs of them into the task container before each command. Each command's script, and .factory/adapter.json itself, must lie under one of them (backlog #0-278).",
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,

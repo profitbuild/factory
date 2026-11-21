@@ -5,11 +5,15 @@
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { rm } from 'node:fs/promises';
+import { chmod, mkdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { ADAPTER, commit, makeAdapterProduct } from '../testing/adapter-product.mjs';
 import { APP_ID, INSTALLATION_ID, PERMISSIONS, makeRoot, startBuilderGitHub, tokenNumber, writeAppFiles }
   from '../testing/builder-github.mjs';
+import { git } from '../testing/git-fixtures.mjs';
+import { validEnv } from '../testing/state-dir.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../bin/check-app.mjs', import.meta.url));
 const fake = await startBuilderGitHub();
@@ -126,11 +130,14 @@ test('check-app reports the first failure, not the revoke\'s, when both fail', a
   assert.doesNotMatch(result.stderr, /could not be revoked/);
 });
 
-test('check-app requires --repository, in the adapter schema\'s shape, and asks nothing without it (#0-276)', async () => {
+test('check-app requires --repository or --adapter-from-repo, in the adapter schema\'s shape, and asks nothing without '
+  + 'it (#0-276, #0-278)', async () => {
   const start = fake.requests.length;
   const none = await checkApp([], undefined, { repository: null });
   assert.equal(none.code, 1);
-  assert.match(none.stderr, /^check-app: --repository <owner\/name> is required/);
+  assert.match(none.stderr, /^check-app: exactly one of --adapter-from-repo and --repository <owner\/name> is required/);
+  const both = await checkApp(['--adapter-from-repo']);
+  assert.match(both.stderr, /^check-app: exactly one of --adapter-from-repo and --repository/);
   for (const repository of ['incident-platform', 'profitbuild/..', './x', 'a/b/c']) {
     const bad = await checkApp([], undefined, { repository });
     assert.equal(bad.code, 1, repository);
@@ -151,4 +158,69 @@ test('check-app checks the repository it is given: another product\'s installati
   fake.state.repositories = ['profitbuild/incident-platform'];
   const wrong = await checkApp([], undefined, { repository: 'profitbuild/other-product' });
   assert.equal(wrong.code, 1, 'a token reaching another repository is refused');
+});
+
+/** An env file of the VM's: builder-app's settings and every FACTORY_* one, FACTORY_REPO_DIR the product's clone. */
+async function vmFiles(repoDir) {
+  const app = await writeAppFiles(root, fake.privateKey);
+  const vars = { ...validEnv(join(root, 'state'), repoDir), ...app.vars };
+  return writeAppFiles(root, fake.privateKey, {
+    envText: `${Object.entries(vars).map(([k, v]) => `${k}=${v}\n`).join('')}` });
+}
+
+test('#0-278 AC8: --adapter-from-repo takes the repository from the adapter at FACTORY_REPO_DIR\'s main', async () => {
+  const dir = join(root, 'adapter-from-repo');
+  await mkdir(dir, { mode: 0o700 });
+  const product = await makeAdapterProduct(dir, { adapter: { ...ADAPTER, repository: 'profitbuild/other-product' } });
+  fake.state.repositories = ['profitbuild/other-product'];
+  // A later commit on another ref, and the work tree's adapter changed: only refs/heads/main of the clone counts.
+  await commit(product.work, { files: { '.factory/adapter.json': `${JSON.stringify(ADAPTER)}\n` } });
+  git(product.work, ['push', '-q', product.repoDir, 'HEAD:refs/heads/other']);
+  const files = await vmFiles(product.repoDir);
+  const start = fake.requests.length;
+  const result = await checkApp(['--adapter-from-repo'], files, { repository: null });
+  assert.equal(result.code, 0, result.stderr);
+  const lines = result.stdout.trim().split('\n');
+  assert.equal(lines[0], 'check-app: repository from the adapter at FACTORY_REPO_DIR\'s main: profitbuild/other-product');
+  const posts = fake.requests.slice(start).filter((r) => r.method === 'POST');
+  assert.deepEqual(posts.map((r) => r.body.repositories), [['other-product']], 'the token narrowed to the adapter\'s');
+  assert.equal(lines.at(-1), 'check-app: all checks passed');
+});
+
+test('#0-278 AC8: --adapter-from-repo refuses a main with no adapter, or one off its rules, and asks nothing', async () => {
+  for (const [what, options, pattern] of [
+    ['none', { files: { '.factory/adapter.json': null } }, /^check-app: the base holds no \.factory\/adapter\.json$/m],
+    ['a symlink', { files: { 'BACKLOG.md': null }, links: { 'BACKLOG.md': 'README.md' } },
+      /^check-app: the adapter's queue\.files\[0\] reaches a symlink in the base/m],
+  ]) {
+    const dir = join(root, `refused-${what.replace(' ', '-')}`);
+    await mkdir(dir, { mode: 0o700 });
+    const product = await makeAdapterProduct(dir, options);
+    const start = fake.requests.length;
+    const result = await checkApp(['--adapter-from-repo'], await vmFiles(product.repoDir), { repository: null });
+    assert.equal(result.code, 1, what);
+    assert.match(result.stderr, pattern, what);
+    assert.equal(fake.requests.length, start, `${what}: no request`);
+  }
+});
+
+test('review round 1 d: --adapter-from-repo checks the clone as cli.mjs does, before any git and any request', async () => {
+  const dir = join(root, 'open-clone');
+  await mkdir(dir, { mode: 0o700 });
+  const product = await makeAdapterProduct(dir);
+  // No main to read: a git run in the clone would fail on it, so the refusal shows that none ran first.
+  git(product.repoDir, ['update-ref', '-d', 'refs/heads/main']);
+  await chmod(dir, 0o755);
+  const start = fake.requests.length;
+  const open = await checkApp(['--adapter-from-repo'], await vmFiles(product.repoDir), { repository: null });
+  assert.equal(open.code, 1);
+  assert.match(open.stderr, /^check-app: FACTORY_REPO_DIR is not the dispatcher's alone: neither it nor its parent /);
+  await chmod(dir, 0o700);
+  const noMain = await checkApp(['--adapter-from-repo'], await vmFiles(product.repoDir), { repository: null });
+  assert.match(noMain.stderr, /^check-app: git rev-parse in FACTORY_REPO_DIR failed/m, 'git runs once the clone passes');
+  const empty = join(dir, 'empty');
+  await mkdir(empty, { mode: 0o700 });
+  const notRepo = await checkApp(['--adapter-from-repo'], await vmFiles(empty), { repository: null });
+  assert.match(notRepo.stderr, /^check-app: FACTORY_REPO_DIR holds no objects directory/);
+  assert.equal(fake.requests.length, start, 'no request');
 });

@@ -264,3 +264,39 @@ export function gitPushCommand({ token, sha, branch, url }) {
     ref,
   };
 }
+
+/** The ref the dispatcher's clone of main is updated at, from GitHub's: fast-forward only, never forced. */
+export const MAIN_REF = 'refs/heads/main';
+
+/**
+ * The update of FACTORY_REPO_DIR's main from the product's repository on GitHub, with builder-app's `token`
+ * (incident-platform backlog #0-278): what to hand to runGit, in FACTORY_REPO_DIR, whose config is held to a
+ * reference `git init --bare`'s and at most `remote.origin.url` equal to `url` before the token is handed over
+ * (git/main-fetch.mjs). The token's rule is gitPushCommand's: in the environment alone, through GIT_ASKPASS for
+ * `url`'s origin; GIT_ALLOW_PROTOCOL from gitHost; an explicit URL, never a remote's name.
+ *
+ * The refspec is the code's, `refs/heads/main:refs/heads/main`: no `+`, so an update that is not a fast-forward is
+ * refused by git (the ruleset of a product's main refuses a force push: one that is not is an anomaly, never taken in
+ * silence); a bare clone has no remote.origin.fetch, and none is read. No tags, no FETCH_HEAD, no submodule, no gc;
+ * every object received checked by fsck (transfer.fsckObjects).
+ *
+ * @param {{ token: string, url: string }} options `url` from pushUrl(repository)
+ * @returns {{ args: string[], allow: readonly string[], set: Record<string, string> }}
+ */
+export function gitFetchCommand({ token, url }) {
+  if (typeof token !== 'string' || token === '') {
+    throw new Error('gitFetchCommand: a token is required');
+  }
+  const { origin, allowProtocols } = checkPushUrl(url);
+  return {
+    args: ['-c', 'transfer.fsckObjects=true', '-c', 'gc.auto=0', 'fetch', '--no-tags', '--no-write-fetch-head',
+      '--no-recurse-submodules', url, `${MAIN_REF}:${MAIN_REF}`],
+    allow: PUSH_ENV_ALLOWED,
+    set: {
+      GIT_ASKPASS,
+      GIT_ALLOW_PROTOCOL: allowProtocols,
+      FACTORY_PUSH_ORIGIN: origin,
+      FACTORY_PUSH_TOKEN: token,
+    },
+  };
+}
