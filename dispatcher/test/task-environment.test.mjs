@@ -572,3 +572,33 @@ test('#0-284 AC6: a failed call\'s stderr, the agent\'s side\'s, is in a file 60
   assert.equal(await readFile(file, 'utf8'), `error: ${secret}\n`, 'kept for the owner, whole');
   assert.ok(!reason.includes('ghs_'));
 });
+
+test('review round 1 of factory#22, GEN-02: what docker and devcontainer print off its form ends the task BLOCKED, or '
+  + 'refuses the run for docker info, and quotes none of it', async () => {
+  const secret = SECRET();
+  for (const [change, pattern] of [
+    [(s) => { s.scenario.buildStdout = `{"outcome":"error","message":"${secret}"}\n`; },
+      /^the task container: devcontainer build did not report an image built$/],
+    [(s) => { s.scenario.buildStdout = `building ${secret}\n`; },
+      /^the task container: devcontainer build did not end with its JSON outcome$/],
+    [(s) => { s.scenario.upStdout = `started ${secret}\n`; },
+      /^the task container: devcontainer up did not end with its JSON outcome$/],
+    [(s) => { s.scenario.upStdout = `{"outcome":"success","containerId":"${secret}"}\n`; },
+      /^the task container: devcontainer up did not report a container made$/],
+    [(s) => { s.scenario.imageIdRaw = `sha256:${secret}\n`; },
+      /^the task container: docker image inspect did not give the built image's ID, sha256:<64 hex>$/],
+  ]) {
+    const setup = await setUp();
+    await blocked(setup, pattern, (f) => f.update(change));
+    const text = await readFile(join(setup.stateDir, 'tasks', RUN_ID, 'task.json'), 'utf8');
+    assert.ok(!text.includes('ghs_'), text);
+  }
+  const { fake } = await setUp();
+  fake.update((s) => { s.scenario.infoRaw = `not json ${secret}\n`; });
+  await assert.rejects(inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner }, async () => {}),
+    (error) => {
+      assert.equal(error.message, 'docker info\'s answer is not JSON');
+      return true;
+    });
+  assert.deepEqual(steps(fake), ['info'], 'no container made, no sweep');
+});

@@ -26,7 +26,8 @@
 //    container from the override (mounts from workspaceMount, the `--mount=` run arguments and those of the image's
 //    label) and an image whose devcontainer.metadata label is what the real CLI would write, the features' entries from their artifacts (feature-artifact.mjs), unless the scenario says
 //    otherwise.
-// A scenario (state.scenario) changes one thing: an image's labels, extra mounts, a container that appears after a
+// A scenario (state.scenario) changes one thing (#0-284: also docker info's, a build's or an up's stdout, or the ID an
+// image's name gives, as raw text: infoRaw, buildStdout, upStdout, imageIdRaw): an image's labels, extra mounts, a container that appears after a
 // command (a rollback starting while the run builds), an rm that removes nothing, an exec that hangs with an orphan
 // holding its output.
 import { spawn } from 'node:child_process';
@@ -285,7 +286,7 @@ async function docker(context, takesInput) {
     return;
   }
   if (command === 'info') {
-    out(`${JSON.stringify({ ...VM_DOCKER_INFO, ...state.scenario.info })}\n`);
+    out(state.scenario.infoRaw ?? `${JSON.stringify({ ...VM_DOCKER_INFO, ...state.scenario.info })}\n`);
     return;
   }
   if (sub.startsWith('container inspect')) {
@@ -310,7 +311,7 @@ async function docker(context, takesInput) {
       return;
     }
     const format = rest[rest.indexOf('--format') + 1];
-    out(format === '{{.Id}}' ? `${id}\n` : `${JSON.stringify(image.labels)}\n`);
+    out(format === '{{.Id}}' ? state.scenario.imageIdRaw ?? `${id}\n` : `${JSON.stringify(image.labels)}\n`);
     return;
   }
   if (command === 'run' || command === 'exec') {
@@ -499,7 +500,7 @@ function build(context) {
   const image = makeImage(state, override);
   state.tags[option('--image-name')] = image;
   save();
-  out(`${JSON.stringify({ outcome: 'success', imageName: [option('--image-name')] })}\n`);
+  out(state.scenario.buildStdout ?? `${JSON.stringify({ outcome: 'success', imageName: [option('--image-name')] })}\n`);
 }
 
 /** HostConfig as Docker 29.9.3 gives it for the container up makes: its defaults, and what the run set. */
@@ -576,6 +577,6 @@ function devcontainer(context) {
   state.containers.push(container);
   after(context, 'up');
   save();
-  out(`${JSON.stringify({ outcome: 'success', containerId: container.id, remoteUser: override.remoteUser,
-    remoteWorkspaceFolder: override.workspaceFolder })}\n`);
+  out(state.scenario.upStdout ?? `${JSON.stringify({ outcome: 'success', containerId: container.id,
+    remoteUser: override.remoteUser, remoteWorkspaceFolder: override.workspaceFolder })}\n`);
 }
