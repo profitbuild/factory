@@ -2,13 +2,13 @@
 // backlog #0-278 AC2, AC6; ADR-0060 D6 as amended), on the fake daemon, whose `docker exec` runs the call for real:
 // the base's copy runs where the branch's differs, and where the container's copy was changed after the branch's last
 // commit; the blobs go in as the dispatcher's own archive on stdin, unpacked into a fresh directory each run, the one a
-// run before left removed; the clone is the working directory; two calls, the directory the first prints held to its
+// run before left removed, in the fake daemon's /tmp (under the test's directory: the host's /tmp is never touched); the clone is the working directory; two calls, the directory the first prints held to its
 // pattern; what the command prints is returned, the agent's side, never quoted in a refusal.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { setUpTaskContainer } from '../src/container/environment.mjs';
@@ -87,12 +87,16 @@ test('G: two calls, the archive on the first\'s stdin; a fresh directory for eac
   assert.ok(TRUSTED_DIR.test(tail[2]), 'the directory the first call printed, held to its pattern');
   assert.deepEqual(calls[0].args.slice(calls[0].args.indexOf('timeout') + 6), ['sh', '-c',
     calls[0].args.at(-2), 'factory-unpack']);
+  // The call sees /tmp/factory-trusted.X; the fake daemon holds the container's /tmp/ under the test's directory (f).
   const dirOf = (r) => lines(r)[2].slice('dir='.length).replace(/\/scripts\/factory$/, '');
   assert.notEqual(dirOf(first), dirOf(second));
-  assert.ok(TRUSTED_DIR.test(dirOf(second)));
-  assert.equal(existsSync(dirOf(first)), false, 'the directory of the run before is removed');
-  assert.equal(await readFile(join(dirOf(second), 'scripts/factory/lib/common.sh'), 'utf8'), 'common=1\n');
-  assert.equal(existsSync(join(dirOf(second), 'src')), false, 'only the trusted paths');
+  assert.ok(TRUSTED_DIR.test(dirOf(first)) && TRUSTED_DIR.test(dirOf(second)));
+  const held = s.fake.hostTmp(dirOf(second));
+  assert.ok(held.startsWith(`${s.fake.tmp}/`));
+  assert.equal(existsSync(s.fake.hostTmp(dirOf(first))), false, 'the directory of the run before is removed');
+  assert.deepEqual(await readdir(s.fake.tmp), [dirOf(second).slice('/tmp/'.length)], 'one directory, the last');
+  assert.equal(await readFile(join(held, 'scripts/factory/lib/common.sh'), 'utf8'), 'common=1\n');
+  assert.equal(existsSync(join(held, 'src')), false, 'only the trusted paths');
 });
 
 test('G: the command\'s arguments are the base adapter\'s, and its exit code and output are the caller\'s to read',
