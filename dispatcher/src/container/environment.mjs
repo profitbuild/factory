@@ -1,9 +1,13 @@
 /**
- * A run's task environment, in ADR-0062's order (incident-platform backlog #0-277; points 2, 4 to 7):
+ * A run's task environment, in ADR-0062's order (incident-platform backlog #0-277; points 2, 4 to 7). Steps 1 and 2
+ * are the run's slot section's, under the dispatcher's lock (refuseOffEnvironment, sweepForRun); 3 to 7 run under
+ * the task's lock alone; 8 under the dispatcher's again (#0-303, ADR-0062 point 7 as amended; cli.mjs takes and
+ * releases the locks):
  *
  *  1. a running container labelled `factory.rollback` refuses the run (the rollback shares the VM by time);
- *  2. the sweep of the whole daemon (daemon.mjs), its result checked: a killed run's leftovers, labelled or not, a
- *     stopped rollback's container and its credential volumes, every work directory;
+ *  2. the sweep (sweepForRun), its result checked: the whole daemon when no other task is live (a killed run's
+ *     leftovers, labelled or not, a stopped rollback's container and its credential volumes, every work directory),
+ *     and only the run's own labelled objects when another task is live;
  *  3. the task's network, labelled `factory.task=<runId>`: the run is visible to a rollback that starts from here on;
  *  4. the rollback checked again: one still building its image when the run started is seen by this check or by
  *     rollback-start.sh's own second one. A refusal here removes the run's own labelled objects, and nothing else:
@@ -20,7 +24,7 @@
  *     `timeout` and of the tools the product's commands run with (#0-278). Any refusal there ends the task BLOCKED,
  *     with the reason, and a label off the list ends it before any container of the task's is made;
  *  7. the phases (4.4's; none in v0), given the container;
- *  8. at the end, BLOCKED or not, the same sweep as in 2, its result checked.
+ *  8. at the end, BLOCKED or not, the same sweep as in 2 (the live tasks counted again), its result checked.
  * Before 1, the daemon's options (`docker info`: rootless, seccomp's builtin profile, cgroup namespaces, runc), checked
  * before the run's first container, the sweep's helper included: a daemon off them refuses the run, and no sweep
  * follows (#0-284; review round 1 of factory#22). Every refusal of 1 and 4 names what it found and the sweep's
@@ -89,20 +93,49 @@ export async function setUpTaskContainer({ stateDir, repoDir, task, adapter, hel
 }
 
 /**
- * Steps 1 to 8 around `inside`, which makes or loads the task (5) and runs its phases (7).
+ * The sweep of a run's slot section and of its end (incident-platform backlog #0-303, ADR-0062 point 7 as amended),
+ * under the dispatcher's lock its caller holds: the whole daemon when no other task is live (in M2, always), and
+ * otherwise only the objects that carry this run's label, since the daemon holds a live task's too. What the sweep of
+ * a shared daemon removes when two tasks are live is #0-285's (M3.4), not this one's.
  *
- * @param {{ runId: string, helperImage: string, stateDir: string, sudo?: string }} options `stateDir` where
- *   every container call's stderr is kept (run-container.mjs)
- * @param {() => Promise<T>} inside
- * @returns {Promise<{ result: T, swept: object }>} `swept`: what the sweep at the start removed
- * @template T
+ * @param {{ runId: string, helperImage: string, stateDir: string, sudo?: string, othersLive: string[] }} options
+ *   `othersLive` the runIds of the other live tasks, counted under the same lock
+ * @returns {Promise<{ scope: 'daemon' | 'own', removed: object | null }>}
  */
-export async function inTaskEnvironment({ runId, helperImage, stateDir, sudo }, inside) {
-  // Before the run's first container, the sweep's helper included: a daemon off the VM's options refuses the run, and
-  // no sweep follows (review round 1 of factory#22, the owner's decision 1).
+export async function sweepForRun({ runId, helperImage, stateDir, sudo, othersLive }) {
+  if (othersLive.length === 0) {
+    return { scope: 'daemon', removed: await sweepDaemon({ runId, helperImage, sudo, stateDir }) };
+  }
+  await removeOwnObjects({ runId, sudo, stateDir });
+  return { scope: 'own', removed: null };
+}
+
+/**
+ * The checks of a run's slot section before its task is made (#0-303; review round 1 of factory#25, decision 2),
+ * under the dispatcher's lock: the daemon's options before the run's first container, the sweep's helper included (a
+ * daemon off the VM's options refuses the run, and no sweep follows: review round 1 of factory#22, decision 1), and
+ * a running rollback refusing the run. The sweep (sweepForRun) follows once the task and its lock are taken.
+ *
+ * @param {{ stateDir: string, sudo?: string }} options
+ */
+export async function refuseOffEnvironment({ stateDir, sudo }) {
   await checkDaemonOptions({ sudo, stateDir });
   await refuseWhileRollback({ sudo, stateDir, when: 'the run is refused' });
-  const swept = await sweepDaemon({ runId, helperImage, sudo, stateDir });
+}
+
+/**
+ * Steps 3 to 8 around `inside`, which sets up the task's container and runs its phases, under the task's lock alone
+ * (#0-303): the run's network, the rollback checked again, `inside`, then `sweepAtEnd` (the caller's: it takes the
+ * dispatcher's lock, counts the live tasks again and sweeps as sweepForRun does). A rollback seen by the second check
+ * refuses the run, its own objects removed, and no sweep follows, as before #0-303.
+ *
+ * @param {{ runId: string, stateDir: string, sudo?: string, sweepAtEnd: () => Promise<unknown> }} options `stateDir`
+ *   where every container call's stderr is kept (run-container.mjs)
+ * @param {() => Promise<T>} inside
+ * @returns {Promise<T>}
+ * @template T
+ */
+export async function inTaskEnvironment({ runId, stateDir, sudo, sweepAtEnd }, inside) {
   let result;
   let failure = null;
   try {
@@ -129,7 +162,7 @@ export async function inTaskEnvironment({ runId, helperImage, stateDir, sudo }, 
     throw failure;
   }
   try {
-    await sweepDaemon({ runId, helperImage, sudo, stateDir });
+    await sweepAtEnd();
   } catch (error) {
     if (failure === null) {
       throw error;
@@ -140,5 +173,5 @@ export async function inTaskEnvironment({ runId, helperImage, stateDir, sudo }, 
   if (failure !== null) {
     throw failure;
   }
-  return { result, swept };
+  return result;
 }

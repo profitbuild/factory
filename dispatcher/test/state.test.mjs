@@ -12,6 +12,7 @@ import {
 import {
   checkStateDir, ensureOwnDirectory, NotJsonError, readJson, StateError, writeJsonAtomic,
 } from '../src/state/files.mjs';
+import { run } from '../testing/children.mjs';
 import { makeStateDir } from '../testing/state-dir.mjs';
 
 const mode = async (path) => (await stat(path)).mode & 0o777;
@@ -163,3 +164,23 @@ test('state.json unreadable: a tripped breaker, the file left for the owner to r
       assert.equal(await readFile(path, 'utf8'), text, 'the file is left as it was');
     }
   });
+
+test('#0-303 AC2: two processes recording outcomes at once, under the state\'s lock, lose none of them', async (t) => {
+  const state = await makeStateDir();
+  t.after(state.remove);
+  const script = join(state.dir, 'recorder.mjs');
+  await writeFile(script, `import { recordOutcome } from ${JSON.stringify(new URL('../src/state/breaker.mjs', import.meta.url).href)};
+for (let i = 0; i < Number(process.argv[3]); i += 1) {
+  await recordOutcome(process.argv[2], { outcome: 'blocked', item: \`0-\${process.pid}\`, stage: String(i) });
+}
+`);
+  const per = 25;
+  const results = await Promise.all([1, 2].map(() => run(script, [state.dir, String(per)])));
+  for (const result of results) {
+    assert.equal(result.code, 0, result.stderr);
+  }
+  const { state: breaker } = await openBreaker(state.dir);
+  assert.equal(breaker.consecutiveBlocked, 2 * per, 'every blocked task counted');
+  assert.equal(breaker.history.length, 2 * per, 'and every one in the history');
+  assert.equal(new Set(breaker.history.map((h) => h.item)).size, 2, 'from both writers');
+});

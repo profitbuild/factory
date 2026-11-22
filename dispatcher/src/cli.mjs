@@ -12,28 +12,44 @@
  *   2. $FACTORY_STATE_DIR: a directory of this user's, 700 (made by the provisioning); $FACTORY_REPO_DIR a directory,
  *      its objects the dispatcher's and the clone the dispatcher's alone, every directory on the way to it its
  *      user's or root's and writable by no one else (git/task-objects.mjs checkRepoDir, #0-278 AC7);
- *   3. the lock ($FACTORY_STATE_DIR/lock): another run holding it refuses this one (state/lock.mjs);
- *   4. the breaker (state.json): tripped, or unreadable, refuses the run;
+ *   3. the dispatcher's lock ($FACTORY_STATE_DIR/lock), waited for while another run takes its slot or sweeps
+ *      (state/lock.mjs, incident-platform backlog #0-303): from here to step 6, the run's slot section, and only for
+ *      it;
+ *   4. the breaker (state.json, under the state's lock): tripped, or unreadable, refuses the run;
  *   5. the item and its base (incident-platform backlog #0-278, ADR-0060 D6 and D8 as amended). A new task
  *      (`--item`, which v0 requires: the owner names the item) is refused when one of the dispatcher's own tasks
- *      holds the item (running, with a branch); the adapter is read from FACTORY_REPO_DIR's main as it is, for the
+ *      holds the item (running, on a branch, or live with none yet: #0-303); the adapter is read from FACTORY_REPO_DIR's main as it is, for the
  *      repository builder-app's token is narrowed to; main is brought up to GitHub's with that token, fast-forward
  *      only (git/main-fetch.mjs); the base is main's commit, and the adapter is read again from it, the one every
  *      later read of the task uses, its repository the same; the item is refused when an open pull request holds it
  *      (github/item-lock.mjs, every page). A task resumed reads the adapter from the base it recorded. The adapter,
  *      always a blob of the base, never a file of a checkout nor of a branch: .factory/adapter.json, checked against
  *      schemas/adapter.schema.json and against the base's tree (product/adapter-from-base.mjs);
- *   6. factory's daemon (container/environment.mjs, incident-platform backlog #0-277, ADR-0062): refused while a
- *      rollback runs; swept, the sweep checked; the run's network made; the rollback checked again;
- *   7. the task: a new one, its item and base recorded, or the running one on `--resume`'s branch;
- *   8. its container, from a fresh clone of the base (a refusal there ends the task BLOCKED, with the reason);
- *   9. its phases, from the one after the last completed (state/tasks.mjs). v0 has none: they are 4.4's;
- *  10. the daemon swept again, the task BLOCKED or not.
- * It prints the task as one JSON line, revokes builder-app's token if one was minted, and releases the lock; a refusal
- * is a line on stderr, and the exit code 1. No product code runs as `dispatcher` (ADR-0060 D6 as amended): what the
- * dispatcher reads of the product is blobs of its base, and the product's commands run in the task container only.
+ *   6. the slot (#0-303, ADR-0060 D7 as amended; review round 1 of factory#25, decision 2): the other live tasks
+ *      counted (state/tasks.mjs liveTasks), and the run refused when FACTORY_SLOTS of them are live, before it touches
+ *      the daemon; factory's daemon's options, and the run refused while a rollback runs (container/environment.mjs,
+ *      #0-277, ADR-0062); only then the task, a new one with its item and base recorded, or the running one on
+ *      `--resume`'s branch, and its lock (tasks/<runId>/lock), held for the whole run (a resumed task whose lock
+ *      another run holds is live, and refused, its record as it was), so that a refusal leaves no task; then the
+ *      sweep, the whole daemon when no other task is live (in M2, always), only the run's own labelled objects when
+ *      one is. Then the dispatcher's lock is released;
+ *   7. under the task's lock alone: the run's network, the rollback checked again; its container, from a fresh clone
+ *      of the base (a refusal there ends the task BLOCKED, with the reason); its phases, from the one after the last
+ *      completed (state/tasks.mjs). v0 has none: they are 4.4's;
+ *   8. the dispatcher's lock again, the live tasks counted again, the daemon swept as in 6, the task BLOCKED or not;
+ *      then the task's lock released, and the dispatcher's last. If the dispatcher's lock is not free within the
+ *      wait, the run's own labelled objects are removed under the task's lock (review round 1 of factory#25,
+ *      security 1), and the run is refused with the lock's reason.
+ * A run takes the locks in the order dispatcher, task, state; at its end it holds its own task's and waits for the
+ * dispatcher's, which makes no cycle since no one ever waits for a task's lock, it is only tried; no one waits for
+ * the dispatcher's while holding the state's (state/lock.mjs). It prints the task as one JSON line,
+ * revokes builder-app's token if one was minted, and releases every lock it holds, each in a finally of its own; a
+ * refusal is a line on stderr, and the exit code 1. No product code runs as `dispatcher` (ADR-0060 D6 as amended):
+ * what the dispatcher reads of the product is blobs of its base, and the product's commands run in the task container
+ * only.
  *
- * `sweep` is the sweep alone, for what a killed run left (ADR-0062 point 5): under the lock, it removes every
+ * `sweep` is the sweep alone, for what a killed run left (ADR-0062 point 5): under the dispatcher's lock, refused while
+ * any task is live, naming it (#0-303: `--force` does not pass that, a live task is no killed run's), it removes every
  * container, user-defined network and volume of factory's daemon but factory-dispatcher-m2, and every work directory,
  * and checks the result. It refuses while a running container carries `factory.rollback`, naming it: a rollback is
  * ended by its owner, never swept. `sweep --force` sweeps that container too: one a task's code started with the
@@ -46,8 +62,8 @@ import { parseArgs } from 'node:util';
 import { readBuilderEnv } from './config/builder-env.mjs';
 import { readFactoryEnv } from './config/factory-env.mjs';
 import { refuseSecretShaped } from './config/settings.mjs';
-import { inTaskEnvironment, setUpTaskContainer } from './container/environment.mjs';
-import { checkDaemonOptions, refuseWhileRollback, sweepDaemon } from './container/daemon.mjs';
+import { inTaskEnvironment, refuseOffEnvironment, setUpTaskContainer, sweepForRun } from './container/environment.mjs';
+import { checkDaemonOptions, refuseWhileRollback, removeOwnObjects, sweepDaemon } from './container/daemon.mjs';
 import { mainCommit } from './git/base-bundle.mjs';
 import { fetchMain } from './git/main-fetch.mjs';
 import { checkRepoDir } from './git/task-objects.mjs';
@@ -57,8 +73,8 @@ import { openPullHeads, refuseHeldByPull, refuseHeldByTask } from './github/item
 import { ADAPTER_PATH, readAdapter } from './product/adapter-from-base.mjs';
 import { breakerRefusal, openBreaker } from './state/breaker.mjs';
 import { checkStateDir } from './state/files.mjs';
-import { acquireLock } from './state/lock.mjs';
-import { createTask, findTaskByBranch, listTasks, newRunId, runPhases } from './state/tasks.mjs';
+import { DISPATCHER_WAIT_S, acquireDispatcherLock, acquireTaskLock } from './state/lock.mjs';
+import { blockTask, createTask, findTaskByBranch, listTasks, liveTasks, newRunId, runPhases } from './state/tasks.mjs';
 
 /** The phases of a task, in order: none in v0 (4.4 ports them from today's autopilot). */
 export const PHASES = Object.freeze([]);
@@ -144,7 +160,8 @@ async function itemAndBase(settings, args, { builder, apiBase, gitBase, fetchImp
     const adapter = await readAdapter({ repoDir: settings.repoDir, base });
     return { resumed, base, adapter, tokens: tokenSource(adapter.repository) };
   }
-  refuseHeldByTask({ item: args.item, tasks: await listTasks(settings.stateDir) });
+  refuseHeldByTask({ item: args.item, tasks: await listTasks(settings.stateDir),
+    live: new Set(await liveTasks(settings.stateDir)) });
   const current = await currentAdapter(settings.repoDir);
   const tokens = tokenSource(current.repository);
   await fetchMain({ stateDir: settings.stateDir, repoDir: settings.repoDir, repository: current.repository, tokens,
@@ -160,9 +177,15 @@ async function itemAndBase(settings, args, { builder, apiBase, gitBase, fetchImp
   return { resumed: null, base, adapter, tokens };
 }
 
-/** `sweep [--force]`: the sweep alone, under the lock. */
+/** `sweep [--force]`: the sweep alone, under the dispatcher's lock, refused while a task is live (#0-303). */
 async function sweep(settings, { force, runId, sudo }) {
   const { stateDir } = settings;
+  const live = await liveTasks(stateDir);
+  if (live.length > 0) {
+    throw new Error(`the sweep is refused: the task${live.length === 1 ? '' : 's'} ${live.join(', ')} `
+      + `${live.length === 1 ? 'is' : 'are'} live (${live.length === 1 ? 'its' : 'their'} lock held by a run); `
+      + 'a live task is no killed run\'s, and --force does not pass this');
+  }
   // The sweep's helper is a container: none on a daemon off the VM's options (#0-284, review round 1 of factory#22).
   await checkDaemonOptions({ sudo, stateDir });
   if (!force) {
@@ -171,26 +194,44 @@ async function sweep(settings, { force, runId, sudo }) {
   return sweepDaemon({ runId, helperImage: settings.helperImage, sudo, stateDir });
 }
 
+/** The other live tasks fill every slot: the run is refused before it touches the daemon (#0-303). */
+function refuseFullSlots(others, slots) {
+  if (others.length >= slots) {
+    throw new Error(`every slot is taken: ${others.length} task${others.length === 1 ? ' is' : 's are'} live `
+      + `(${others.join(', ')}), FACTORY_SLOTS is ${slots}: the run is refused`);
+  }
+}
+
 /**
  * @param {string[]} argv the arguments after the script
  * @param {{ env?: Record<string, string | undefined>, out?: { write: (text: string) => void },
  *   now?: () => number, random?: (size: number) => Buffer, phases?: typeof PHASES, sudo?: string, apiBase?: string,
- *   gitBase?: string, fetchImpl?: typeof fetch, err?: { write: (text: string) => void } }} [options] all but argv for
- *   the tests (`sudo`: the fake daemon's;
- *   `apiBase`, `gitBase`, `fetchImpl`: the fake GitHub's)
+ *   gitBase?: string, fetchImpl?: typeof fetch, err?: { write: (text: string) => void }, dispatcherWaitS?: number,
+ *   hooks?: { inSlot?: () => Promise<void>, beforeDispatcherLock?: () => Promise<void>,
+ *   taskMade?: (runId: string) => Promise<void> } }} [options] all but argv
+ *   for the tests (`sudo`: the fake daemon's;
+ *   `apiBase`, `gitBase`, `fetchImpl`: the fake GitHub's; `dispatcherWaitS` the wait for the dispatcher's lock;
+ *   `hooks.inSlot` runs in the slot section, once the slot is counted, for a test that holds a run there;
+ *   `hooks.beforeDispatcherLock` right before the run asks for the dispatcher's lock, for a test that knows a run is
+ *   waiting for it; `hooks.taskMade` between a new task's record and its lock, for a test that takes that lock first)
  * @returns {Promise<object>} the task as it was left (`run`), or what the sweep removed (`sweep`)
  */
 export async function main(argv, {
   env = process.env, out = process.stdout, err = process.stderr, now, random, phases = PHASES, sudo,
-  apiBase = GITHUB_API, gitBase = GIT_HOST, fetchImpl,
+  apiBase = GITHUB_API, gitBase = GIT_HOST, fetchImpl, dispatcherWaitS = DISPATCHER_WAIT_S, hooks = {},
 } = {}) {
   const args = parse(argv);
   refuseSecretShaped(env);
   const settings = readFactoryEnv(env);
   const builder = readBuilderEnv(env);
-  await checkStateDir(settings.stateDir);
+  const { stateDir } = settings;
+  await checkStateDir(stateDir);
   await checkRepoDir(settings.repoDir);
-  const lock = acquireLock(settings.stateDir);
+  // The locks this run holds, each released in a finally of its own (#0-303): the dispatcher's for the slot section
+  // and the sweep at the end only, the task's for the whole run.
+  await hooks.beforeDispatcherLock?.();
+  let dispatcher = await acquireDispatcherLock(stateDir, { wait: dispatcherWaitS });
+  let taskLock = null;
   let tokens = null;
   const keep = (source) => { tokens = source; return source; };
   try {
@@ -199,39 +240,102 @@ export async function main(argv, {
       out.write(`${JSON.stringify({ swept: removed })}\n`);
       return removed;
     }
-    const refusal = breakerRefusal(await openBreaker(settings.stateDir), settings.maxBlocked);
+    // The slot section (#0-303; review round 1 of factory#25, the owner's decision 2), under the dispatcher's lock:
+    //   a. the breaker;
+    //   b. the fetch of main (FACTORY_REPO_DIR is shared, and two fetches at once collide on git's own locks);
+    //   c. the item and the base, the item's check against the dispatcher's own tasks (two new runs of one item
+    //      cannot both pass it: the second sees the first's task, made in f under the same lock);
+    //   d. the other live tasks counted, the run refused at FACTORY_SLOTS;
+    //   e. the daemon's options and the rollback's refusal;
+    //   f. only now the task (made, or the resumed one) and its lock;
+    //   g. the sweep at the start; h. the dispatcher's lock released.
+    // Counting before the run's own task's lock opens no race: a task's liveness only grows under the dispatcher's
+    // lock (a task's lock is first taken in f, which this run holds), and a run killed meanwhile can only make the
+    // count smaller. So a refusal in a to e leaves no task and no tasks/<runId>/, and nothing of it in a task.json.
+    const refusal = breakerRefusal(await openBreaker(stateDir), settings.maxBlocked);
     if (refusal) {
       throw new Error(refusal);
     }
     const { resumed, base, adapter } = await itemAndBase(settings, args,
       { builder, apiBase, gitBase, fetchImpl, keep });
     const runId = resumed?.runId ?? newRunId({ now, random });
-    const { result: left } = await inTaskEnvironment({ runId, helperImage: settings.helperImage,
-      stateDir: settings.stateDir, sudo }, async () => {
-      const task = resumed ?? await createTask(settings.stateDir, { runId, item: args.item, baseSha: base });
-      const ready = await setUpTaskContainer({ stateDir: settings.stateDir, repoDir: settings.repoDir, task, adapter,
+    const others = await liveTasks(stateDir, { except: runId });
+    refuseFullSlots(others, settings.slots);
+    await hooks.inSlot?.();
+    await refuseOffEnvironment({ stateDir, sudo });
+    // A resumed task whose lock another run holds is live: refused, its record as it was.
+    let task = resumed ?? await createTask(stateDir, { runId, item: args.item, baseSha: base });
+    await hooks.taskMade?.(runId);
+    // A new task whose lock or start sweep fails ends BLOCKED, so that no record is left running with no reason: its
+    // lock's failure with a fixed reason (its details go to stderr with the refusal: review round 2 of factory#25, 3),
+    // the sweep's with its message. The first error stays the refusal; a failure to block is told with it (#0-303).
+    const blockNew = async (error, reason) => {
+      if (resumed === null) {
+        try {
+          task = await blockTask(stateDir, task, reason);
+        } catch (blocking) {
+          error.message = `${error.message}; and the task could not be blocked: ${blocking.message}`;
+          error.cause ??= blocking;
+        }
+      }
+      return error;
+    };
+    try {
+      taskLock = await acquireTaskLock(stateDir, runId);
+    } catch (error) {
+      throw await blockNew(error, 'refused before its container: its task lock could not be taken');
+    }
+    try {
+      await sweepForRun({ runId, helperImage: settings.helperImage, stateDir, sudo, othersLive: others });
+    } catch (error) {
+      throw await blockNew(error, `refused before its container: ${error.message}`);
+    }
+    dispatcher.release();
+    dispatcher = null;
+    const left = await inTaskEnvironment({ runId, stateDir, sudo, sweepAtEnd: async () => {
+      try {
+        dispatcher = await acquireDispatcherLock(stateDir, { wait: dispatcherWaitS });
+      } catch (error) {
+        // No dispatcher's lock within the wait (review round 1 of factory#25, security 1): the run's own objects are
+        // removed under its task's lock, as on a rollback's refusal, so that no container of the agent's code is
+        // left running with no run to watch it. The lock's refusal stays the error; a failed removal is told with it.
+        try {
+          await removeOwnObjects({ runId, sudo, stateDir });
+        } catch (removal) {
+          error.message = `${error.message}; and the run's own objects could not all be removed: ${removal.message}`;
+        }
+        throw error;
+      }
+      return sweepForRun({ runId, helperImage: settings.helperImage, stateDir, sudo,
+        othersLive: await liveTasks(stateDir, { except: runId }) });
+    } }, async () => {
+      const ready = await setUpTaskContainer({ stateDir, repoDir: settings.repoDir, task, adapter,
         helperImage: settings.helperImage, sudo });
-      return ready.container === null ? ready.task : runPhases(settings.stateDir, ready.task, phases);
+      return ready.container === null ? ready.task : runPhases(stateDir, ready.task, phases);
     });
     out.write(`${JSON.stringify({ runId: left.runId, item: left.item, branch: left.branch, phase: left.phase,
       status: left.status, reason: left.reason })}\n`);
     return left;
   } finally {
-    // A failed revoke changes neither what the run did nor the lock's release: one line on stderr, naming the kind
-    // of failure (its kind, or its class), never GitHub's answer; the token expires within the hour. The lock is
+    // A failed revoke changes neither what the run did nor the locks' release: one line on stderr, naming the kind
+    // of failure (its kind, or its class), never GitHub's answer; the token expires within the hour. Each lock is
     // released in a finally of its own, whatever the revoke or that line do (a write to stderr can throw: EPIPE;
-    // review round 2 of factory#20, 3).
+    // review round 2 of factory#20, 3), the task's before the dispatcher's (#0-303).
     try {
       await tokens?.revoke().catch((error) => {
         const kind = error?.kind ?? error?.constructor?.name ?? 'unknown';
         try {
           err.write(`dispatcher: builder-app's token could not be revoked (${kind}); it expires within the hour\n`);
         } catch {
-          // stderr is gone: the line is lost, the run's result and the lock are not.
+          // stderr is gone: the line is lost, the run's result and the locks are not.
         }
       });
     } finally {
-      lock.release();
+      try {
+        taskLock?.release();
+      } finally {
+        dispatcher?.release();
+      }
     }
   }
 }

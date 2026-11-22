@@ -12,10 +12,14 @@
  *   records the stage it stopped in; the history keeps the last HISTORY_LIMIT outcomes.
  *
  * A file of the wrong owner or mode is refused outright (files.mjs), not taken as unreadable.
+ *
+ * Every read, and every read, change and write, runs whole under the state's lock (incident-platform backlog #0-303,
+ * lock.mjs's withStateLock): two runs that record an outcome at once both count, and neither write is lost.
  */
 import { join } from 'node:path';
 
 import { NotJsonError, readJson, StateError, writeJsonAtomic } from './files.mjs';
+import { withStateLock } from './lock.mjs';
 
 /** Outcomes kept in the history, as state.sh keeps them. */
 export const HISTORY_LIMIT = 200;
@@ -37,7 +41,12 @@ function readable(state) {
  * @returns {Promise<{ path: string, state: object, unreadable: boolean }>} `unreadable`: state.json is there but is
  *   not a breaker's state; `state` is then a tripped one, never written
  */
-export async function openBreaker(stateDir) {
+export function openBreaker(stateDir) {
+  return withStateLock(stateDir, () => openUnlocked(stateDir));
+}
+
+/** openBreaker, under a state's lock its caller holds. */
+async function openUnlocked(stateDir) {
   const path = join(stateDir, 'state.json');
   let state;
   try {
@@ -88,8 +97,12 @@ export function breakerRefusal(breaker, maxBlocked) {
  *   now?: () => number }} outcome `pr` the pull request's URL; `stage` the phase a blocked task stopped in
  * @returns {Promise<object>} the new state
  */
-export async function recordOutcome(stateDir, { outcome, item, pr = null, stage = null, now = Date.now }) {
-  const breaker = await openBreaker(stateDir);
+export function recordOutcome(stateDir, outcome) {
+  return withStateLock(stateDir, () => recordUnlocked(stateDir, outcome));
+}
+
+async function recordUnlocked(stateDir, { outcome, item, pr = null, stage = null, now = Date.now }) {
+  const breaker = await openUnlocked(stateDir);
   if (breaker.unreadable) {
     throw new StateError(breakerRefusal(breaker, 0));
   }

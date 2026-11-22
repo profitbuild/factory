@@ -14,6 +14,10 @@
  * depends on the task as the phase before left it and on the world, never on whether it ran before, and no field of
  * the task holds a time, so a phase run twice writes the same file.
  *
+ * Every read and write of a task's record runs under the state's lock (incident-platform backlog #0-303, lock.mjs's
+ * withStateLock), each whole: listTasks and findTaskByBranch read every record under one hold of it. The task's own
+ * lock, tasks/<runId>/lock (lock.mjs), and liveTasks, which tries each, are what says a task is live.
+ *
  * GitHub out of reach (retry.mjs's GitHubUnavailableError, ten transient failures in a row) blocks the task with the
  * reason; the breaker's count of it is the flow's (4.4's stopItem), as are the phases themselves: v0 has none.
  */
@@ -24,6 +28,7 @@ import { join } from 'node:path';
 import { GitHubUnavailableError } from '../github/retry.mjs';
 import { validate } from '../schema/validate.mjs';
 import { ensureOwnDirectory, readJson, StateError, writeJsonAtomic } from './files.mjs';
+import { isLive, taskLockPath, withStateLock } from './lock.mjs';
 import taskSchema from './task.schema.json' with { type: 'json' };
 
 const RUN_ID = /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$/;
@@ -51,10 +56,12 @@ function checkTask(task, where) {
   return task;
 }
 
-async function writeTask(stateDir, task) {
+function writeTask(stateDir, task) {
   checkTask(task, `the task ${task.runId}`);
-  await writeJsonAtomic(taskPath(stateDir, task.runId), task);
-  return task;
+  return withStateLock(stateDir, async () => {
+    await writeJsonAtomic(taskPath(stateDir, task.runId), task);
+    return task;
+  });
 }
 
 /**
@@ -68,16 +75,27 @@ export async function createTask(stateDir, { runId, item = null, baseSha = null 
   if (!RUN_ID.test(runId)) {
     throw new TypeError('createTask: runId is not one of newRunId\'s');
   }
-  await ensureOwnDirectory(tasksDir(stateDir));
-  await ensureOwnDirectory(join(tasksDir(stateDir), runId), { exclusive: true });
-  return writeTask(stateDir, {
+  const task = checkTask({
     version: 1, runId, item, branch: null, baseSha, phase: null, round: 0, calls: [], status: 'running',
     reason: null, pr: null, imageId: null,
+  }, `the task ${runId}`);
+  return withStateLock(stateDir, async () => {
+    await ensureOwnDirectory(tasksDir(stateDir));
+    await ensureOwnDirectory(join(tasksDir(stateDir), runId), { exclusive: true });
+    await writeJsonAtomic(taskPath(stateDir, runId), task);
+    return task;
   });
 }
 
 /** The task of `runId`, checked against its schema. */
-export async function loadTask(stateDir, runId) {
+export function loadTask(stateDir, runId) {
+  if (!RUN_ID.test(runId)) {
+    throw new TypeError('loadTask: runId is not one of newRunId\'s');
+  }
+  return withStateLock(stateDir, () => loadUnlocked(stateDir, runId));
+}
+
+async function loadUnlocked(stateDir, runId) {
   if (!RUN_ID.test(runId)) {
     throw new TypeError('loadTask: runId is not one of newRunId\'s');
   }
@@ -99,7 +117,12 @@ export async function loadTask(stateDir, runId) {
  * @param {string} stateDir
  * @returns {Promise<object[]>}
  */
-export async function listTasks(stateDir) {
+export function listTasks(stateDir) {
+  return withStateLock(stateDir, () => listUnlocked(stateDir));
+}
+
+/** The runIds of $FACTORY_STATE_DIR/tasks/, sorted. */
+async function runIds(stateDir) {
   let names;
   try {
     names = await readdir(tasksDir(stateDir));
@@ -109,11 +132,34 @@ export async function listTasks(stateDir) {
     }
     names = [];
   }
+  return names.filter((name) => RUN_ID.test(name)).sort();
+}
+
+async function listUnlocked(stateDir) {
   const tasks = [];
-  for (const runId of names.filter((name) => RUN_ID.test(name)).sort()) {
-    tasks.push(await loadTask(stateDir, runId));
+  for (const runId of await runIds(stateDir)) {
+    tasks.push(await loadUnlocked(stateDir, runId));
   }
   return tasks;
+}
+
+/**
+ * The runIds of the live tasks (#0-303): those whose lock a run holds, each tried once (isLive), but `except` (the
+ * caller's own, which it holds). A task's directory with no lock file is no live run's. Under the dispatcher's lock
+ * only (lock.mjs: isLive's try takes a free lock for an instant).
+ *
+ * @param {string} stateDir
+ * @param {{ except?: string | null }} [options]
+ * @returns {Promise<string[]>}
+ */
+export async function liveTasks(stateDir, { except = null } = {}) {
+  const live = [];
+  for (const runId of await runIds(stateDir)) {
+    if (runId !== except && await isLive(taskLockPath(stateDir, runId))) {
+      live.push(runId);
+    }
+  }
+  return live;
 }
 
 /**

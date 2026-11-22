@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { ConfigError } from '../src/config/settings.mjs';
 import { childEnv } from '../src/process/child-env.mjs';
 import { pushTask } from '../src/github/push.mjs';
-import { acquireLock, FLOCK } from '../src/state/lock.mjs';
+import { acquireDispatcherLock, FLOCK } from '../src/state/lock.mjs';
 import { REAL_GIT, makeProduct, makeTask } from '../testing/git-fixtures.mjs';
 import { startGitServer } from '../testing/git-server.mjs';
 import { makeStateDir } from '../testing/state-dir.mjs';
@@ -65,7 +65,7 @@ test('AC4: a marker in process.env reaches no git of a push, nor flock(1); PATH 
   const saved = { MARKER: process.env.FACTORY_TEST_MARKER_276 };
   process.env.FACTORY_TEST_MARKER_276 = 'marker-value-of-the-parent';
   try {
-    acquireLock(stateDir, { flock: join(root.dir, 'flock') }).release();
+    (await acquireDispatcherLock(stateDir, { wait: false, flock: join(root.dir, 'flock') })).release();
     await pushTask({
       stateDir, repoDir: product.dir, task: { runId: '20261120T101500Z-000276', branch: 'feat/x', baseSha: product.base },
       bundle: task.bundle, sha: task.sha, branch: 'feat/x', repository: 'profitbuild/incident-platform',
