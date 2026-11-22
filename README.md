@@ -35,6 +35,7 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 | `dispatcher/src/container/task-config-list.json` | The closed list of a task configuration (ADR-0062 point 4): the capabilities, the `docker run` arguments, the `containerEnv` keys and the features (by id, options and values, and per digest the image metadata the feature declares, which the built image's entry must equal value by value) a product's task configuration may carry. The dispatcher's, not a product's: widening it is a pull request here, reviewed by the code owner, that a product gets with the factory's next tag; an entry names a kind of product's need, never one product |
 | `$FACTORY_STATE_DIR` | On the build VM, outside any repository; made by the provisioning (700, the dispatcher user's), which `run` checks and never changes: `lock` (the dispatcher's), `state.lock` (the state's) and `tasks/<runId>/lock` (a task's), the three locks of "The locks" below, `state.json` (the breaker, the semantics of incident-platform's `state.sh`), `tasks/<runId>/task.json` (with the task image's ID, #0-277), `tasks/<runId>/bundles/` (what a task container hands over, #0-277), `stderr/` (what each container call wrote to stderr, the agent's side's, kept for the owner, #0-284; its files are not rotated yet: nothing removes them today); every file 600: `state.json` and `task.json` written to a temporary file and renamed (`dispatcher/src/state/`), a bundle and a stderr file each opened once, new, with O_EXCL and O_NOFOLLOW (`task-bundle.mjs`, `run-container.mjs`) |
 | `dispatcher/src/github/retry.mjs` | The one helper of every GitHub call of the flow: a 5xx, a 429, a rate limit's 403, a timeout or a network error is retried (1 s doubling to 60 s, with jitter), not counted as an attempt; ten in a row block the task with the reason (incident-platform #0-261) |
+| `schemas/answers/`, `schemas/findings.schema.json`, `claude-code/` | The agents' answers, a fix-review run's findings, the task container's managed settings and what an agent call must show ("Agent calls" below; incident-platform backlog #0-301) |
 | `schemas/adapter.schema.json`, `schemas/gate.schema.json` | A product's `.factory/adapter.json` and its gate's answer (incident-platform ADR-0060 D6), checked by `dispatcher/src/schema/validate.mjs`, a validator of Node's built-ins that refuses any keyword it does not check |
 | `CONTRIBUTING.md` | How a change is made, from the change to the merge, and who writes what: what stays after ADR-0055's migration, and what holds until a named stage |
 | `.claude/settings.json` | The denies of a Claude Code session started here; `dispatcher/test/session-denies.test.mjs` keeps them |
@@ -94,6 +95,70 @@ ADR-0060 D5 as amended), which a product's task container loads read-only from `
   exception, a rejected promise and a failing read of stdin each refused with exit 2. `claude plugin validate .` passes
   offline and without a token, but is not in CI: it would need Claude Code installed there at a pin and a change to
   the workflow, which is the owner's, and it does not see an agent's `hooks:`, which the test does.
+
+## Agent calls
+
+The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 and M2.3; ADR-0063, ADR-0064, ADR-0065) run in `dispatcher/src/flow/`, under the run's task lock, in the task container the run set up. No call in this repository's code or tests reaches Claude: the tests replay recorded stream-json through the fake daemon (`dispatcher/testing/stream-json.mjs`). The task container holds no credential until #0-313 (M2.7) adds the proxy.
+
+**The call (F3, `flow/call.mjs`).**
+- The command is `docker exec <ID> /usr/bin/timeout … /usr/bin/env -i <list> /usr/local/bin/claude -p --plugin-dir /opt/factory --agent factory:<agent> --restricted --tools <frontmatter> --add-dir /workspace --output-format stream-json --verbose --json-schema <schema> --permission-mode dontAsk --max-turns <frontmatter>`.
+- It runs from `/workspace`, and the container is always addressed by the ID recorded in `task.json`. Every program is named by its full path.
+- The prompt goes on stdin, because `--tools` takes several values and would consume a prompt placed after it.
+- `--tools`, the model and `--max-turns` come from the agent's frontmatter (`agents/<agent>.md`), read from the checkout the dispatcher runs from, which is the tree mounted as `/opt/factory`. They are never copied.
+- The list for `env -i` holds only literals the dispatcher writes:
+  - `HOME`, the locale, and `PATH` with the system directories only;
+  - the `containerEnv` the task configuration was accepted with;
+  - `DISABLE_AUTOUPDATER=1`, `DISABLE_UPDATES=1`, `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`.
+  
+  No secret ever goes in it: the arguments of `env` are visible in `/proc`.
+- The time limit is 30 minutes for the architect, 90 for the implementer and 60 for implementer-light.
+
+**Managed settings.**
+- `claude-code/etc/managed-settings.json` is mounted read-only over the whole of `/etc/claude-code` in the task container. The mount is part of `expectedMounts` and of the HostConfig table.
+- It sets `allowManagedPermissionRulesOnly: true`, `strictPluginOnlyCustomization: true` (a boolean: 2.1.328 rejects the object form), `strictKnownMarketplaces: []` and `disableAllHooks: false`.
+- It allows the agents' tools: `Bash`, `Read`, `Edit`, `Write`, `Grep`, `Glob`.
+- It never sets `allowManagedHooksOnly` or `disableSideloadFlags`.
+
+**The init event**, checked before the answer is read (`INIT_CHECKS`). Any difference stops the task:
+- `agents` holds `factory:<agent>` and no plugin agent other than the factory's;
+- `plugins` has exactly one entry outside the builtin ones, `factory` at `/opt/factory` from `factory@inline`, and the builtin ones are exactly those listed in `claude-code/expectations.json`;
+- `plugin_errors` is empty or absent;
+- `tools` is the agent's expected set;
+- `model` is the frontmatter's;
+- `permissionMode` is `dontAsk`;
+- `claude_code_version` is the expected one;
+- `mcp_servers` is empty.
+
+**`claude-code/expectations.json`** holds the expected version (`claudeCodeVersion`, `MAJOR.MINOR.PATCH`), which incident-platform's `check-factory-copies.rb` compares with its `.devcontainer/claude-code.pin`. It also holds the builtin plugins measured on that version and each agent's tools; a test keeps those equal to the frontmatter.
+
+**The stream and the answer.**
+- The stream is written to `tasks/<runId>/calls/<n>-<agent>.jsonl` (mode 600) as it arrives, up to 64 MiB. It is never held whole in memory.
+- It is read back line by line, failing closed:
+  - the first line must be the init event;
+  - every line must be JSON and an event type 2.1.328 writes;
+  - the last line must be the single `result`.
+- The answer is `structured_output` of a successful result, checked against `schemas/answers/<agent>.schema.json`, the same bytes passed to `--json-schema`. It is written to `calls/<n>-<agent>.answer.json`.
+- The agent's own words stay in that file. Only an answer's `commitMessage` is kept in the call's record, as `agentText`, for #0-302.
+
+**The phases** (`flow/phases.mjs`):
+1. `plan`: the architect;
+2. `implement`: the implementer, or implementer-light when the item's Complexity is low;
+3. `path-gate`: the adapter's `changedPaths`; an exit code other than 0 stops the task;
+4. `test-gate`: the adapter's `gate`.
+   - A pass with an artifact ends the phase.
+   - A pass without one, or a stop, stops the task.
+   - A fixable result calls the implementer in fix-tests mode, at most `MAX_TEST_FIXES` (2) times.
+
+`run --resume <branch> --findings <file>` is a fix-review run: the implementer in fix-review mode, then the two gates. One run is one review round, at most `MAX_ROUNDS` (3).
+- The findings file is the owner's, mode 600, in the form of `schemas/findings.schema.json`.
+- The ids are `<kind>-<4 hex>`, or `ver-<8 hex>` for a refuted claim.
+- The implementer's answer must name each id exactly once, in `fixed` or `disputed`.
+
+**Records and stops.**
+- Every call is recorded in the task's `calls` before it starts, so a killed call still counts. A call beyond `MAX_AGENT_CALLS` (45) stops the task.
+- Every stop goes through `stopItem`: the task is marked BLOCKED with `<stage>: <reason>` in the dispatcher's own words, and the breaker counts it with its stage.
+- The item comes from the adapter's queue files, read as blobs of the base. It must have a single `**Complexity:** low|medium|high` anywhere in its block and at least one line beginning `AC<n>.`.
+- Until #0-302 commits a run's work, a task that has completed a phase cannot be resumed.
 
 ## The locks
 
