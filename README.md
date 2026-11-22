@@ -116,7 +116,7 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
 **Managed settings.**
 - `claude-code/etc/managed-settings.json` is mounted read-only over the whole of `/etc/claude-code` in the task container. The mount is part of `expectedMounts` and of the HostConfig table.
 - It sets `allowManagedPermissionRulesOnly: true`, `strictPluginOnlyCustomization: true` (a boolean: 2.1.328 rejects the object form), `strictKnownMarketplaces: []` and `disableAllHooks: false`.
-- It allows the agents' tools: `Bash`, `Read`, `Edit`, `Write`, `Grep`, `Glob`.
+- The agents have seven tools: `Read`, `Grep`, `Glob`, `Bash`, `Edit`, `Write` and `StructuredOutput`, through which `structured_output` comes back. The settings allow six of them: `Bash`, `Read`, `Edit`, `Write`, `Grep`, `Glob`. The list leaves out `StructuredOutput` on purpose: measured on 2.1.328, its call passes under `allowManagedPermissionRulesOnly` and `dontAsk` with no allow rule (`permission_denials` empty).
 - It never sets `allowManagedHooksOnly` or `disableSideloadFlags`.
 
 **The init event**, checked before the answer is read (`INIT_CHECKS`). Any difference stops the task:
