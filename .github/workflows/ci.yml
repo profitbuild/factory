@@ -1,7 +1,8 @@
 # ============================================================
 # CI of the factory (backlog #0-267 of incident-platform, ADR-0060): the dispatcher's tests on the Node of
 # .node-version, the workflow linters at incident-platform's pins, and the secret scan of every commit added
-# (#0-268), and the dispatcher's tests on the build VM's git (`Test (git 2.43)`, incident-platform backlog #0-276).
+# (#0-268), and the dispatcher's tests on the build VM's git (`Test (git 2.43)`, incident-platform backlog #0-276);
+# `Lint Workflows` also reads the devcontainer's Dockerfile and checks its Claude Code pin (#0-311).
 # The job names, `Test`, `Test (git 2.43)`, `Lint Workflows` and `Secret Scan`, are the required checks of main's
 # ruleset once their first run has registered them (the owner adds each to the ruleset; `Test (git 2.43)` since
 # 2026-11-20): from then on, renaming a job without changing the ruleset leaves every pull request waiting for ever.
@@ -149,6 +150,26 @@ jobs:
         run: |
           set -euo pipefail
           "${RUNNER_TEMP}/lint-tools/zizmor" --offline --persona regular --format github .
+
+      # CI builds no image (incident-platform backlog #0-311): the devcontainer's Dockerfile is read as text, its rules
+      # first and then the script's own mutations of it, each of which must fail. In this job, not a job of its own:
+      # a new job's name would be a check main's ruleset does not require.
+      - name: The devcontainer's Dockerfile (static)
+        run: |
+          set -euo pipefail
+          .devcontainer/test-dockerfile.sh
+
+      # The pin against the manifest Anthropic signed (#0-311, as incident-platform's lint-workflows does for its copy):
+      # a hash in claude-code.pin that is not the signed manifest's fails here, before any image is built from it. The
+      # runner's network is open; gpg and jq are the runner image's, installed only if it lacks them.
+      - name: Claude Code's pin against Anthropic's signed manifest
+        run: |
+          set -euo pipefail
+          if ! command -v gpg >/dev/null || ! command -v jq >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends gnupg jq
+          fi
+          .devcontainer/install-claude-code.sh --pin .devcontainer/claude-code.pin --keys .devcontainer/keys --check
 
   # Secrets in the commits a pull request or a push adds (incident-platform backlog #0-268, its ADR-0036): the scan of
   # incident-platform's `secret-scan` job, its scripts copied unchanged but for their notice. Here before 4.2, since
