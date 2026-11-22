@@ -150,6 +150,19 @@ The session runs in `.devcontainer/`, on the owner's Mac:
    volume `factory-dev-claude`.
 3. `git` and `gh` there use the app's token (a credential helper and a wrapper of `gh` read the file); commits are
    `profitbuild-factory-dev[bot]`'s. Outbound traffic is HTTPS to GitHub and Anthropic only (`init-firewall.sh`).
+   `node`'s one sudo rule runs `init-firewall.sh` without arguments and nothing else (`""` in the rule: sudo refuses
+   `sudo init-firewall.sh <host>` before the script runs), and `node` is in neither `sudo` nor `admin`
+   (incident-platform backlog #0-311).
+4. Claude Code is `/usr/local/bin/claude`, root's, mode 0755, at the version of `.devcontainer/claude-code.pin`
+   (incident-platform backlog #0-311, ADR-0065). The image's build installs it as root, before `USER node`, with
+   `install-claude-code.sh`: the binary must be the one whose SHA-256 the manifest names, and that manifest must be
+   signed by the key in `.devcontainer/keys/`. Nothing in the container updates it (`DISABLE_AUTOUPDATER=1`,
+   `DISABLE_UPDATES=1`), and `~/.local/bin` is not on `PATH`. The pin, the script and the key are incident-platform's
+   files, byte for byte; its `check-factory-copies.rb` compares them (ADR-0061). A new version is a change of the pin
+   there first, copied here, then a rebuild. The build fetches from `downloads.claude.ai`; the running container
+   never does, and its firewall does not allow it. CI builds no image: `Lint Workflows` runs
+   `.devcontainer/test-dockerfile.sh` (the Dockerfile read as text, with its own mutations) and
+   `install-claude-code.sh --check` (the pin against the signed manifest).
 
 Security issues: report them privately through the repository's **Security** tab ("Report a vulnerability"), not in
 a public place.
