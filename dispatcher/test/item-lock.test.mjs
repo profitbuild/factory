@@ -135,16 +135,25 @@ test('AC9: a token source of another repository is refused before any call', asy
 const task = (fields) => ({ runId: '20261121T101500Z-3f9a1c', item: '0-278', status: 'running', branch: null,
   ...fields });
 
-test('AC9: the dispatcher\'s own task holds the item only while it runs with a branch, and says how to take it up',
-  () => {
+test('AC9, #0-303: the dispatcher\'s own task holds the item while it runs, with a branch or none yet, and says how to '
+  + 'take it up', () => {
     assert.doesNotThrow(() => refuseHeldByTask({ item: '0-278', tasks: [task({})] }),
       'a killed run\'s task with no branch does not hold it (#0-277 AC13)');
+    // #0-303 (review round 1 of factory#25, gen-3c1d): a live task with no branch holds its item too, by its runId.
+    assert.throws(() => refuseHeldByTask({ item: '0-278', tasks: [task({})], live: new Set(['20261121T101500Z-3f9a1c']) }),
+      (error) => error instanceof ItemLockError && error.message === 'the item 0-278 is held by the dispatcher\'s own '
+        + 'task 20261121T101500Z-3f9a1c, live and still running with no branch yet: the run is refused until that '
+        + 'task\'s run ends');
+    assert.doesNotThrow(() => refuseHeldByTask({ item: '0-278', tasks: [task({})], live: new Set(['20261121T101500Z-000000']) }),
+      'another task live');
     assert.throws(() => refuseHeldByTask({ item: '0-278', tasks: [task({ branch: 'feat/0-278-x' })] }),
       (error) => error instanceof ItemLockError && error.message === 'the item 0-278 is held by the dispatcher\'s own '
         + 'task 20261121T101500Z-3f9a1c, still running on feat/0-278-x: take it up with `run --resume feat/0-278-x`');
     for (const fields of [{ status: 'blocked' }, { status: 'shipped' }, { status: 'stopped' }, { item: '0-27' },
       { item: null }]) {
-      assert.doesNotThrow(() => refuseHeldByTask({ item: '0-278', tasks: [task({ branch: 'feat/0-278-x', ...fields })] }),
-        JSON.stringify(fields));
+      for (const branch of ['feat/0-278-x', null]) {
+        assert.doesNotThrow(() => refuseHeldByTask({ item: '0-278', tasks: [task({ branch, ...fields })],
+          live: new Set(['20261121T101500Z-3f9a1c']) }), JSON.stringify({ branch, ...fields }));
+      }
     }
   });

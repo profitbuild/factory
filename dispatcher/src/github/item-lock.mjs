@@ -79,15 +79,26 @@ export async function openPullHeads({ repository, tokens, apiBase = GITHUB_API, 
 }
 
 /**
- * Refuses the item when one of the dispatcher's own tasks holds it; no call to GitHub.
+ * Refuses the item when one of the dispatcher's own tasks holds it: one still running on a branch, or one still running
+ * and live, a branch or not yet (incident-platform backlog #0-303, review round 1 of factory#25, gen-3c1d, the owner's
+ * answer to decision 1: a new task has no branch, and with FACTORY_SLOTS of 2 a second run of its item would pass a
+ * check that waited for one). A killed run's task with no branch is not live and holds nothing (#0-277 AC13): in v0
+ * every run ends running with no branch. One with a branch is taken up with `run --resume <branch>`; a live one with
+ * none is named by its runId. No call to GitHub.
  *
- * @param {{ item: string, tasks: object[] }} options `tasks` listTasks'
+ * @param {{ item: string, tasks: object[], live?: Set<string> }} options `tasks` listTasks'; `live` the runIds of
+ *   the live tasks (tasks.mjs liveTasks, counted under the dispatcher's lock)
  */
-export function refuseHeldByTask({ item, tasks }) {
-  const holder = tasks.find((task) => task.item === item && task.status === 'running' && task.branch !== null);
-  if (holder) {
+export function refuseHeldByTask({ item, tasks, live = new Set() }) {
+  const holder = tasks.find((task) => task.item === item && task.status === 'running'
+    && (task.branch !== null || live.has(task.runId)));
+  if (holder?.branch) {
     throw new ItemLockError(`the item ${item} is held by the dispatcher's own task ${holder.runId}, still running on `
       + `${holder.branch}: take it up with \`run --resume ${holder.branch}\``);
+  }
+  if (holder) {
+    throw new ItemLockError(`the item ${item} is held by the dispatcher's own task ${holder.runId}, live and still `
+      + 'running with no branch yet: the run is refused until that task\'s run ends');
   }
 }
 
