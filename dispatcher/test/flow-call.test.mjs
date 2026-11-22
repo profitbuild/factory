@@ -89,13 +89,16 @@ test('#0-301 AC1: a call is F3 by the container\'s ID, full paths, --tools from 
 });
 
 test('#0-301: env -i\'s list holds literals alone: HOME, the locale, PATH\'s system directories, the accepted '
-  + 'containerEnv and the three switches', async () => {
+  + 'containerEnv and the four switches, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 among them', async () => {
   const carried = await readTaskConfig({ repoDir: product.repoDir, base: product.base, path: CONFIG_PATH,
     git: REAL_GIT });
   const env = callEnv(carried);
   assert.deepEqual(env, ['HOME=/home/dev', 'LANG=C.UTF-8', 'LC_ALL=C.UTF-8', `PATH=${CALL_PATH}`,
     ...Object.entries(carried.containerEnv).map(([k, v]) => `${k}=${v}`), 'DISABLE_AUTOUPDATER=1', 'DISABLE_UPDATES=1',
-    'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1']);
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1', 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1']);
+  // ADR-0064 point 5 as amended on 2026-11-22: no traffic of Claude Code's past the proxy but the model's calls.
+  assert.equal(env.filter((entry) => entry.startsWith('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=')).join(),
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1');
   assert.ok(!CALL_PATH.includes('.local'), 'no user\'s directory on PATH');
 });
 

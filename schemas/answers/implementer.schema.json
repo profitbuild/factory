@@ -33,13 +33,13 @@
       "maxLength": 8000
     },
     "commitMessage": {
-      "description": "The message of the commit the factory makes of this call's changes (#0-302), or null when no file changed: the agent's words. Its form (decision 3 of #0-302, PR #695 of incident-platform): a subject of one line, 1 to 100 characters; then, if there is a body, a blank line and the body; printable characters and \\n alone (no tab, no carriage return, no other control character), at most 8000 in all; and no line that reads as one of the dispatcher's trailers (Factory-…:, Task:, Feature:), which the dispatcher writes itself.",
+      "description": "The message of the commit the factory makes of this call's changes (#0-302), or null when no file changed: the agent's words. Its form (decision 3 of #0-302, PR #695 of incident-platform): a subject of one line, 1 to 100 characters; then, if there is a body, a blank line and the body, which holds more than blank lines; printable characters and \\n alone (no tab, no carriage return, no other control character), at most 8000 in all; and no line that reads as one of the dispatcher's trailers (Factory-…:, Task:, Feature:), which the dispatcher writes itself.",
       "type": [
         "string",
         "null"
       ],
       "maxLength": 8000,
-      "pattern": "^(?![\\s\\S]*(?:^|\\n)(?:Factory-[A-Za-z0-9-]*|Task|Feature):)[^\\u0000-\\u001f\\u007f]{1,100}(?:\\n\\n[^\\u0000-\\u0009\\u000b-\\u001f\\u007f]*)?$"
+      "pattern": "^(?![\\s\\S]*(?:^|\\n)(?:Factory-[A-Za-z0-9-]*|Task|Feature):)[^\\u0000-\\u001f\\u007f]{1,100}(?:\\n\\n(?=[\\s\\S]*\\S)[^\\u0000-\\u0009\\u000b-\\u001f\\u007f]*)?$"
     },
     "fixed": {
       "type": "array",

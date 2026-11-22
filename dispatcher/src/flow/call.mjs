@@ -56,6 +56,10 @@ export function callEnv(carried) {
     ...Object.entries(carried.containerEnv ?? {}).map(([name, value]) => `${name}=${value}`),
     'DISABLE_AUTOUPDATER=1',
     'DISABLE_UPDATES=1',
+    // Claude Code's traffic other than the model's calls (the telemetry among its builtin plugins, the remote
+    // settings) would go to Anthropic past #0-313's proxy: ADR-0064 point 5 as amended on 2026-11-22 (incident-platform
+    // PR #697; review of factory#26, gen-5d20, sec-4e1d).
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
     'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1',
   ];
 }

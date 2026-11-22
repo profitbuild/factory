@@ -224,6 +224,9 @@ test('#0-301 AC6: expectations whose tools are not an agent\'s frontmatter\'s, o
 
 test('#0-301 (review round 1 of factory#26, arc-5c1e and 9): git failing, a queue file the base lacks, and a queue of '
   + 'another kind each stop the item in its stage through stopItem', async (t) => {
+  // On buildPhases itself, not through main() (the owner accepted it, review of factory#26 after round 1): main()
+  // never gets here with a queue file the base lacks, since the adapter's check (adapter-from-base.mjs) refuses the run
+  // before any phase, and a git that fails would fail main()'s own reads of the base first.
   const state = await makeStateDir();
   t.after(state.remove);
   const { execFileSync } = await import('node:child_process');
@@ -281,7 +284,9 @@ test('#0-301 (review round 1 of factory#26, 4): an answer\'s commitMessage is a 
       assert.ok(ok(value), `${agent}: ${JSON.stringify(value).slice(0, 40)}`);
     }
     for (const value of ['', 'x'.repeat(101), 'a\nb', 'a\n\nb\tc', 'a\r\n\r\nb', 'a\n\nb\u0007', 'Task: x',
-      'a\n\nFactory-Run-Id: 1', 'a\n\nbody\nFeature: y', 'a\n\nTask: 0-1', `a\n\n${'b'.repeat(8000)}`]) {
+      'a\n\nFactory-Run-Id: 1', 'a\n\nbody\nFeature: y', 'a\n\nTask: 0-1', `a\n\n${'b'.repeat(8000)}`,
+      // A body of blank lines alone (review of factory#26 after round 1, 5).
+      'a\n\n', 'a\n\n\n\n', 'a\n\n  \n ']) {
       assert.ok(!ok(value), `${agent}: ${JSON.stringify(value).slice(0, 40)}`);
     }
   }

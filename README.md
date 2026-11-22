@@ -108,7 +108,7 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
 - The list for `env -i` holds only literals the dispatcher writes:
   - `HOME`, the locale, and `PATH` with the system directories only;
   - the `containerEnv` the task configuration was accepted with;
-  - `DISABLE_AUTOUPDATER=1`, `DISABLE_UPDATES=1`, `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`.
+  - `DISABLE_AUTOUPDATER=1`, `DISABLE_UPDATES=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (Claude Code's traffic other than the model's calls, such as the telemetry among its builtin plugins and the remote settings, would otherwise go to Anthropic past #0-313's proxy: ADR-0064 point 5 as amended on 2026-11-22), `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`.
   
   No secret ever goes in it: the arguments of `env` are visible in `/proc`.
 - The time limit is 30 minutes for the architect, 90 for the implementer and 60 for implementer-light.
@@ -130,6 +130,8 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
 - `mcp_servers` is empty.
 
 **`claude-code/expectations.json`** holds the expected version (`claudeCodeVersion`, `MAJOR.MINOR.PATCH`), which incident-platform's `check-factory-copies.rb` compares with its `.devcontainer/claude-code.pin`. It also holds the builtin plugins and builtin agents measured on that version, and each agent's tools; a test keeps the tools equal to the frontmatter.
+
+Both builtin lists are measured with the whole of `callEnv`'s variables, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` among them. The first call on the VM (#0-301 AC4) records the builtin plugins and agents of its init event. If they differ from the lists, the lists are corrected before any run; until then a run stops at the init event's check, as it should.
 
 The file is read after `sweep`'s branch, so `cli.mjs sweep` still works when it is broken; a run is refused.
 
