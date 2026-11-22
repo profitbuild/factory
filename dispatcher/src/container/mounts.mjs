@@ -4,7 +4,8 @@
  * Mounts to them, host-config.mjs its HostConfig.Mounts.
  */
 import {
-  FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, MANAGED_SETTINGS_MOUNT, MANAGED_SETTINGS_SOURCE, WORKSPACE, taskPaths,
+  FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, MANAGED_SETTINGS_MOUNT, MANAGED_SETTINGS_SOURCE, TOKEN_MOUNT, WORKSPACE,
+  taskPaths,
 } from './paths.mjs';
 
 /**
@@ -15,12 +16,14 @@ export const mountKey = (m) => JSON.stringify([m?.Type, m?.Source, m?.Destinatio
 
 /** The mounts the container must have, exactly: the dispatcher's and the listed features'. */
 export function expectedMounts(runId, carried) {
-  const { work, claudeVolume } = taskPaths(runId);
+  const { work, claudeVolume, tokenDir } = taskPaths(runId);
   const home = `/home/${carried.remoteUser}`;
   return [
     { Type: 'bind', Source: work, Destination: WORKSPACE, RW: true },
     { Type: 'bind', Source: FACTORY_CHECKOUT, Destination: FACTORY_MOUNT, RW: false },
     { Type: 'bind', Source: MANAGED_SETTINGS_SOURCE, Destination: MANAGED_SETTINGS_MOUNT, RW: false },
+    // The task's token's directory, read-only (#0-313, ADR-0062 points 4 and 5 as amended).
+    { Type: 'bind', Source: tokenDir, Destination: TOKEN_MOUNT, RW: false },
     { Type: 'volume', Source: claudeVolume, Destination: `${home}/.claude`, RW: true },
     { Type: 'volume', Source: M2_VOLUME, Destination: `${home}/.m2`, RW: true },
     ...carried.features.flatMap((f) => (f.metadata.mounts ?? []).map((m) => ({

@@ -3,6 +3,7 @@
   "strictPluginOnlyCustomization": true,
   "strictKnownMarketplaces": [],
   "disableAllHooks": false,
+  "apiKeyHelper": "/usr/bin/cat /run/factory/token",
   "permissions": {
     "allow": ["Bash", "Read", "Edit", "Write", "Grep", "Glob"]
   }

@@ -28,8 +28,9 @@
  * paths are absolute already. writeBuildConfig (#0-284): `<runId>/build/devcontainer.json`, the configuration
  * `devcontainer build --config` reads, in a directory of its own made by `mkdir` (no -p: one there is refused), so
  * the build's lockfile is `<runId>/build/devcontainer-lock.json` and the build's configuration is never the one
- * `devcontainer up` reads. removeWorkDir: `rm -rf <runId>`, the directory itself and every entry, dot entries
- * included, and then nothing is there. removeAllWorkDirs: the same for every entry under /tasks (what a killed run left).
+ * `devcontainer up` reads. makeWorkDir also makes `<runId>/token/`, empty (#0-313), and writeTokenFile writes the
+ * task's token there, 444, from stdin. removeWorkDir: `rm -rf <runId>`, the directory itself and every entry, dot
+ * entries included, and then nothing is there. removeAllWorkDirs: the same for every entry under /tasks (what a killed run left).
  */
 import { RUN_ID, TASKS_ROOT, HELPER_TASKS, TASK_LABEL, WORK_OWNER } from './paths.mjs';
 import { ContainerRunError, mustRun } from './run-container.mjs';
@@ -51,6 +52,8 @@ const SCRIPTS = Object.freeze({
       + '-c core.fsmonitor= clone -q -b base -- "$root/$run/base.bundle" "$root/$run/w"',
     'rm -f -- "$root/$run/base.bundle"',
     `chown -R -h ${WORK_OWNER} -- "$root/$run/w"`,
+    // The token's directory, empty, 755 (#0-313): the bind's source of the container's /run/factory.
+    'mkdir -- "$root/$run/token"',
   ].join('\n'),
   override: [
     'set -euC',
@@ -64,6 +67,14 @@ const SCRIPTS = Object.freeze({
     'test -d "$1/$2" && test ! -L "$1/$2"',
     'mkdir -- "$1/$2/build"',
     'cat > "$1/$2/build/devcontainer.json"',
+  ].join('\n'),
+  // The task's token (#0-313), from stdin into its directory: 444 (umask 222), so the container's user reads it, and
+  // with noclobber, so a file or a link there is refused, never written through.
+  token: [
+    'set -euC',
+    'umask 222',
+    'test -d "$1/$2/token" && test ! -L "$1/$2/token"',
+    'cat > "$1/$2/token/token"',
   ].join('\n'),
   remove: [
     'set -eu',
@@ -138,6 +149,20 @@ export function writeOverride({ runId, override, image, sudo, stateDir }) {
 export function writeBuildConfig({ runId, config, image, sudo, stateDir }) {
   return helper(`the build configuration of ${runId} could not be written`,
     { runId, image, script: 'buildConfig', input: `${JSON.stringify(config, null, 2)}\n`, sudo, stateDir });
+}
+
+/**
+ * `<runId>/token/token`, the task's token for the dispatcher's proxy (incident-platform backlog #0-313), on stdin and
+ * never in an argument (sudo logs a command's arguments, ADR-0062 point 1).
+ *
+ * @param {{ runId: string, token: string, image: string, stateDir: string, sudo?: string }} options
+ */
+export function writeTokenFile({ runId, token, image, sudo, stateDir }) {
+  if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
+    throw new TypeError('writeTokenFile: token must be 32 random bytes in base64url');
+  }
+  return helper(`the token of ${runId} could not be written`, { runId, image, script: 'token', input: token, sudo,
+    stateDir });
 }
 
 /** Removes `<runId>/` whole, and checks that nothing is left of it. */

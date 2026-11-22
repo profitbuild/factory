@@ -13,8 +13,10 @@
  * stops the task. The answer is the result's structured_output, held to the same schema --json-schema was given; it
  * is written to calls/<n>-<agent>.answer.json (600), the agent's words kept there and nowhere the dispatcher decides.
  *
- * callEnv and INIT_CHECKS are lists: #0-313 (M2.7, the proxy and the task's token) adds one literal to the first and
- * one field to the second (apiKeySource), and one mount to container/task-config.mjs's dispatcherMounts.
+ * The credential (incident-platform backlog #0-313, M2.7; ADR-0064 point 5 as amended): no Claude key in the
+ * container, only the task's token for the dispatcher's proxy (proxy/), printed by the managed settings' apiKeyHelper
+ * from the token's file (container/task-config.mjs mounts its directory read-only on /run/factory). callEnv gives the
+ * proxy's address as ANTHROPIC_BASE_URL, a literal (no secret), and INIT_CHECKS holds apiKeySource to "apiKeyHelper".
  */
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
@@ -36,6 +38,9 @@ export const CALL_LIMIT_S = Object.freeze({ architect: 30 * 60, implementer: 90 
 /** The system directories of PATH: no user's directory (no ~/.local/bin). */
 export const CALL_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
+/** The proxy's address as the container reaches it (#0-313): http, an IPv4 literal and a port, nothing else. */
+export const BASE_URL = /^http:\/\/(?:[0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}$/;
+
 /** A call did not end in an answer the dispatcher takes: the task stops, with the reason. */
 export class CallError extends Error {}
 
@@ -45,9 +50,13 @@ export class CallError extends Error {}
  * arguments are in /proc.
  *
  * @param {{ remoteUser: string, containerEnv: Record<string, string> }} carried
+ * @param {{ baseUrl: string }} proxy the run's proxy's address (#0-313: proxy/server.mjs's baseUrl)
  * @returns {string[]} NAME=value, in order
  */
-export function callEnv(carried) {
+export function callEnv(carried, { baseUrl }) {
+  if (typeof baseUrl !== 'string' || !BASE_URL.test(baseUrl)) {
+    throw new TypeError('callEnv: baseUrl must be the proxy\'s http://<IPv4>:<port>');
+  }
   return [
     `HOME=/home/${carried.remoteUser}`,
     'LANG=C.UTF-8',
@@ -61,6 +70,8 @@ export function callEnv(carried) {
     // PR #697; review of factory#26, gen-5d20, sec-4e1d).
     'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
     'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1',
+    // Where the model's calls go (#0-313): the run's proxy, which swaps the task's token for the key.
+    `ANTHROPIC_BASE_URL=${baseUrl}`,
   ];
 }
 
@@ -68,10 +79,10 @@ export function callEnv(carried) {
  * The command after execInTask's /usr/bin/timeout: env -i, then claude with F3's flags.
  *
  * @param {{ agent: { name: string, tools: string[], maxTurns: number }, schemaText: string,
- *   carried: object }} options
+ *   carried: object, baseUrl: string }} options
  */
-export function callArgs({ agent, schemaText, carried }) {
-  return ['/usr/bin/env', '-i', ...callEnv(carried), CLAUDE, '-p', '--plugin-dir', FACTORY_MOUNT,
+export function callArgs({ agent, schemaText, carried, baseUrl }) {
+  return ['/usr/bin/env', '-i', ...callEnv(carried, { baseUrl }), CLAUDE, '-p', '--plugin-dir', FACTORY_MOUNT,
     '--agent', `factory:${agent.name}`, '--restricted', '--tools', agent.tools.join(','), '--add-dir', WORKSPACE,
     '--output-format', 'stream-json', '--verbose', '--json-schema', schemaText, '--permission-mode', 'dontAsk',
     '--max-turns', String(agent.maxTurns)];
@@ -101,6 +112,9 @@ export const INIT_CHECKS = Object.freeze({
   permissionMode: (v) => v === 'dontAsk',
   claude_code_version: (v, { expectations }) => v === expectations.claudeCodeVersion,
   mcp_servers: (v) => Array.isArray(v) && v.length === 0,
+  // The credential came from the managed apiKeyHelper (#0-313, ADR-0064 point 3 as amended): measured "none" without
+  // one and with ANTHROPIC_AUTH_TOKEN in the environment, so a call that got its credential any other way stops.
+  apiKeySource: (v) => v === 'apiKeyHelper',
 });
 
 /** The fields of `init` that break INIT_CHECKS, by name. */
@@ -112,11 +126,12 @@ export function initViolations(init, context) {
  * One call, read to its answer, or a CallError (CallTimeoutError past its limit).
  *
  * @param {{ container: object, task: object, n: number, agentName: string, prompt: string, carried: object,
- *   expectations: object, stateDir: string, sudo?: string }} options `n` the call's number in the task
+ *   expectations: object, stateDir: string, baseUrl: string, sudo?: string }} options `n` the call's number in
+ *   the task; `baseUrl` the run's proxy's (#0-313)
  * @returns {Promise<{ answer: object, file: string, answerFile: string }>}
  */
 export async function callAgent({
-  container, task, n, agentName, prompt, carried, expectations, stateDir, sudo,
+  container, task, n, agentName, prompt, carried, expectations, stateDir, baseUrl, sudo,
 }) {
   const agent = await readAgent(agentName);
   const { schema, text: schemaText } = await readAnswerSchema(agentName);
@@ -124,7 +139,8 @@ export async function callAgent({
   await ensureOwnDirectory(dir);
   const file = join(dir, `${n}-${agentName}.jsonl`);
   const result = await execInTask({ container, sudo, limitS: CALL_LIMIT_S[agentName], graceS: 30,
-    input: prompt, outputLimit: STREAM_LIMIT, stdoutFile: file, args: callArgs({ agent, schemaText, carried }) });
+    input: prompt, outputLimit: STREAM_LIMIT, stdoutFile: file,
+    args: callArgs({ agent, schemaText, carried, baseUrl }) });
   let stream;
   try {
     stream = await readStream(file);

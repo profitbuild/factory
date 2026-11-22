@@ -44,7 +44,8 @@ test('#0-301 (review round 1 of factory#26, gen-3c1f): a test gate on a task wit
   fake.update((s) => { s.scenario.claude = [{ stream: stream('implementer', IMPLEMENTER_ANSWER),
     files: { '.gate': GATE('pass', 'app.jar') } }]; });
   const gate = buildPhases({ stateDir, repoDir: product.repoDir, adapter, container: ready.container,
-    carried: ready.carried, expectations: await readExpectations(), ...fake.runner, git: REAL_GIT })
+    carried: ready.carried, expectations: await readExpectations(), baseUrl: 'http://10.0.2.15:8770', ...fake.runner,
+    git: REAL_GIT })
     .find((phase) => phase.name === 'test-gate');
   const left = await runPhases(stateDir, task, [gate]);
   assert.equal(left.status, 'running', left.reason);

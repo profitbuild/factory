@@ -24,7 +24,7 @@ export function initEvent(agent, changes = {}) {
   return {
     type: 'system', subtype: 'init', cwd: '/workspace', session_id: '00000000-0000-4000-8000-000000000301',
     tools: [...EXPECTATIONS.agents[agent].tools], mcp_servers: [], model: MODELS[agent], permissionMode: 'dontAsk',
-    slash_commands: ['compact', 'context'], apiKeySource: 'none', claude_code_version: EXPECTATIONS.claudeCodeVersion,
+    slash_commands: ['compact', 'context'], apiKeySource: 'apiKeyHelper', claude_code_version: EXPECTATIONS.claudeCodeVersion,
     output_style: 'default',
     agents: ['claude', 'Explore', 'factory:architect', 'factory:implementer', 'factory:implementer-light',
       'general-purpose', 'Plan', 'statusline-setup', 'web-fetch'],

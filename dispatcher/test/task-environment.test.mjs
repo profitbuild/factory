@@ -122,6 +122,8 @@ async () => {
     `bind /home/factory/tasks/${RUN_ID}/w /workspace rw`,
     'bind /opt/factory-checkout /opt/factory ro',
     'bind /opt/factory-checkout/claude-code/etc /etc/claude-code ro',
+    // #0-313: the task's token's directory, read-only.
+    `bind /home/factory/tasks/${RUN_ID}/token /run/factory ro`,
     'bind /var/run/docker.sock /var/run/docker-host.sock rw',
     `volume factory-task-${RUN_ID}-claude /home/dev/.claude rw`,
     'volume factory-dispatcher-m2 /home/dev/.m2 rw',
@@ -296,7 +298,7 @@ test('AC9, AC3: the built image\'s metadata off the list, a mount, privilege or 
       ...TASK_CONFIG_LIST.features[FEATURE].digests[FEATURE_DIGEST].metadata }, { remoteUser: 'dev' },
     { mounts: ['type=bind,source=/,target=/host'] }]) }; });
   });
-  await blocked(await setUp(), /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[6\] \(not named\)$/, (fake) => {
+  await blocked(await setUp(), /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[7\] \(not named\)$/, (fake) => {
     fake.update((s) => { s.scenario.extraMounts = [{ Type: 'bind', Source: '/srv/state', Destination: '/state', RW: true }]; });
   });
   await blocked(await setUp(), /HostConfig\.Privileged is neither what the dispatcher set nor Docker's default/, (fake) => {
@@ -572,7 +574,7 @@ test('#0-284 AC4: a value the daemon returned reaches no refusal and no task.jso
     [(s) => { s.scenario.imageLabels = { 'devcontainer.metadata': JSON.stringify([{ ...feature, [secret]: 1 }]) }; },
       /no key of the list's differs; 1 key off the list \(not named\)$/],
     [(s) => { s.scenario.extraMounts = [{ Type: 'bind', Source: '/', Destination: `/${secret}`, RW: true }]; },
-      /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[6\] \(not named\)$/],
+      /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[7\] \(not named\)$/],
     [(s) => { s.scenario.hostConfig = { CapAdd: ['CAP_NET_ADMIN', `CAP_${secret}`] }; },
       /HostConfig\.CapAdd adds 1 capability off the configuration's and its features', at CapAdd\[1\] \(not named\)$/],
     [(s) => { s.scenario.hostConfig = { [`X${secret}`]: secret }; },

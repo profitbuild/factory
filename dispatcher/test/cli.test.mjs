@@ -13,7 +13,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { main } from '../src/cli.mjs';
@@ -28,6 +28,8 @@ import { makeFakeDaemon, plantedContainer } from '../testing/fake-daemon.mjs';
 import { git } from '../testing/git-fixtures.mjs';
 import { startGitFetchServer } from '../testing/git-fetch-server.mjs';
 import { makeStateDir, validEnv } from '../testing/state-dir.mjs';
+import { startFakeAnthropic } from '../testing/fake-anthropic.mjs';
+import { makeProxyFiles } from '../testing/proxy-files.mjs';
 
 const CLI = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 const LOCK_MODULE = new URL('../src/state/lock.mjs', import.meta.url).href;
@@ -48,7 +50,10 @@ const github = await startBuilderGitHub();
 const served = await makeStateDir();
 await mkdir(join(served.dir, 'profitbuild'));
 const gitServer = await startGitFetchServer({ root: served.dir, valid: github.tokenValid });
+// Anthropic's API, faked, for the runs' proxies (#0-313).
+const anthropic = await startFakeAnthropic();
 after(async () => {
+  await anthropic.close();
   await github.close();
   await gitServer.close();
   await served.remove();
@@ -91,18 +96,29 @@ async function setUpDaemon(t, initial, { product: productOptions = {} } = {}) {
   git(product.repoDir, ['config', 'remote.origin.url', ORIGIN_URL]);
   const app = await writeAppFiles(scratch.dir, github.privateKey);
   const fake = makeFakeDaemon(scratch.dir, initial);
+  // Claude's key, the proxy's configuration and the fresh-VM marker (#0-313), the fake Anthropic upstream.
+  const proxy = await makeProxyFiles(scratch.dir, { upstream: anthropic.upstream });
   const env = { ...validEnv(state.dir, product.repoDir), BUILDER_APP_ID: String(APP_ID),
-    BUILDER_APP_INSTALLATION_ID: String(INSTALLATION_ID), BUILDER_APP_KEY: app.keyPath };
+    BUILDER_APP_INSTALLATION_ID: String(INSTALLATION_ID), BUILDER_APP_KEY: app.keyPath, CLAUDE_KEY: proxy.keyPath };
   const lines = [];
   // No phase unless a test gives some (#0-301: the build zone's phases are flow-phases.test.mjs's, with a fake agent).
-  const call = (args, extra = {}) => main(args, { env, out: { write: (line) => lines.push(line) }, ...fake.runner,
-    apiBase: github.baseUrl, gitBase: gitServer.baseUrl, phases: [], ...extra });
+  // Each run on a VM made anew (#0-313 AC6): the marker's consumption undone before it, but where a test of AC6 keeps
+  // it (`keepFreshVm`).
+  const call = async (args, { keepFreshVm = false, ...extra } = {}) => {
+    if (!keepFreshVm) {
+      await rm(join(state.dir, 'fresh-vm.json'), { force: true });
+    }
+    return main(args, { env, out: { write: (line) => lines.push(line) }, err: { write: (line) => errLines.push(line) },
+      ...fake.runner, apiBase: github.baseUrl, gitBase: gitServer.baseUrl, phases: [],
+      proxyTesting: proxy.proxyTesting, ...extra });
+  };
+  const errLines = [];
   const advance = async (change = { files: { 'src/merged.txt': 'merged\n' } }) => {
     const sha = await commit(product.work, change);
     git(product.work, ['push', '-q', ORIGIN, 'HEAD:refs/heads/main']);
     return sha;
   };
-  return { stateDir: state.dir, env, product, fake, call, lines, mark, advance };
+  return { stateDir: state.dir, env, product, fake, call, lines, errLines, mark, advance, proxy };
 }
 
 const pullsAsked = (from) => github.requests.slice(from).filter((r) => r.path.endsWith('/pulls'));
@@ -136,7 +152,8 @@ test('run brings main up to GitHub\'s, reads the adapter from the new base, chec
   assert.match(printed.runId, /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$/);
   assert.deepEqual({ ...printed, runId: undefined }, { runId: undefined, item: '0-275', branch: null, phase: null,
     status: 'running', reason: null });
-  assert.deepEqual((await readdir(stateDir)).sort(), ['lock', 'state.json', 'state.lock', 'tasks']);
+  // fresh-vm.json: the run consumed the VM's marker (#0-313 AC6).
+  assert.deepEqual((await readdir(stateDir)).sort(), ['fresh-vm.json', 'lock', 'state.json', 'state.lock', 'tasks']);
   assert.deepEqual(await readdir(join(stateDir, 'tasks')), [printed.runId]);
   const task = JSON.parse(await readFile(join(stateDir, 'tasks', printed.runId, 'task.json'), 'utf8'));
   assert.equal(task.item, '0-275');
@@ -250,11 +267,11 @@ async function refusedBeforeTask({ stateDir, fake, call }, args, pattern) {
 
 test('review round 1 c: a revoke that fails is one line on stderr naming its kind; the run keeps its result and frees '
   + 'the lock', async (t) => {
-  const { env, fake, product, lines } = await setUpDaemon(t);
+  const setup = await setUpDaemon(t);
+  const { product, lines } = setup;
   github.state.failRevoke = true;
   const errors = [];
-  const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) }, phases: [],
-    err: { write: (line) => errors.push(line) }, ...fake.runner, apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
+  const call = (args) => setup.call(args, { err: { write: (line) => errors.push(line) } });
   const left = await call(['run', '--item', '0-1']);
   assert.equal(left.status, 'running', left.reason);
   assert.equal(left.baseSha, product.base);
@@ -267,12 +284,12 @@ test('review round 1 c: a revoke that fails is one line on stderr naming its kin
 });
 
 test('review round 2, 3: a write to stderr that throws, after a revoke that fails, still frees the lock', async (t) => {
-  const { env, fake, product, lines } = await setUpDaemon(t);
+  const setup = await setUpDaemon(t);
+  const { product } = setup;
   github.state.failRevoke = true;
   let writes = 0;
   const broken = { write: () => { writes += 1; throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }); } };
-  const call = (args, err) => main(args, { env, out: { write: (line) => lines.push(line) }, err, phases: [], ...fake.runner,
-    apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
+  const call = (args, err) => setup.call(args, { err });
   const left = await call(['run', '--item', '0-1'], broken);
   assert.equal(left.status, 'running', left.reason);
   assert.equal(left.baseSha, product.base);
@@ -332,14 +349,17 @@ test('#0-278 AC9: the dispatcher\'s own task holds its item while it runs on a b
   });
 
 test('the breaker tripped refuses the run; state.json unreadable tells the owner what to do', async (t) => {
-  const { stateDir, env } = await setUp(t);
+  const { stateDir, env: base, repoParent } = await setUp(t);
+  // In this process: the proxy's files are a test's (#0-313), read before the breaker.
+  const proxy = await makeProxyFiles(repoParent);
+  const env = { ...base, CLAUDE_KEY: proxy.keyPath };
+  const refused = (pattern) => assert.rejects(main(['run', '--item', '0-1'], { env, out: { write() {} },
+    proxyTesting: proxy.proxyTesting }), pattern);
   await writeJsonAtomic(join(stateDir, 'state.json'),
     { consecutiveBlocked: 3, shippedSinceAudit: 0, lastAudit: null, history: [] });
-  refusedWith(await cli(['run', '--item', '0-1'], env),
-    /^dispatcher: the breaker has tripped: 3 tasks blocked in a row, FACTORY_MAX_BLOCKED is 3/);
+  await refused(/^Error: the breaker has tripped: 3 tasks blocked in a row, FACTORY_MAX_BLOCKED is 3/);
   await writeFile(join(stateDir, 'state.json'), '{"consecutiveBlocked": ', { mode: 0o600 });
-  refusedWith(await cli(['run', '--item', '0-1'], env),
-    /cannot be read, so the breaker counts as tripped: repair the file .*, or delete it knowingly/);
+  await refused(/cannot be read, so the breaker counts as tripped: repair the file .*, or delete it knowingly/);
   assert.equal(await readFile(join(stateDir, 'state.json'), 'utf8'), '{"consecutiveBlocked": ');
   assert.deepEqual((await readdir(stateDir)).sort(), ['lock', 'state.json', 'state.lock'], 'no task is made');
 });
@@ -863,3 +883,165 @@ try {
   assert.equal(await inChild(['run', '--item', '0-1']), 'refused: the expectations are broken');
 });
 
+
+// #0-313: the run's credential proxy, end to end on the fake daemon and the fake Anthropic upstream.
+
+/** The fake Claude Code's calls of the proxy (testing/fake-claude-proxy.mjs). */
+const proxyCalls = async (fake) => (await readFile(join(dirname(fake.tasks), 'fake', 'proxy-calls.jsonl'), 'utf8')
+  .catch(() => '')).split('\n').filter(Boolean).map((line) => JSON.parse(line));
+
+/** Every file under `dir`, as text. */
+async function filesUnder(dir) {
+  const texts = [];
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) {
+      texts.push(await readFile(join(entry.parentPath, entry.name), 'utf8'));
+    }
+  }
+  return texts;
+}
+
+/** One POST to a proxy's address with `token`: its status, or the connection's error. */
+const askProxy = (url, token) => fetch(`${url}/v1/messages?beta=true`, { method: 'POST', body: '{}',
+  headers: { 'x-api-key': token, authorization: `Bearer ${token}`, 'content-type': 'application/json' } })
+  .then(async (res) => ({ status: res.status, body: await res.text() }),
+    (error) => ({ error: error.cause?.code ?? error.message }));
+
+test('#0-313 AC1, AC2, AC5: an agent call reaches Claude through the run\'s proxy alone, with the token of its '
+  + 'read-only file; the key reaches upstream and nothing else; once the run ends, no one answers the token',
+async (t) => {
+  const { stream, ARCHITECT_ANSWER, IMPLEMENTER_ANSWER } = await answers();
+  const { sseAnswer } = await import('../testing/fake-anthropic.mjs');
+  const { SCRIPTS } = await import('../src/container/work-dir.mjs');
+  const start = anthropic.requests.length;
+  const { left, stateDir, fake, proxy, lines, errLines } = await flowRun(t, '0-9', [
+    { stream: stream('architect', ARCHITECT_ANSWER),
+      proxy: { bodyMarker: 'BODY-MARKER-0313', headers: { cookie: 'COOKIE-0313', 'x-foo': 'FOO-0313' } } },
+    { stream: stream('implementer', IMPLEMENTER_ANSWER), files: { '.gate': GATE('pass', 'app.jar') } },
+  ]);
+  assert.equal(left.status, 'running', left.reason);
+  assert.equal(left.phase, 'test-gate');
+  const [call] = await proxyCalls(fake);
+  assert.equal(call.status, 200, JSON.stringify(call));
+  assert.equal(call.body, sseAnswer().join(''), 'the stream as upstream sent it');
+  assert.equal(call.mode, 0o444, 'the token\'s file, 444');
+  assert.match(call.url, new RegExp(`^http://${proxy.addr.replaceAll('.', '\\.')}:(${proxy.ports.join('|')})$`));
+  assert.ok(fake.claudeCalls()[0].argv.includes(`ANTHROPIC_BASE_URL=${call.url}`), 'the call\'s env -i list');
+  // Upstream: the key, the body as sent, no cookie of the client's.
+  const seen = anthropic.requests.slice(start);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].headers['x-api-key'], proxy.key);
+  assert.equal(seen[0].headers.cookie, undefined);
+  assert.equal(seen[0].headers.authorization, undefined);
+  assert.match(seen[0].body, /BODY-MARKER-0313/);
+  // The token's helper: after the container's up, the token on stdin (43 bytes), in no argument.
+  const calls = fake.calls();
+  const up = calls.findIndex((c) => c.program === 'devcontainer' && c.args[0] === 'up');
+  const helper = calls.findIndex((c) => c.args[0] === 'run' && c.args.includes(SCRIPTS.token));
+  assert.ok(up >= 0 && helper > up, 'the token written once the container is checked');
+  assert.equal(calls[helper].stdinBytes, 43);
+  assert.ok(!JSON.stringify(calls).includes(call.token), 'the token in no argument of the daemon\'s');
+  assert.ok(!JSON.stringify(fake.claudeCalls()).includes(call.token), 'nor of the call\'s');
+  // AC1: the run over, its proxy is gone.
+  assert.equal((await askProxy(call.url, call.token)).error, 'ECONNREFUSED');
+  // AC3 per task, AC8's names.
+  const record = JSON.parse(await readFile(join(stateDir, 'tasks', left.runId, 'proxy.json'), 'utf8'));
+  assert.equal(record.forwarded, 1);
+  assert.equal(record.usage.output_tokens, 7);
+  // x-foo the scenario's; the others, fetch's own (the fake client is Node's fetch), are off the list too.
+  assert.ok(record.droppedHeaders.includes('x-foo'), JSON.stringify(record.droppedHeaders));
+  assert.ok(!record.droppedHeaders.includes('cookie'), 'a credential is dropped by rule, not listed');
+  // AC2: the key in no response, log line, task file or anything of the run's.
+  const everything = [...await filesUnder(stateDir), ...await filesUnder(join(dirname(fake.tasks), 'fake')),
+    ...lines, ...errLines, JSON.stringify(call)];
+  assert.ok(everything.every((text) => !text.includes(proxy.key)), 'the key nowhere but upstream');
+  assert.ok(everything.every((text) => !text.includes('COOKIE-0313') && !text.includes('FOO-0313')));
+});
+
+test('#0-313 AC6: a second run on the same VM, or a run with no marker, stops before its container: no token, the '
+  + 'breaker counting it', async (t) => {
+  const setup = await setUpDaemon(t, undefined, { product: { files: FLOW_FILES } });
+  const { call, stateDir, fake, proxy } = setup;
+  const first = await call(['run', '--item', '0-9']);
+  assert.equal(first.status, 'running', first.reason);
+  const before = fake.calls().length;
+  const second = await call(['run', '--item', '0-7'], { keepFreshVm: true });
+  assert.equal(second.status, 'blocked');
+  assert.equal(second.reason, `fresh-vm: this VM has run a task before (by the run ${first.runId}): a run that `
+    + 'holds a token runs only on a VM made anew by create.sh, until #0-285');
+  const after = fake.calls().slice(before);
+  assert.ok(!after.some((c) => c.program === 'devcontainer'), 'no container of the second task\'s');
+  assert.ok(!after.some((c) => c.args[0] === 'run' && c.args.includes('token/token')), 'no token');
+  assert.equal((await openBreaker(stateDir)).state.history.at(-1).stage, 'fresh-vm');
+  await rm(proxy.freshVm);
+  const third = await call(['run', '--item', '0-5']);
+  assert.equal(third.status, 'blocked');
+  assert.match(third.reason,
+    /^fresh-vm: the fresh-VM marker .* cannot be read \(ENOENT\): a run that holds a token runs/);
+});
+
+test('#0-313 AC1: the token is revoked and the proxy closed in a finally: after a phase that fails, and after one '
+  + 'that stops the item', async (t) => {
+  const { StopError } = await import('../src/state/tasks.mjs');
+  const setup = await setUpDaemon(t, undefined, { product: { files: FLOW_FILES } });
+  const { fake, proxy } = setup;
+  for (const ending of ['throws', 'stops']) {
+    let seen = null;
+    const probe = { name: 'probe', run: async (task) => {
+      const token = await readFile(join(fake.tasks, task.runId, 'token', 'token'), 'utf8');
+      for (const port of proxy.ports) {
+        const answer = await askProxy(`http://${proxy.addr}:${port}`, token);
+        if (answer.status !== undefined) {
+          seen = { url: `http://${proxy.addr}:${port}`, token, status: answer.status };
+          break;
+        }
+      }
+      if (ending === 'throws') {
+        throw new Error('a phase failing');
+      }
+      throw new StopError('probe', 'the phase stops the item', task);
+    } };
+    const ran = setup.call(['run', '--item', '0-9'], { phases: [probe] });
+    if (ending === 'throws') {
+      await assert.rejects(ran, /^Error: a phase failing$/);
+    } else {
+      assert.equal((await ran).reason, 'probe: the phase stops the item');
+    }
+    assert.equal(seen?.status, 200, 'the proxy answered while the phase ran');
+    assert.equal((await askProxy(seen.url, seen.token)).error, 'ECONNREFUSED', `${ending}: no proxy after it`);
+  }
+});
+
+test('#0-313: Claude\'s key or the proxy\'s configuration off their form, or more slots than ports, refuse the run '
+  + 'before the daemon; a proxy that cannot listen stops the task with no token', async (t) => {
+  const setup = await setUpDaemon(t, undefined, { product: { files: FLOW_FILES } });
+  const { call, fake, proxy, env, stateDir } = setup;
+  const refusedEarly = async (extra, pattern) => {
+    await assert.rejects(call(['run', '--item', '0-9'], extra), pattern);
+    assert.deepEqual(fake.calls(), [], 'nothing reached the daemon');
+  };
+  await chmod(proxy.keyPath, 0o644);
+  await refusedEarly({}, /^Error: Claude's key .* has mode 644/);
+  await chmod(proxy.keyPath, 0o600);
+  await refusedEarly({ proxyTesting: { ...proxy.proxyTesting, conf: join(stateDir, 'none') } },
+    /cannot be read \(ENOENT\): provision\.sh writes it/);
+  await refusedEarly({ env: { ...env, FACTORY_SLOTS: String(proxy.ports.length + 1) } },
+    new RegExp(`^Error: FACTORY_SLOTS is ${proxy.ports.length + 1}, more than the ${proxy.ports.length} ports of the `
+      + 'proxy\'s configuration: the run is refused$'));
+  assert.ok(!(await readdir(stateDir)).includes('tasks'), 'no task is made');
+  // Every port taken: the task stops in stage proxy, and no token is written.
+  const { createServer: listen } = await import('node:net');
+  const holders = await Promise.all(proxy.ports.map((port) => new Promise((resolve) => {
+    const server = listen();
+    server.listen({ host: proxy.addr, port }, () => resolve(server));
+  })));
+  try {
+    const left = await call(['run', '--item', '0-9']);
+    assert.equal(left.status, 'blocked');
+    assert.equal(left.reason, `proxy: every port of the proxy's configuration is taken (${proxy.ports.length})`);
+    assert.ok(!fake.calls().some((c) => c.args[0] === 'run' && c.args.includes('token/token')), 'no token');
+    assert.equal((await openBreaker(stateDir)).state.history.at(-1).stage, 'proxy');
+  } finally {
+    holders.forEach((server) => server.close());
+  }
+});
