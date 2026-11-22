@@ -29,7 +29,9 @@ export const SCOPE = Object.freeze(['dispatcher/src', 'dispatcher/bin', 'dispatc
 // The ratchet: the files over the hard limit when this test came in (origin/main at 7a31dc5), each at its length then.
 // No limit is raised here; the file is shortened. The rule: an entry equals its file's length now. Shorten a file and
 // lower its entry, in the same change; a file down to 600 lines or fewer leaves the list. A file is added only if it
-// was over the limit when the test came in: a new one over 600 is split, not listed.
+// was over the limit when the test came in: a new one over 600 is split, not listed. This test holds each entry to its
+// file's length; that the list only shrinks, that no file is added and that no limit is raised it cannot see (it knows
+// no history): review holds those, and sees any change of RATCHET or LIMITS.
 export const RATCHET = Object.freeze({
   'dispatcher/testing/fake-daemon.mjs': 640,
 });

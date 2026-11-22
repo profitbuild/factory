@@ -207,8 +207,10 @@ only while the module is short. `dispatcher/test/max-lines.test.mjs` therefore h
 the test's output; past 600 it fails. A test file is not held, since tests grow with what they cover. The files
 already past 600 when the test came in are on its `RATCHET`, each at its own length: an entry always equals its
 file's length. Shorten the file and lower its entry in the same change; a file down to 600 lines or fewer leaves the
-list. No limit is raised, and no new file is added to the list: a new module past 600 lines is split. The `Test`
-jobs run it, so it needs no change to CI.
+list; a new module past 600 lines is split. The test holds each entry to its file's current length. That the list
+only shrinks, that no file is added to it and that no limit is raised is held by review, which sees any change of
+`RATCHET` or `LIMITS`: the test knows no history, so a change that adds a 700-line module together with its entry,
+or raises `LIMITS`, passes it. The `Test` jobs run it, so it needs no change to CI.
 
 The session runs in `.devcontainer/`, on the owner's Mac:
 
