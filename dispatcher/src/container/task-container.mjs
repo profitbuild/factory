@@ -22,8 +22,9 @@
  * a position, a count or an ID the daemon gave (hex), never a value it returned: a label's key, a mount's target, a
  * capability's name, a container's name are the agent's side's to choose (#0-284).
  *
- * execInTask: every call in the container is `docker exec ... timeout -s TERM -k <grace>s <limit>s <command>`, since
- * `docker exec` without a tty forwards no signal to what it started (probed 2026-11-20). Past the limit (timeout's 124,
+ * execInTask: every call in the container is `docker exec ... /usr/bin/timeout -s TERM -k <grace>s <limit>s
+ * <command>` (by its full path: #0-301, ADR-0064 point 2), since `docker exec` without a tty forwards no signal to
+ * what it started (probed 2026-11-20). Past the limit (timeout's 124,
  * or 137 once it had to kill), or past the dispatcher's own timer (limit, grace and a margin), the task's containers
  * are killed by their label, the output is no longer read, and the call is a CallTimeoutError: the task ends BLOCKED
  * (callInTask).
@@ -260,7 +261,7 @@ export async function upContainer({ runId, carried, imageId, sudo, stateDir }) {
  *   of the state, never returned (#0-284)
  */
 export async function execInTask({
-  container, args, limitS, graceS = 10, input, env = {}, outputLimit, sudo, marginS = CALL_MARGIN_S,
+  container, args, limitS, graceS = 10, input, env = {}, outputLimit, sudo, marginS = CALL_MARGIN_S, stdoutFile,
 }) {
   for (const n of [limitS, graceS]) {
     if (!Number.isSafeInteger(n) || n <= 0) {
@@ -278,11 +279,11 @@ export async function execInTask({
     return ['-e', `${name}=${value}`];
   });
   const result = await runContainerCommand({
-    program: 'docker', sudo, stateDir: container.stateDir, input, outputLimit,
+    program: 'docker', sudo, stateDir: container.stateDir, input, outputLimit, stdoutFile,
     timeoutMs: (limitS + graceS + marginS) * 1000,
     onTimeout: () => killTask({ runId: container.runId, sudo, stateDir: container.stateDir }),
     args: ['exec', '-i', '--user', container.remoteUser, '-w', WORKSPACE, ...flags, container.id,
-      'timeout', '-s', 'TERM', '-k', `${graceS}s`, `${limitS}s`, ...args],
+      '/usr/bin/timeout', '-s', 'TERM', '-k', `${graceS}s`, `${limitS}s`, ...args],
   }).catch((error) => {
     if (error instanceof ContainerTimeoutError) {
       throw new CallTimeoutError(`the call ${args[0]} in the task container ran past ${limitS} s and was killed: `

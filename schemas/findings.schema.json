@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/profitbuild/factory/blob/main/schemas/findings.schema.json",
+  "title": "The findings a fix-review run is given",
+  "description": "The owner's file of `cli.mjs run --resume <branch> --findings <file>` (incident-platform backlog #0-301): the blocking findings of a review, by id. The dispatcher decides on the ids alone (the implementer's answer must name each exactly once, in fixed or disputed); file and text go into the prompt only. ver-<8 hex> is a claim a verifier refuted, a blocking finding too.",
+  "type": "object",
+  "required": [
+    "findings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "findings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "severity",
+          "file",
+          "text"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^([a-z]+-[0-9a-f]{4}|ver-[0-9a-f]{8})$"
+          },
+          "severity": {
+            "const": "blocking"
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        }
+      }
+    }
+  }
+}

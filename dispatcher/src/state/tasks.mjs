@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { GitHubUnavailableError } from '../github/retry.mjs';
 import { validate } from '../schema/validate.mjs';
 import { ensureOwnDirectory, readJson, StateError, writeJsonAtomic } from './files.mjs';
+import { recordOutcomeHeld } from './breaker.mjs';
 import { isLive, taskLockPath, withStateLock } from './lock.mjs';
 import taskSchema from './task.schema.json' with { type: 'json' };
 
@@ -196,6 +197,32 @@ export async function updateTask(stateDir, task, changes) {
   return writeTask(stateDir, { ...task, ...changes });
 }
 
+/**
+ * A phase stops the item (incident-platform backlog #0-301, today's autopilot's stopItem): `stage` the phase it stopped
+ * in, `reason` the dispatcher's own words (never the agent's), `task` the task as the phase last wrote it.
+ */
+export class StopError extends Error {
+  constructor(stage, reason, task = null) {
+    super(`${stage}: ${reason}`);
+    this.stage = stage;
+    this.reason = reason;
+    this.task = task;
+  }
+}
+
+/**
+ * Stops the item (#0-301): the task BLOCKED with "<stage>: <reason>", and the breaker's count of it with its stage,
+ * both under one hold of the state's lock.
+ */
+export function stopItem(stateDir, task, { stage, reason }) {
+  const stopped = checkTask({ ...task, status: 'blocked', reason: `${stage}: ${reason}` }, `the task ${task.runId}`);
+  return withStateLock(stateDir, async () => {
+    await writeJsonAtomic(taskPath(stateDir, task.runId), stopped);
+    await recordOutcomeHeld(stateDir, { outcome: 'blocked', item: task.item ?? '', stage });
+    return stopped;
+  });
+}
+
 /** Ends the task as BLOCKED, with the reason. */
 export async function blockTask(stateDir, task, reason) {
   return writeTask(stateDir, { ...task, status: 'blocked', reason });
@@ -234,7 +261,11 @@ export async function runPhases(stateDir, task, phases) {
       changes = await phase.run(current);
     } catch (error) {
       if (error instanceof GitHubUnavailableError) {
-        return blockTask(stateDir, current, `${phase.name}: ${error.message}`);
+        // Through stopItem, so that the breaker counts it (review round 1 of factory#26, arc-5c1e).
+        return stopItem(stateDir, current, { stage: phase.name, reason: error.message });
+      }
+      if (error instanceof StopError) {
+        return stopItem(stateDir, error.task ?? current, { stage: error.stage, reason: error.reason });
       }
       throw error;
     }

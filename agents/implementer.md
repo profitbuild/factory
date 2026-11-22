@@ -1,7 +1,7 @@
 ---
 name: implementer
 description: Factory only. Implements one planned item, or fixes exactly the findings or test failures it is given; makes no commit and never pushes.
-tools: Read, Grep, Glob, Bash, Edit, Write
+tools: Read, Grep, Glob, Bash, Edit, Write, StructuredOutput
 model: claude-opus-5-5
 maxTurns: 120
 ---

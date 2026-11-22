@@ -95,6 +95,15 @@ export function makeFakeDaemon(root, initial = {}) {
       change(next);
       writeFileSync(config.state, JSON.stringify(next));
     },
+    /** The fake Claude Code's calls (#0-301): each one's argv after the container's ID, and its stdin. */
+    claudeCalls: () => {
+      try {
+        return readFileSync(join(dir, 'claude-calls.jsonl'), 'utf8').split('\n').filter(Boolean)
+          .map((line) => JSON.parse(line));
+      } catch {
+        return [];
+      }
+    },
     calls: () => {
       try {
         return readFileSync(config.calls, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -378,6 +387,9 @@ function exec(context, input) {
     // Again where it is used: a config written by hand could hold another (review round 2 of factory#20, 1).
     checkShellSafe(config.tmp, 'the fake daemon\'s /tmp/ (config.tmp)');
   }
+  if (args.slice(i + 1).includes('/usr/local/bin/claude')) {
+    return fakeClaude(context, args.slice(i + 1), input, container);
+  }
   const command = args.slice(i + 1).map((a) => (a === '/workspace' ? host(config, container.workspace)
     : a.replaceAll('/tmp/', `${config.tmp}/`)));
   if (state.scenario.execFails && (state.scenario.execFails.when === undefined
@@ -415,6 +427,52 @@ function exec(context, input) {
       resolve();
     });
   });
+}
+
+/**
+ * The task image's Claude Code (incident-platform backlog #0-301), which CI does not have and no test may run: an exec
+ * of /usr/local/bin/claude takes the next of scenario.claude, a list a test sets, each { stream: (event | string)[],
+ * exit?: number, files?: Record<path, text>, flood?: number, signal?: string, stderr?: string, lockStderr?: string }:
+ * the stream printed one line per item (an object as JSON, a string as it is), `files` written in the container's
+ * workspace first (an agent's changes), the exit code `exit` (0). For the stops of review round 1 of factory#26:
+ * `flood` prints that many bytes of one line after the stream; `signal` ends the call by it; `stderr` is written
+ * to stderr, and `lockStderr` makes that directory (the state's stderr/) open to others first (755), so the starter
+ * cannot keep it. Each call's argv (after the container's ID) and its stdin are recorded to claude-calls.jsonl.
+ * With no call left, it prints nothing and exits 1.
+ */
+function fakeClaude(context, argv, input, container) {
+  const { state, config, save } = context;
+  const next = (state.scenario.claude ?? []).shift();
+  save();
+  appendFileSync(join(config.dir, 'claude-calls.jsonl'),
+    `${JSON.stringify({ argv, stdin: input.toString('utf8') })}\n`);
+  if (!next) {
+    process.exitCode = 1;
+    return undefined;
+  }
+  for (const [path, text] of Object.entries(next.files ?? {})) {
+    const target = join(host(config, container.workspace), path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, text);
+  }
+  out(next.stream.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))).map((line) => `${line}\n`).join(''));
+  if (next.lockStderr) {
+    mkdirSync(next.lockStderr, { recursive: true, mode: 0o700 });
+    chmodSync(next.lockStderr, 0o755);
+  }
+  if (next.stderr) {
+    process.stderr.write(next.stderr);
+  }
+  if (next.flood) {
+    return new Promise((resolve) => {
+      process.stdout.write(Buffer.alloc(next.flood, 'x'), () => resolve());
+    });
+  }
+  if (next.signal) {
+    process.kill(process.pid, next.signal);
+  }
+  process.exitCode = next.exit ?? 0;
+  return undefined;
 }
 
 function parseMount(text) {

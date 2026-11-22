@@ -47,9 +47,16 @@ import {
 import { TaskConfigError, buildOverride, imageBuildConfig } from './task-config.mjs';
 import { WorkDirError, makeWorkDir, writeBuildConfig, writeOverride } from './work-dir.mjs';
 
-/** What ends a task BLOCKED when its container cannot be set up: the product's, the daemon's or the image's fault. */
-const BLOCKING = [TaskConfigError, TaskContainerError, JsoncError, ContainerRunError, WorkDirError, BaseBundleError,
-  DockerOutputError, CallTimeoutError, GitRunError, BaseTreeError];
+/**
+ * What ends a task BLOCKED when its container cannot be set up: the product's, the daemon's or the image's fault; the
+ * failures of the task's container that block the task, not the run (exported for flow/phases.mjs: an agent's
+ * call, a gate and the item's read stop the item on the same list, incident-platform backlog #0-301, review round 1
+ * of factory#26, arc-5c1e; StderrKeepError and ContainerTimeoutError are ContainerRunError's).
+ */
+export const BLOCKING = Object.freeze([
+  TaskConfigError, TaskContainerError, JsoncError, ContainerRunError, WorkDirError,
+  BaseBundleError,
+  DockerOutputError, CallTimeoutError, GitRunError, BaseTreeError]);
 
 /**
  * Steps 6: the task's container, or the task BLOCKED with the reason.
@@ -83,7 +90,8 @@ export async function setUpTaskContainer({ stateDir, repoDir, task, adapter, hel
     const container = await upContainer({ runId, carried, imageId, ...run });
     await probeTimeout({ container, sudo });
     await probeTools({ container, sudo });
-    return { task: current, container };
+    // The carried configuration too: an agent's call takes the containerEnv it accepted (#0-301, flow/call.mjs).
+    return { task: current, container, carried };
   } catch (error) {
     if (BLOCKING.some((kind) => error instanceof kind)) {
       return { task: await blockTask(stateDir, current, `the task container: ${error.message}`), container: null };

@@ -210,6 +210,11 @@ test('review rounds 2 and 3, #0-277, #0-278: no module of src/ or bin/ gives a t
     ['github/push.mjs', "const git = '/tmp/git';\nrunGit({ cwd, args, git });"],
     ['container/daemon.mjs', "mustRun({ program: 'docker', args, sudo: '/tmp/sudo' });"],
     ['cli.mjs', "sweepDaemon({ runId, helperImage, sudo: fake });"],
+    // #0-301 (review round 1 of factory#26, 10): the flow's root and an agent call's limitS are a test's.
+    ['flow/phases.mjs', "callAgent({ container, root: '/x' });"],
+    ['flow/phases.mjs', 'callAgent({ container, limitS: 5 });'],
+    ['flow/call.mjs', 'const root = 1; readAgent(name, { root });'],
+    ['cli.mjs', "readExpectations({ root: new URL('file:///x/') });"],
     ['container/environment.mjs', "const sudo = '/tmp/sudo';\nupContainer({ runId, carried, sudo });"],
     ['github/push.mjs', 'runContainerCommand({ program, args, sudo });'],
     ['bin/check-app.mjs', "main(['sweep'], { sudo: '/tmp/x' });"],

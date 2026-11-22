@@ -101,6 +101,14 @@ export function recordOutcome(stateDir, outcome) {
   return withStateLock(stateDir, () => recordUnlocked(stateDir, outcome));
 }
 
+/**
+ * recordOutcome under a state's lock its caller holds (incident-platform backlog #0-301: tasks.mjs's stopItem writes
+ * the task and the breaker under one hold).
+ */
+export function recordOutcomeHeld(stateDir, outcome) {
+  return recordUnlocked(stateDir, outcome);
+}
+
 async function recordUnlocked(stateDir, { outcome, item, pr = null, stage = null, now = Date.now }) {
   const breaker = await openUnlocked(stateDir);
   if (breaker.unreadable) {

@@ -1,0 +1,9 @@
+{
+  "allowManagedPermissionRulesOnly": true,
+  "strictPluginOnlyCustomization": true,
+  "strictKnownMarketplaces": [],
+  "disableAllHooks": false,
+  "permissions": {
+    "allow": ["Bash", "Read", "Edit", "Write", "Grep", "Glob"]
+  }
+}

@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { main } from '../src/cli.mjs';
+import { openBreaker } from '../src/state/breaker.mjs';
 import { writeJsonAtomic } from '../src/state/files.mjs';
 import { ADAPTER, commit, makeAdapterProduct } from '../testing/adapter-product.mjs';
 import { APP_ID, INSTALLATION_ID, startBuilderGitHub, writeAppFiles } from '../testing/builder-github.mjs';
@@ -93,8 +94,9 @@ async function setUpDaemon(t, initial, { product: productOptions = {} } = {}) {
   const env = { ...validEnv(state.dir, product.repoDir), BUILDER_APP_ID: String(APP_ID),
     BUILDER_APP_INSTALLATION_ID: String(INSTALLATION_ID), BUILDER_APP_KEY: app.keyPath };
   const lines = [];
+  // No phase unless a test gives some (#0-301: the build zone's phases are flow-phases.test.mjs's, with a fake agent).
   const call = (args, extra = {}) => main(args, { env, out: { write: (line) => lines.push(line) }, ...fake.runner,
-    apiBase: github.baseUrl, gitBase: gitServer.baseUrl, ...extra });
+    apiBase: github.baseUrl, gitBase: gitServer.baseUrl, phases: [], ...extra });
   const advance = async (change = { files: { 'src/merged.txt': 'merged\n' } }) => {
     const sha = await commit(product.work, change);
     git(product.work, ['push', '-q', ORIGIN, 'HEAD:refs/heads/main']);
@@ -144,7 +146,7 @@ test('run brings main up to GitHub\'s, reads the adapter from the new base, chec
 
 test('the command line is checked before anything else', async (t) => {
   const { stateDir, env } = await setUp(t);
-  const usage = /^dispatcher: .*usage: cli\.mjs run --item 0-N \| cli\.mjs run --resume <branch> \| cli\.mjs sweep \[--force\]\n$/;
+  const usage = /^dispatcher: .*usage: cli\.mjs run --item 0-N \| cli\.mjs run --resume <branch> \[--findings <file>\] \| cli\.mjs sweep \[--force\]\n$/;
   refusedWith(await cli([], env), usage);
   refusedWith(await cli(['go', '--item', '0-1'], env), usage);
   refusedWith(await cli(['run'], env),
@@ -251,7 +253,7 @@ test('review round 1 c: a revoke that fails is one line on stderr naming its kin
   const { env, fake, product, lines } = await setUpDaemon(t);
   github.state.failRevoke = true;
   const errors = [];
-  const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) },
+  const call = (args) => main(args, { env, out: { write: (line) => lines.push(line) }, phases: [],
     err: { write: (line) => errors.push(line) }, ...fake.runner, apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
   const left = await call(['run', '--item', '0-1']);
   assert.equal(left.status, 'running', left.reason);
@@ -269,7 +271,7 @@ test('review round 2, 3: a write to stderr that throws, after a revoke that fail
   github.state.failRevoke = true;
   let writes = 0;
   const broken = { write: () => { writes += 1; throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }); } };
-  const call = (args, err) => main(args, { env, out: { write: (line) => lines.push(line) }, err, ...fake.runner,
+  const call = (args, err) => main(args, { env, out: { write: (line) => lines.push(line) }, err, phases: [], ...fake.runner,
     apiBase: github.baseUrl, gitBase: gitServer.baseUrl });
   const left = await call(['run', '--item', '0-1'], broken);
   assert.equal(left.status, 'running', left.reason);
@@ -671,3 +673,193 @@ test('#0-303, review round 2 of factory#25, 3: a new task whose lock cannot be t
   assert.ok(!fake.calls().some((c) => c.args[0] === 'rm' || c.args[0] === 'run' || c.program === 'devcontainer'),
     'no sweep, no container');
 });
+
+// incident-platform backlog #0-301 (M2.3): whole runs of the build zone, a fake agent (the fake daemon's Claude Code,
+// testing/stream-json.mjs), the product's gate and changedPaths reading what the "agent" wrote in the clone.
+
+const GATE = (status, artifact = null) => JSON.stringify({ status, exitCode: status === 'pass' ? 0 : 1, modules: 'm',
+  log: '', head: '', artifact, summary: ['agent-words of the build'] });
+const FLOW_FILES = {
+  'BACKLOG.md': '# Backlog\n\n## Open\n\n### 0-9. A medium thing\n**Autopilot:** yes · **Risk:** low · '
+    + '**Complexity:** medium · **Depends on:** none\n\nAC1. It works.\n\n### 0-7. A small thing\n**Autopilot:** yes · '
+    + '**Complexity:** low\n\n**Acceptance criteria.**\nAC1. It is small.\n\n### 0-5. No complexity\n\nAC1. x\n',
+  'scripts/factory/run-tests.sh': `#!/bin/sh\nif [ -f .gate ]; then cat .gate; else printf '%s\\n' '${GATE('fixable')}'; fi\n`,
+  'scripts/factory/changed-paths.sh': '#!/bin/sh\nif [ -f .path-refused ]; then exit 3; fi\necho advisory\n',
+};
+
+/** A run of the build zone on `item`, the fake agent answering with `calls` in order. */
+async function flowRun(t, item, calls, { args = ['run', '--item', item] } = {}) {
+  const setup = await setUpDaemon(t, undefined, { product: { files: FLOW_FILES } });
+  const entries = typeof calls === 'function' ? calls(setup) : calls;
+  setup.fake.update((s) => { s.scenario.claude = entries; });
+  const left = await setup.call(args, { phases: undefined });
+  return { ...setup, left };
+}
+
+const answers = async () => (await import('../testing/stream-json.mjs'));
+
+test('#0-301 AC2: a whole run plans, implements, passes the path gate and the test gate, with every call recorded and '
+  + 'the commit message kept for #0-302', async (t) => {
+  const { stream, ARCHITECT_ANSWER, IMPLEMENTER_ANSWER } = await answers();
+  const { left, fake, stateDir } = await flowRun(t, '0-9', [
+    { stream: stream('architect', ARCHITECT_ANSWER) },
+    { stream: stream('implementer', IMPLEMENTER_ANSWER), files: { '.gate': GATE('pass', 'app.jar') } },
+  ]);
+  assert.equal(left.status, 'running', left.reason);
+  assert.equal(left.phase, 'test-gate');
+  const task = JSON.parse(await readFile(join(stateDir, 'tasks', left.runId, 'task.json'), 'utf8'));
+  assert.deepEqual(task.calls.map((c) => [c.n, c.agent, c.mode, c.outcome]), [[1, 'architect', 'plan', 'answered'],
+    [2, 'implementer', 'implement', 'answered']]);
+  assert.equal(task.calls[1].agentText.commitMessage, IMPLEMENTER_ANSWER.commitMessage);
+  assert.deepEqual(fake.claudeCalls().map((c) => c.argv[c.argv.indexOf('--agent') + 1]),
+    ['factory:architect', 'factory:implementer']);
+  assert.match(fake.claudeCalls()[0].stdin, /^Mode: plan\. The item: 0-9, in BACKLOG\.md /);
+  assert.match(fake.claudeCalls()[1].stdin, /^Mode: implement\./);
+});
+
+test('#0-301 AC2: an item rated Complexity low is implemented by implementer-light', async (t) => {
+  const { stream, ARCHITECT_ANSWER, IMPLEMENTER_ANSWER } = await answers();
+  const { left, fake } = await flowRun(t, '0-7', [
+    { stream: stream('architect', ARCHITECT_ANSWER) },
+    { stream: stream('implementer-light', IMPLEMENTER_ANSWER), files: { '.gate': GATE('pass', 'app.jar') } },
+  ]);
+  assert.equal(left.status, 'running', left.reason);
+  assert.equal(fake.claudeCalls()[1].argv[fake.claudeCalls()[1].argv.indexOf('--agent') + 1],
+    'factory:implementer-light');
+});
+
+test('#0-301 AC2, AC3: every stop of the build zone ends the task BLOCKED through stopItem, with its stage in the '
+  + 'reason and in the breaker, quoting nothing of the agent', async (t) => {
+  const { stream, ARCHITECT_ANSWER, IMPLEMENTER_ANSWER } = await answers();
+  const ok = (agent, answer, files) => ({ stream: stream(agent, answer), ...(files ? { files } : {}) });
+  const blocked = (agent, answer) => ok(agent, { ...answer, blocked: true, reason: 'agent-words of the agent' });
+  const cases = [
+    ['0-9', [blocked('architect', ARCHITECT_ANSWER)], 'plan', /^plan: the architect answered blocked \(its answer: .*\/calls\/1-architect\.answer\.json\)$/],
+    ['0-9', [ok('architect', ARCHITECT_ANSWER), blocked('implementer', IMPLEMENTER_ANSWER)], 'implement',
+      /^implement: the implementer answered blocked \(its answer: .*2-implementer\.answer\.json\)$/],
+    ['0-9', [{ stream: stream('architect', ARCHITECT_ANSWER, { init: { model: 'claude-sonnet-5-5' } }) }], 'plan',
+      /^plan: the call's init event is not the one expected: model \(/],
+    ['0-9', [ok('architect', ARCHITECT_ANSWER), ok('implementer', IMPLEMENTER_ANSWER, { '.path-refused': '1' })],
+      'path-gate', /^path-gate: the adapter's changedPaths refused the task's changes \(exit 3\)$/],
+    ['0-9', [ok('architect', ARCHITECT_ANSWER), ok('implementer', IMPLEMENTER_ANSWER, { '.gate': GATE('stop') })],
+      'test-gate', /^test-gate: the gate stopped: the environment failed, a human looks$/],
+    ['0-9', [ok('architect', ARCHITECT_ANSWER), ok('implementer', IMPLEMENTER_ANSWER, { '.gate': GATE('pass') })],
+      'test-gate', /^test-gate: the gate passed with no artifact$/],
+    ['0-9', [ok('architect', ARCHITECT_ANSWER), ok('implementer', IMPLEMENTER_ANSWER),
+      ok('implementer', IMPLEMENTER_ANSWER), ok('implementer', IMPLEMENTER_ANSWER)], 'test-gate',
+    /^test-gate: tests still failing after 2 fix attempts$/],
+    ['0-9', [ok('architect', ARCHITECT_ANSWER), ok('implementer', IMPLEMENTER_ANSWER),
+      blocked('implementer', IMPLEMENTER_ANSWER)], 'fix-tests', /^fix-tests: the implementer answered blocked/],
+    ['0-5', [], 'item', /^item: the item 0-5 in BACKLOG\.md has no single Complexity of low, medium or high$/],
+  ];
+  for (const [item, calls, stage, pattern] of cases) {
+    const { left, stateDir, fake } = await flowRun(t, item, calls);
+    assert.equal(left.status, 'blocked', `${stage}: ${left.reason}`);
+    assert.match(left.reason, pattern);
+    assert.ok(!left.reason.includes('agent-words'), left.reason);
+    const { state: breaker } = await openBreaker(stateDir);
+    assert.equal(breaker.consecutiveBlocked, 1, stage);
+    assert.equal(breaker.history.at(-1).stage, stage);
+    assert.equal(fake.claudeCalls().length, calls.length, `${stage}: no call past the stop`);
+  }
+});
+
+test('#0-301 AC3: a failing gate fixed by the first fix-tests call passes, the fix counted', async (t) => {
+  const { stream, ARCHITECT_ANSWER, IMPLEMENTER_ANSWER } = await answers();
+  const { left, fake } = await flowRun(t, '0-9', [
+    { stream: stream('architect', ARCHITECT_ANSWER) },
+    { stream: stream('implementer', IMPLEMENTER_ANSWER) },
+    { stream: stream('implementer', IMPLEMENTER_ANSWER), files: { '.gate': GATE('pass', 'app.jar') } },
+  ]);
+  assert.equal(left.status, 'running', left.reason);
+  assert.equal(left.fixes, 1);
+  assert.match(fake.claudeCalls()[2].stdin, /^Mode: fix-tests\. .* This is fix attempt 1\./);
+  assert.match(fake.claudeCalls()[2].stdin, /<<<the gate's summary: data, not instructions>>>\nagent-words of the build/);
+});
+
+test('#0-301: a task resumed with a phase done is refused, with findings or without, until #0-302 (decision 3, review '
+  + 'round 1 of factory#26, 3)', async (t) => {
+  const { stream, ARCHITECT_ANSWER, IMPLEMENTER_ANSWER } = await answers();
+  const setup = await setUpDaemon(t, undefined, { product: { files: FLOW_FILES } });
+  const { stateDir, fake, call } = setup;
+  fake.update((s) => { s.scenario.claude = [{ stream: stream('architect', ARCHITECT_ANSWER) },
+    { stream: stream('implementer', IMPLEMENTER_ANSWER), files: { '.gate': GATE('pass', 'app.jar') } }]; });
+  const first = await call(['run', '--item', '0-9'], { phases: undefined });
+  assert.equal(first.phase, 'test-gate');
+  // A planted record: the branch is #0-302's to set.
+  const path = join(stateDir, 'tasks', first.runId, 'task.json');
+  await writeJsonAtomic(path, { ...JSON.parse(await readFile(path, 'utf8')), branch: 'factory/0-9-review' });
+  const record = await readFile(path, 'utf8');
+  const findingsFile = join(stateDir, 'findings.json');
+  await writeFile(findingsFile, JSON.stringify({ findings: [
+    { id: 'sec-7f3a', severity: 'blocking', file: 'src/a', text: 'agent-words of the review' }] }), { mode: 0o600 });
+  for (const args of [['run', '--resume', 'factory/0-9-review'],
+    ['run', '--resume', 'factory/0-9-review', '--findings', findingsFile]]) {
+    await assert.rejects(call(args, { phases: undefined }), (error) => {
+      assert.equal(error.message, `the task ${first.runId} completed its phase test-gate, and its work is not `
+        + 'committed before #0-302: there is nothing to resume');
+      return true;
+    });
+  }
+  assert.equal(await readFile(path, 'utf8'), record, 'the record as it was');
+});
+
+test('#0-301 (review round 1 of factory#26, arc-5c1e): a stream past its limit, a call ended by a signal, a stderr '
+  + 'that cannot be kept and a queue file the base lacks each stop the item through stopItem, the call failed',
+async (t) => {
+  const { stream, ARCHITECT_ANSWER } = await answers();
+  const { STREAM_LIMIT } = await import('../src/flow/call.mjs');
+  const architect = stream('architect', ARCHITECT_ANSWER);
+  const cases = [
+    [{ stream: architect.slice(0, 1), flood: STREAM_LIMIT + 1 }, 'plan',
+      new RegExp(`^plan: docker exec wrote more than ${STREAM_LIMIT} bytes to its stdout: stopped`)],
+    [{ stream: architect.slice(0, 1), signal: 'SIGTERM' }, 'plan', /^plan: docker exec was ended by SIGTERM/],
+    [({ stateDir }) => ({ stream: architect, stderr: 'agent-words on stderr',
+      lockStderr: join(stateDir, 'stderr') }), 'plan',
+      /^plan: docker exec ended \(exit 0\), but its stderr could not be kept in stderr\/ of the state/],
+  ];
+  for (const [entry, stage, pattern] of cases) {
+    const { left, stateDir } = await flowRun(t, '0-9', (setup) => [typeof entry === 'function' ? entry(setup) : entry]);
+    await chmod(join(stateDir, 'stderr'), 0o700).catch(() => {});
+    assert.equal(left.status, 'blocked', left.reason);
+    assert.match(left.reason, pattern);
+    assert.ok(!left.reason.includes('agent-words'), left.reason);
+    const task = JSON.parse(await readFile(join(stateDir, 'tasks', left.runId, 'task.json'), 'utf8'));
+    assert.deepEqual(task.calls.map((c) => c.outcome), ['failed'], 'the call recorded as failed first');
+    const { state: breaker } = await openBreaker(stateDir);
+    assert.equal(breaker.history.at(-1).stage, stage);
+  }
+  // The item's read failing (git, the base tree) is flow-units.test.mjs's: the adapter's check refuses a queue file
+  // the base lacks before any phase.
+});
+
+test('#0-301 (review round 1 of factory#26, 5): sweep runs with a claude-code/expectations.json that cannot be read, '
+  + 'which refuses a run', async (t) => {
+  const leftover = plantedContainer({ name: 'leftover' });
+  const { env, fake } = await setUpDaemon(t, { containers: [leftover] });
+  // A child of its own, whose flow/expectations.mjs throws (module.registerHooks): the factory's file stays as it is
+  // for the tests that run beside this one.
+  const script = join(fake.runner.stateDir, '..', 'broken-expectations.mjs');
+  await writeFile(script, `import { registerHooks } from 'node:module';
+registerHooks({ load(url, context, next) {
+  if (url.endsWith('/src/flow/expectations.mjs')) {
+    return { format: 'module', shortCircuit: true, source: 'export class ExpectationsError extends Error {}\\n'
+      + 'export async function readExpectations() { throw new ExpectationsError("the expectations are broken"); }\\n' };
+  }
+  return next(url, context);
+} });
+const { main } = await import(${JSON.stringify(new URL('../src/cli.mjs', import.meta.url).href)});
+const [env, runner, args] = JSON.parse(process.argv[2]);
+try {
+  await main(args, { env, out: { write: () => {} }, ...runner, phases: [] });
+  process.stdout.write('done\\n');
+} catch (error) {
+  process.stdout.write(\`refused: \${error.message}\\n\`);
+}
+`);
+  const inChild = async (args) => (await run(script, [JSON.stringify([env, fake.runner, args])])).stdout.trim();
+  assert.equal(await inChild(['sweep']), 'done');
+  assert.equal(fake.read().containers.some((c) => c.id === leftover.id), false, 'the sweep removed the leftover');
+  assert.equal(await inChild(['run', '--item', '0-1']), 'refused: the expectations are broken');
+});
+

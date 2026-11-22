@@ -179,6 +179,8 @@ test('#0-284 AC2: the override up reads: the image by its ID and never a build n
     containerEnv: CONFIG.containerEnv,
     runArgs: ['--add-host=host.docker.internal:host-gateway',
       '--mount=type=bind,source=/opt/factory-checkout,target=/opt/factory,readonly',
+      // #0-301: the factory's managed settings, read-only on the whole of /etc/claude-code.
+      '--mount=type=bind,source=/opt/factory-checkout/claude-code/etc,target=/etc/claude-code,readonly',
       `--mount=type=volume,source=factory-task-${RUN_ID}-claude,target=/home/dev/.claude`,
       '--mount=type=volume,source=factory-dispatcher-m2,target=/home/dev/.m2'],
     workspaceMount: `type=bind,source=${work},target=/workspace`,

@@ -179,7 +179,7 @@ test('AC5: a gate answer missing or adding a field, or out of its contract, is r
 });
 
 test('a schema with a keyword the validator does not check is refused, at any depth', () => {
-  for (const keyword of ['oneOf', 'anyOf', 'if', 'format', 'maxLength', 'contains', 'patternProperties']) {
+  for (const keyword of ['oneOf', 'anyOf', 'if', 'format', 'contains', 'patternProperties', 'maxProperties']) {
     assert.throws(() => checkSchema({ type: 'object', properties: { a: { [keyword]: [] } } }), (error) => {
       assert.ok(error instanceof SchemaError);
       assert.match(error.message, new RegExp(`^#/properties/a: the keyword ${keyword} is not one this validator`));
@@ -201,4 +201,16 @@ test('the validator: types, an integer is a number, JSON Pointer escapes, and th
   assert.deepEqual(validate({ type: 'object', additionalProperties: false }, { 'a/b~c': 1 }),
     ['/a~1b~0c: unknown field']);
   assert.deepEqual(validate({ type: 'string', minLength: 2 }, '😀'), ['/: must have at least 2 character(s)']);
+});
+
+test('#0-301 (review round 1 of factory#26, 10): maxItems refuses an array longer than it, naming where', () => {
+  const schema = { type: 'object', properties: { a: { type: 'array', maxItems: 2, items: { type: 'integer' } } } };
+  checkSchema(schema);
+  assert.deepEqual(validate(schema, { a: [1, 2] }), []);
+  const errors = validate(schema, { a: [1, 2, 3] });
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0], "/a: must have at most 2 item(s)");
+  assert.ok(!errors[0].includes('3'), errors[0]);
+  assert.throws(() => checkSchema({ type: 'array', maxItems: -1 }), SchemaError);
+  assert.throws(() => checkSchema({ type: 'array', maxItems: 'x' }), SchemaError);
 });
