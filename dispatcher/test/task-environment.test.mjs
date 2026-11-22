@@ -534,6 +534,16 @@ async () => {
   }
 });
 
+test('#0-284 AC8: a task container rootless Docker starts with OomScoreAdj 200, its daemon\'s, is the dispatcher\'s: '
+  + 'the task runs', async () => {
+  const { stateDir, fake, options } = await setUp();
+  fake.update((s) => { s.scenario.hostConfig = { OomScoreAdj: 200 }; });
+  const { result } = await inTaskEnvironment({ runId: RUN_ID, helperImage: HELPER_IMAGE, ...fake.runner },
+    async () => (await setUpTaskContainer({ ...options, task: await createTask(stateDir, { runId: RUN_ID }) })).task);
+  assert.equal(result.status, 'running', result.reason);
+  assert.ok(result.imageId, 'its image is recorded');
+});
+
 test('#0-284 AC4: a value the daemon returned reaches no refusal and no task.json: a label\'s key, a mount\'s target, '
   + 'a capability\'s name', async () => {
   const secret = SECRET();

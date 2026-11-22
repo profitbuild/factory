@@ -130,6 +130,32 @@ test('#0-284 AC3: a run argument the table has no rule for is refused, before an
     + 'table (host-config.mjs): the table must say what it sets before a task carries it']);
 });
 
+test('#0-284 AC8: HostConfig.OomScoreAdj is an integer from 0 to 1000, rootless Docker\'s 200 included; anything else '
+  + 'is refused, naming the field and not the value', () => {
+  const carried = carriedConfig();
+  for (const value of [0, 200, 1000]) {
+    assert.deepEqual(hostConfigViolations({ ...goodHostConfig(), OomScoreAdj: value }, { runId: RUN_ID, carried }), [],
+      String(value));
+  }
+  for (const value of [-1, 1001, 200.5, '200', null, 'absent']) {
+    const hostConfig = { ...goodHostConfig(), OomScoreAdj: value };
+    if (value === 'absent') {
+      delete hostConfig.OomScoreAdj;
+    }
+    const found = hostConfigViolations(hostConfig, { runId: RUN_ID, carried });
+    assert.deepEqual(found, ['HostConfig.OomScoreAdj is neither what the dispatcher set nor Docker\'s default (its '
+      + 'value is not quoted)'], String(value));
+    assert.ok(!/\d/.test(found.join()), 'no value quoted');
+  }
+});
+
+test('#0-284 AC8: a container as rootless Docker 29.9.3 starts it, OomScoreAdj 200 and the rest Docker\'s defaults and '
+  + 'the dispatcher\'s, keeps the whole table', () => {
+  assert.equal(dockerDefaultHostConfig().OomScoreAdj, 0, 'the fake keeps rootful Docker\'s default');
+  assert.deepEqual(hostConfigViolations({ ...goodHostConfig(), OomScoreAdj: 200 }, { runId: RUN_ID,
+    carried: carriedConfig() }), []);
+});
+
 test('#0-284 AC3: the capabilities may be fewer than the configuration\'s, never more nor twice', () => {
   const c = carriedConfig();
   for (const caps of [null, [], ['CAP_NET_RAW'], ['NET_ADMIN', 'NET_RAW']]) {

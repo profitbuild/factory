@@ -21,6 +21,9 @@
  * The VM's container made with no option (2026-11-21): Runtime runc, SecurityOpt null, CgroupnsMode private, IpcMode
  * private, NetworkMode bridge. A field whose value Docker writes as null or as an empty list or object, by version, is
  * taken as either.
+ * OomScoreAdj is not rootful Docker's constant 0 but a range, 0 to 1000: rootless Docker writes at start a value no
+ * lower than its daemon's own oom_score_adj (200 on the VM, measured 2026-11-22, incident-platform backlog #0-284 AC8),
+ * which the dispatcher does not read (the table's rule says why).
  *
  * A refusal names the table's field and never its value; a field off the table by its position among HostConfig's
  * keys, never its name: both are the daemon's answer.
@@ -152,7 +155,15 @@ const TABLE = {
   CgroupParent: is(''),
   CpusetCpus: is(''),
   CpusetMems: is(''),
-  OomScoreAdj: is(0),
+  // A range, not rootful Docker's 0 (incident-platform backlog #0-284 AC8, measured on the VM 2026-11-22): rootless
+  // Docker 29.9.3 writes at start a value no lower than its daemon's oom_score_adj, 200 there, since a process without
+  // privilege cannot lower it; neither devcontainer, nor the feature, nor the dispatcher sets it. A higher value only
+  // makes the container the kernel's likelier kill when memory runs out, so it weakens nothing; only a negative one,
+  // which shields the container at the VM's cost, would, and rootless refuses it anyway. The exact value is the
+  // daemon's, which the dispatcher does not read (that process and the systemd user unit of `factory` are the agent's
+  // side, incident-platform #0-285), so the rule holds the range, not an equality. Anything not an integer (a string
+  // too), null or absent is refused.
+  OomScoreAdj: (value) => Number.isInteger(value) && value >= 0 && value <= 1000,
   CpuShares: is(0),
   Memory: is(0),
   NanoCpus: is(0),
