@@ -21,7 +21,7 @@ import { writeJsonAtomic } from '../src/state/files.mjs';
 import { ADAPTER, commit, makeAdapterProduct } from '../testing/adapter-product.mjs';
 import { APP_ID, INSTALLATION_ID, startBuilderGitHub, writeAppFiles } from '../testing/builder-github.mjs';
 import { kill, run, startUntil } from '../testing/children.mjs';
-import { acquireTaskLock } from '../src/state/lock.mjs';
+import { acquireLock, acquireTaskLock } from '../src/state/lock.mjs';
 import { createTask } from '../src/state/tasks.mjs';
 import { makeFakeDaemon, plantedContainer } from '../testing/fake-daemon.mjs';
 import { git } from '../testing/git-fixtures.mjs';
@@ -387,23 +387,13 @@ test('#0-277: sweep removes a killed run\'s leftovers; it refuses while a rollba
   assert.deepEqual((await call(['sweep'])).containers, [], 'an empty daemon sweeps to nothing');
 });
 
-/** The one task of `stateDir`, which a refusal in the slot section left BLOCKED (#0-303). */
-async function blockedTask(stateDir, pattern) {
-  const runIds = await readdir(join(stateDir, 'tasks'));
-  assert.equal(runIds.length, 1, runIds.join());
-  const task = JSON.parse(await readFile(join(stateDir, 'tasks', runIds[0], 'task.json'), 'utf8'));
-  assert.equal(task.status, 'blocked');
-  assert.match(task.reason, pattern);
-  return task;
-}
-
-test('#0-277, #0-303: a run refused by a running rollback removes nothing; its task, made in the slot section, ends '
-  + 'BLOCKED with the reason', async (t) => {
+test('#0-277: a run refused by a running rollback makes no task and removes nothing', async (t) => {
   const { stateDir, call, fake } = await setUpDaemon(t, { containers: [plantedContainer({ name: 'rollback',
     labels: { 'factory.rollback': '1' } })] });
   await assert.rejects(call(['run', '--item', '0-1']),
     /the run is refused: a running container carries factory\.rollback: rollback/);
-  await blockedTask(stateDir, /^refused before its container: the run is refused: a running container carries factory\.rollback/);
+  // #0-303 (review round 1 of factory#25, decision 2): the task is made only once every refusal of the slot is past.
+  assert.deepEqual((await readdir(stateDir)).sort(), ['lock', 'state.json', 'state.lock']);
   assert.equal(fake.read().containers.length, 1);
 });
 
@@ -445,8 +435,7 @@ test('#0-284, review round 1 of factory#22 (decision 1): sweep and run on a daem
   assert.ok(!fake.calls().some((c) => c.program === 'devcontainer' || c.args[0] === 'run'),
     'no helper, no container of a task');
   assert.deepEqual(fake.read().containers.map((c) => c.name), ['leftover'], 'nothing swept');
-  // The run's task is made in the slot section, before the daemon's options are read (#0-303), and ends BLOCKED.
-  await blockedTask(stateDir, /^refused before its container: factory's daemon's security options are not the VM's/);
+  assert.ok(!(await readdir(stateDir)).includes('tasks'), 'no task made');
 });
 
 // incident-platform backlog #0-303: a lock per task, the dispatcher's only for a slot and the sweeps.
@@ -475,10 +464,7 @@ test('#0-303 AC1: a run whose FACTORY_SLOTS every live task takes is refused bef
       return true;
     });
     assert.deepEqual(fake.calls(), [], 'nothing reached the daemon');
-    const runIds = (await readdir(join(stateDir, 'tasks'))).filter((id) => id !== OTHER_RUN);
-    const task = JSON.parse(await readFile(join(stateDir, 'tasks', runIds[0], 'task.json'), 'utf8'));
-    assert.equal(task.status, 'blocked');
-    assert.match(task.reason, /^refused before its container: every slot is taken/);
+    assert.deepEqual(await readdir(join(stateDir, 'tasks')), [OTHER_RUN], 'the refused run made no task');
   } finally {
     other.release();
   }
@@ -494,8 +480,15 @@ test('#0-303 AC3: with another task live, a run sweeps only its own labelled obj
     left = await call(['run', '--item', '0-1'], { env: { ...env, FACTORY_SLOTS: '2' } });
     assert.equal(left.status, 'running', left.reason);
     assert.deepEqual(fake.read().containers.map((c) => c.name), ['leftover'], 'the other task\'s daemon is not swept');
-    const own = fake.calls().filter((c) => c.args[0] === 'ps' && c.args.includes(`label=factory.task=${left.runId}`));
-    assert.ok(own.length >= 2, 'its own objects listed by their label, at its start and at its end');
+    // Its own objects listed by their label once before its container starts (the sweep at the start) and once after
+    // its container's last call (the sweep at its end), and only then.
+    const calls = fake.calls();
+    const own = calls.map((c, i) => (c.args[0] === 'ps' && c.args.includes(`label=factory.task=${left.runId}`) ? i : -1))
+      .filter((i) => i >= 0);
+    const up = calls.findIndex((c) => c.program === 'devcontainer' && c.args[0] === 'up');
+    const lastExec = calls.map((c) => c.args[0]).lastIndexOf('exec');
+    assert.equal(own.length, 2, `two lists of its own containers: ${own}`);
+    assert.ok(own[0] < up && own[1] > lastExec, `one before up (${up}), one after the last exec (${lastExec}): ${own}`);
     assert.ok(!fake.calls().some((c) => c.args[0] === 'run' && c.args.join(' ').includes('find "$1" -mindepth 1')),
       'no sweep of every work directory');
   } finally {
@@ -550,26 +543,109 @@ test('#0-303: a second run of an item whose first run is live, on its branch, is
 test('#0-303: a second run\'s fetch of main does not start while the first is in its slot section', async (t) => {
   const { call, advance } = await setUpDaemon(t);
   await advance();
-  const inSlot = gate();
   const leaveSlot = gate();
+  const secondWaits = gate();
   const hold = gate();
   const inPhase = gate();
+  let second;
   let fetchesInSlot;
+  let fetchesAsTheFirstLeaves;
   const first = call(['run', '--item', '0-1'], {
-    hooks: { inSlot: async () => { fetchesInSlot = gitServer.authorizations.length; inSlot.open(); await leaveSlot.opened; } },
+    hooks: { inSlot: async () => {
+      fetchesInSlot = gitServer.authorizations.length;
+      // The second run, started now, is about to ask for the dispatcher's lock when its hook fires; the first holds
+      // that lock until it leaves this hook and its slot section, so the count as it leaves is the second's proof.
+      second = call(['run', '--item', '0-2'], { hooks: { beforeDispatcherLock: async () => { secondWaits.open(); } } })
+        .then(() => null, (error) => error);
+      await secondWaits.opened;
+      await leaveSlot.opened;
+      fetchesAsTheFirstLeaves = gitServer.authorizations.length;
+    } },
     phases: [{ name: 'hold', run: async () => { inPhase.open(); await hold.opened; return {}; } }],
   });
-  await inSlot.opened;
-  assert.ok(fetchesInSlot > 0, 'the first run fetched main in its slot section');
-  const second = call(['run', '--item', '0-2']).then(() => null, (error) => error);
-  await new Promise((resolve) => { setTimeout(resolve, 1500); });
-  assert.equal(gitServer.authorizations.length, fetchesInSlot, 'no fetch of the second run while the first is in its slot');
+  await secondWaits.opened;
   leaveSlot.open();
   await inPhase.opened;
   const refused = await second;
+  assert.ok(fetchesInSlot > 0, 'the first run fetched main in its slot section');
+  assert.equal(fetchesAsTheFirstLeaves, fetchesInSlot, 'no fetch of the second run while the first is in its slot');
   assert.ok(gitServer.authorizations.length > fetchesInSlot, 'the second run fetched once the first left its slot');
   assert.match(refused?.message ?? '', /^every slot is taken: 1 task is live \(.*\), FACTORY_SLOTS is 1: the run is refused$/,
     'and then found the slot taken, the first task live');
   hold.open();
   assert.equal((await first).phase, 'hold');
+});
+
+test('#0-303, review round 1 of factory#25 (decision 1): with two slots, a second run of an item whose first run is '
+  + 'live with no branch yet is refused: the item is held', async (t) => {
+  const { env, call, fake } = await setUpDaemon(t);
+  const slots = { env: { ...env, FACTORY_SLOTS: '2' } };
+  const hold = gate();
+  const inPhase = gate();
+  const first = call(['run', '--item', '0-9'], { ...slots,
+    phases: [{ name: 'hold', run: async () => { inPhase.open(); await hold.opened; return {}; } }] });
+  await inPhase.opened;
+  const before = fake.calls().length;
+  try {
+    await assert.rejects(call(['run', '--item', '0-9'], slots), (error) => {
+      assert.match(error.message, /^the item 0-9 is held by the dispatcher's own task \d{8}T\d{6}Z-[0-9a-f]{6}, live and still running with no branch yet: the run is refused until that task's run ends$/);
+      return true;
+    });
+    assert.equal(fake.calls().length, before, 'the second run touched no daemon');
+  } finally {
+    hold.open();
+  }
+  const done = await first;
+  assert.equal(done.branch, null);
+  assert.equal((await call(['run', '--item', '0-9'], slots)).status, 'running',
+    'its run ended, the task is not live, and with no branch it holds the item no longer (#0-277 AC13)');
+});
+
+test('#0-303, review round 1 of factory#25 (decision 2): --resume of a task whose lock another run holds is refused, '
+  + 'its record as it was', async (t) => {
+  const { stateDir, call, fake } = await setUpDaemon(t);
+  const first = await call(['run', '--item', '0-9']);
+  const path = join(stateDir, 'tasks', first.runId, 'task.json');
+  await writeJsonAtomic(path, { ...JSON.parse(await readFile(path, 'utf8')), branch: 'factory/0-9-live' });
+  const record = await readFile(path, 'utf8');
+  const held = await acquireTaskLock(stateDir, first.runId);
+  const before = fake.calls().length;
+  try {
+    await assert.rejects(call(['run', '--resume', 'factory/0-9-live']), (error) => {
+      assert.match(error.message, new RegExp(`^the task ${first.runId} is live: another run holds its lock \\(`));
+      return true;
+    });
+  } finally {
+    held.release();
+  }
+  assert.equal(await readFile(path, 'utf8'), record, 'the record unchanged');
+  assert.ok(!fake.calls().slice(before).some((c) => c.args[0] === 'rm' || c.args[0] === 'run'
+    || c.program === 'devcontainer'), 'no sweep, no container');
+});
+
+test('#0-303, review round 1 of factory#25 (security 1): a run that cannot take the dispatcher\'s lock at its end '
+  + 'removes its own objects under its task\'s lock, and is refused with the lock\'s reason', async (t) => {
+  const { stateDir, call, fake } = await setUpDaemon(t);
+  let other;
+  const phases = [{ name: 'grab', run: async () => {
+    // Another run's slot section, as far as this run can tell: the dispatcher's lock taken while it works.
+    other = await acquireLock(join(stateDir, 'lock'));
+    return {};
+  } }];
+  let runId;
+  try {
+    await assert.rejects(call(['run', '--item', '0-1'], { phases, dispatcherWaitS: 1 }), (error) => {
+      assert.match(error.message, /^another run has held the dispatcher's lock \(.*\/lock\) for 1 s: refused, not waited for any longer$/);
+      return true;
+    });
+    [runId] = await readdir(join(stateDir, 'tasks'));
+    const state = fake.read();
+    const mine = (labels) => labels?.['factory.task'] === runId;
+    assert.deepEqual(state.containers.filter((c) => mine(c.labels)), [], 'no container of the run left');
+    assert.deepEqual(state.networks.filter((n) => mine(n.labels)), [], 'no network of the run left');
+    assert.deepEqual(state.volumes.filter((v) => mine(v.labels)), [], 'no volume of the run left');
+  } finally {
+    other?.release();
+  }
+  assert.ok(runId, 'the run made its task');
 });

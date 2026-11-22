@@ -1,7 +1,8 @@
 /**
  * A run's task environment, in ADR-0062's order (incident-platform backlog #0-277; points 2, 4 to 7). Steps 1 and 2
- * are the run's slot section's, under the dispatcher's lock (startTaskEnvironment); 3 to 7 run under the task's lock
- * alone; 8 under the dispatcher's again (#0-303, ADR-0062 point 7 as amended; cli.mjs takes and releases the locks):
+ * are the run's slot section's, under the dispatcher's lock (refuseOffEnvironment, sweepForRun); 3 to 7 run under
+ * the task's lock alone; 8 under the dispatcher's again (#0-303, ADR-0062 point 7 as amended; cli.mjs takes and
+ * releases the locks):
  *
  *  1. a running container labelled `factory.rollback` refuses the run (the rollback shares the VM by time);
  *  2. the sweep (sweepForRun), its result checked: the whole daemon when no other task is live (a killed run's
@@ -110,17 +111,16 @@ export async function sweepForRun({ runId, helperImage, stateDir, sudo, othersLi
 }
 
 /**
- * The start of a run's environment, in its slot section, under the dispatcher's lock (#0-303): the daemon's options
- * before the run's first container, the sweep's helper included (a daemon off the VM's options refuses the run, and
- * no sweep follows: review round 1 of factory#22, the owner's decision 1), the rollback refusing the run, then the
- * sweep (sweepForRun).
+ * The checks of a run's slot section before its task is made (#0-303; review round 1 of factory#25, decision 2),
+ * under the dispatcher's lock: the daemon's options before the run's first container, the sweep's helper included (a
+ * daemon off the VM's options refuses the run, and no sweep follows: review round 1 of factory#22, decision 1), and
+ * a running rollback refusing the run. The sweep (sweepForRun) follows once the task and its lock are taken.
  *
- * @param {{ runId: string, helperImage: string, stateDir: string, sudo?: string, othersLive: string[] }} options
+ * @param {{ stateDir: string, sudo?: string }} options
  */
-export async function startTaskEnvironment({ runId, helperImage, stateDir, sudo, othersLive }) {
+export async function refuseOffEnvironment({ stateDir, sudo }) {
   await checkDaemonOptions({ sudo, stateDir });
   await refuseWhileRollback({ sudo, stateDir, when: 'the run is refused' });
-  return sweepForRun({ runId, helperImage, stateDir, sudo, othersLive });
 }
 
 /**

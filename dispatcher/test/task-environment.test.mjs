@@ -13,7 +13,7 @@ import { join } from 'node:path';
 
 import { DaemonOptionsError, RollbackRunningError } from '../src/container/daemon.mjs';
 import {
-  inTaskEnvironment as underTaskLock, setUpTaskContainer, startTaskEnvironment, sweepForRun,
+  inTaskEnvironment as underTaskLock, refuseOffEnvironment, setUpTaskContainer, sweepForRun,
 } from '../src/container/environment.mjs';
 import { bundleFromTask } from '../src/container/task-bundle.mjs';
 import { CallTimeoutError, callInTask, execInTask, readTaskConfig } from '../src/container/task-container.mjs';
@@ -34,7 +34,8 @@ import {
  * sweep at its end; the locks themselves are cli.mjs's, tested there.
  */
 async function inTaskEnvironment({ runId, helperImage, stateDir, sudo }, inside) {
-  const { removed: swept } = await startTaskEnvironment({ runId, helperImage, stateDir, sudo, othersLive: [] });
+  await refuseOffEnvironment({ stateDir, sudo });
+  const { removed: swept } = await sweepForRun({ runId, helperImage, stateDir, sudo, othersLive: [] });
   const result = await underTaskLock({ runId, stateDir, sudo,
     sweepAtEnd: () => sweepForRun({ runId, helperImage, stateDir, sudo, othersLive: [] }) }, inside);
   return { result, swept };
