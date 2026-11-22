@@ -12,7 +12,11 @@
  *                                               digest (incident-platform ADR-0062 points 2 and 8, backlog #0-277):
  *                                               the provisioning's pin, never a tag alone
  *   FACTORY_SLOTS=<positive integer>            how many tasks may be live at once (incident-platform backlog #0-303,
- *                                               ADR-0060 D7 as amended): 1 unless set; M5 sets 2
+ *                                               ADR-0060 D7 as amended): 1 unless set. No hard limit (the tests need
+ *                                               2), but a value above 1 is not safe before #0-285 (M3.4: the daemon's
+ *                                               model, the sweep's scope) and M4 (while the rollback exists, a sweep
+ *                                               of the whole daemon removes its volumes, with their credentials):
+ *                                               M5 raises it, not earlier (review round 1 of factory#25, decision 3)
  *
  * Every one is required but FACTORY_SLOTS, which the owner's decision of #0-303 gives a default of 1, the one slot of
  * M2: none other has a default (ADR-0052 point 5), so a limit is always one the owner wrote. A variable
