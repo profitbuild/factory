@@ -12,7 +12,9 @@ import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { DaemonOptionsError, RollbackRunningError } from '../src/container/daemon.mjs';
-import { inTaskEnvironment, setUpTaskContainer } from '../src/container/environment.mjs';
+import {
+  inTaskEnvironment as underTaskLock, setUpTaskContainer, startTaskEnvironment, sweepForRun,
+} from '../src/container/environment.mjs';
 import { bundleFromTask } from '../src/container/task-bundle.mjs';
 import { CallTimeoutError, callInTask, execInTask, readTaskConfig } from '../src/container/task-container.mjs';
 import { TASK_CONFIG_LIST, buildOverride, imageBuildConfig } from '../src/container/task-config.mjs';
@@ -25,6 +27,18 @@ import { HELPER_IMAGE, makeStateDir } from '../testing/state-dir.mjs';
 import {
   CONFIG, CONFIG_PATH, FEATURE, FEATURE_DIGEST, FEATURE_REF, makeTaskProduct,
 } from '../testing/task-product.mjs';
+
+/**
+ * A run's environment as cli.mjs composes it when no other task is live (incident-platform backlog #0-303): the slot
+ * section's start (the daemon's options, the rollback, the whole daemon swept), the run under its task's lock, and the
+ * sweep at its end; the locks themselves are cli.mjs's, tested there.
+ */
+async function inTaskEnvironment({ runId, helperImage, stateDir, sudo }, inside) {
+  const { removed: swept } = await startTaskEnvironment({ runId, helperImage, stateDir, sudo, othersLive: [] });
+  const result = await underTaskLock({ runId, stateDir, sudo,
+    sweepAtEnd: () => sweepForRun({ runId, helperImage, stateDir, sudo, othersLive: [] }) }, inside);
+  return { result, swept };
+}
 
 const root = await makeStateDir();
 after(root.remove);

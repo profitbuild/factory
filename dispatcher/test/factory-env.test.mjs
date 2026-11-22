@@ -12,7 +12,8 @@ const VALID = {
   FACTORY_AUDIT_EVERY: '10', FACTORY_MAX_MERGES_PER_DAY: '5',
   FACTORY_HELPER_IMAGE: `buildpack-deps:noble-scm@sha256:${'0f'.repeat(32)}`,
 };
-const NAMES = Object.keys(VALID);
+/** Every variable, FACTORY_SLOTS (#0-303) the one with a default. */
+const NAMES = [...Object.keys(VALID), 'FACTORY_SLOTS'];
 
 /** Refused with a ConfigError matching `pattern`, whose message holds none of `values`. */
 function refused(read, pattern, values = []) {
@@ -29,8 +30,19 @@ function refused(read, pattern, values = []) {
 test('the settings are read from the env object; other variables are left alone', () => {
   assert.deepEqual(readFactoryEnv({ ...VALID, PATH: '/bin', BUILDER_APP_ID: '1' }), {
     stateDir: '/srv/factory/state', repoDir: '/srv/factory/product', maxBlocked: 3, auditEvery: 10,
-    maxMergesPerDay: 5, helperImage: VALID.FACTORY_HELPER_IMAGE,
+    maxMergesPerDay: 5, helperImage: VALID.FACTORY_HELPER_IMAGE, slots: 1,
   });
+});
+
+test('#0-303: FACTORY_SLOTS is a positive integer, 1 when not set; any other value is refused by its name', () => {
+  assert.equal(readFactoryEnv(VALID).slots, 1, 'one slot, M2\'s, unless set');
+  for (const value of ['1', '2', '12']) {
+    assert.equal(readFactoryEnv({ ...VALID, FACTORY_SLOTS: value }).slots, Number(value));
+  }
+  for (const value of ['0', '-1', '1.5', ' 2', '02', 'two', '', '1e1']) {
+    refused(() => readFactoryEnv({ ...VALID, FACTORY_SLOTS: value }), /^FACTORY_SLOTS must be a positive integer$/,
+      [value]);
+  }
 });
 
 test('#0-277: FACTORY_HELPER_IMAGE is an image pinned by its digest; a tag alone, or a malformed one, is refused', () => {
@@ -45,8 +57,8 @@ test('#0-277: FACTORY_HELPER_IMAGE is an image pinned by its digest; a tag alone
   }
 });
 
-test('AC1: each setting is required, with no default (ADR-0052 point 5)', () => {
-  for (const name of NAMES) {
+test('AC1: each setting but FACTORY_SLOTS is required, with no default (ADR-0052 point 5)', () => {
+  for (const name of Object.keys(VALID)) {
     const env = { ...VALID };
     delete env[name];
     refused(() => readFactoryEnv(env), new RegExp(`^${name} is not set \\(it has no default, ADR-0052 point 5\\)$`));

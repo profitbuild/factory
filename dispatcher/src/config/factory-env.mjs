@@ -11,8 +11,11 @@
  *                                               the one-shot helpers' image, buildpack-deps:noble-scm pinned by
  *                                               digest (incident-platform ADR-0062 points 2 and 8, backlog #0-277):
  *                                               the provisioning's pin, never a tag alone
+ *   FACTORY_SLOTS=<positive integer>            how many tasks may be live at once (incident-platform backlog #0-303,
+ *                                               ADR-0060 D7 as amended): 1 unless set; M5 sets 2
  *
- * Every one is required: none has a default (ADR-0052 point 5), so a limit is always one the owner wrote. A variable
+ * Every one is required but FACTORY_SLOTS, which the owner's decision of #0-303 gives a default of 1, the one slot of
+ * M2: none other has a default (ADR-0052 point 5), so a limit is always one the owner wrote. A variable
  * with the prefix FACTORY_ that is not one of these is refused as unknown, FACTORY_PROXY_ADDR included until step 4.6
  * (the credential proxy) adds it here. The mechanism and its rules (a refusal names the variable, never its value) are
  * settings.mjs's.
@@ -33,17 +36,22 @@ const SETTINGS = {
   FACTORY_MAX_MERGES_PER_DAY: count('maxMergesPerDay'),
   FACTORY_HELPER_IMAGE: { field: 'helperImage', valid: (v) => HELPER_IMAGE.test(v), parse: String,
     expected: 'an image pinned by its digest, <name>[:tag]@sha256:<64 hex>' },
+  FACTORY_SLOTS: count('slots'),
 };
+
+/** The settings with a default (#0-303). */
+const DEFAULTS = { slots: 1 };
 
 /**
  * @param {Record<string, string | undefined>} [env] process.env by default
  * @returns {{ stateDir: string, repoDir: string, maxBlocked: number, auditEvery: number, maxMergesPerDay: number,
- *   helperImage: string }}
+ *   helperImage: string, slots: number }}
  * @throws {import('./settings.mjs').ConfigError}
  */
 export function readFactoryEnv(env = process.env) {
   return readSettings(env, {
-    prefix: 'FACTORY_', settings: SETTINGS, required: Object.keys(SETTINGS),
+    prefix: 'FACTORY_', settings: SETTINGS, required: Object.keys(SETTINGS).filter((name) => name !== 'FACTORY_SLOTS'),
+    defaults: DEFAULTS,
     missingHint: ' (it has no default, ADR-0052 point 5)',
   });
 }
