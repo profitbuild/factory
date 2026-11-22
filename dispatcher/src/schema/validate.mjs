@@ -3,9 +3,10 @@
  * factory's own schemas: the adapter's and the gate's (schemas/), and the task's state (src/state/task.schema.json).
  *
  * A subset of draft 2020-12, as far as those schemas need and no further: `type` (one or a list), `const`, `enum`;
- * for a string `minLength` (in code points) and `pattern` (a JavaScript regular expression, flag `u`); for a number
+ * for a string `minLength` and `maxLength` (in code points; maxLength for an agent's answer, incident-platform backlog
+ * #0-301) and `pattern` (a JavaScript regular expression, flag `u`); for a number
  * `minimum`; for an array `prefixItems` (a schema for each leading item), `items` (for the items after those),
- * `minItems`, `uniqueItems`; for an object `properties`, `required` and
+ * `minItems`, `maxItems` (#0-301), `uniqueItems`; for an object `properties`, `required` and
  * `additionalProperties` (false, or a schema); `$defs` and a local `$ref` (`#/$defs/<name>`). The annotations
  * `$schema`, `$id`, `title`, `description` and `$comment` are allowed and mean nothing.
  *
@@ -19,8 +20,8 @@ import { isDeepStrictEqual } from 'node:util';
 export class SchemaError extends Error {}
 
 const ANNOTATIONS = ['$schema', '$id', 'title', 'description', '$comment'];
-const KEYWORDS = new Set([...ANNOTATIONS, 'type', 'const', 'enum', 'minLength', 'pattern', 'minimum', 'prefixItems', 'items',
-  'minItems', 'uniqueItems', 'properties', 'required', 'additionalProperties', '$defs', '$ref']);
+const KEYWORDS = new Set([...ANNOTATIONS, 'type', 'const', 'enum', 'minLength', 'maxLength', 'pattern', 'minimum',
+  'prefixItems', 'items', 'minItems', 'maxItems', 'uniqueItems', 'properties', 'required', 'additionalProperties', '$defs', '$ref']);
 const TYPES = new Set(['null', 'boolean', 'object', 'array', 'number', 'integer', 'string']);
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -60,7 +61,8 @@ export function checkSchema(schema, root = schema, at = '#') {
       throw new SchemaError(`${at}: enum must be a list`);
     } else if (keyword === 'required' && !(Array.isArray(value) && value.every((name) => typeof name === 'string'))) {
       throw new SchemaError(`${at}: required must be a list of names`);
-    } else if (['minLength', 'minItems'].includes(keyword) && !(Number.isInteger(value) && value >= 0)) {
+    } else if (['minLength', 'maxLength', 'minItems', 'maxItems'].includes(keyword)
+      && !(Number.isInteger(value) && value >= 0)) {
       throw new SchemaError(`${at}: ${keyword} must be a non-negative integer`);
     } else if (keyword === 'uniqueItems' && typeof value !== 'boolean') {
       throw new SchemaError(`${at}: uniqueItems must be a boolean`);
@@ -123,6 +125,9 @@ function validateAt(schema, value, path, root, errors) {
     if (schema.minLength !== undefined && [...value].length < schema.minLength) {
       errors.push(`${where(path)}: must have at least ${schema.minLength} character(s)`);
     }
+    if (schema.maxLength !== undefined && [...value].length > schema.maxLength) {
+      errors.push(`${where(path)}: must have at most ${schema.maxLength} character(s)`);
+    }
     if (schema.pattern !== undefined && !new RegExp(schema.pattern, 'u').test(value)) {
       errors.push(`${where(path)}: must match ${schema.pattern}`);
     }
@@ -133,6 +138,9 @@ function validateAt(schema, value, path, root, errors) {
   if (Array.isArray(value)) {
     if (schema.minItems !== undefined && value.length < schema.minItems) {
       errors.push(`${where(path)}: must have at least ${schema.minItems} item(s)`);
+    }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      errors.push(`${where(path)}: must have at most ${schema.maxItems} item(s)`);
     }
     if (schema.uniqueItems && value.some((item, i) => value.findIndex((other) => isDeepStrictEqual(item, other)) < i)) {
       errors.push(`${where(path)}: must not repeat an item`);

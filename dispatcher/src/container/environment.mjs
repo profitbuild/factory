@@ -83,7 +83,8 @@ export async function setUpTaskContainer({ stateDir, repoDir, task, adapter, hel
     const container = await upContainer({ runId, carried, imageId, ...run });
     await probeTimeout({ container, sudo });
     await probeTools({ container, sudo });
-    return { task: current, container };
+    // The carried configuration too: an agent's call takes the containerEnv it accepted (#0-301, flow/call.mjs).
+    return { task: current, container, carried };
   } catch (error) {
     if (BLOCKING.some((kind) => error instanceof kind)) {
       return { task: await blockTask(stateDir, current, `the task container: ${error.message}`), container: null };

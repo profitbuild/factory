@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/profitbuild/factory/blob/main/schemas/answers/implementer.schema.json",
+  "title": "The implementer's answer",
+  "description": "The structured output of a factory:implementer or factory:implementer-light call (incident-platform backlog #0-301, the owner's g1; the light one's text is the implementer's): the same file goes to claude's --json-schema and to dispatcher/src/schema/validate.mjs. Its example is agents/implementer.md's \"## Answer (JSON)\".",
+  "type": "object",
+  "required": [
+    "blocked",
+    "reason",
+    "summary",
+    "commitMessage",
+    "fixed",
+    "disputed",
+    "noticedNotTouched",
+    "followUps"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "blocked": {
+      "description": "true when the agent stops the item; the owner decides.",
+      "type": "boolean"
+    },
+    "reason": {
+      "description": "why it stopped, or null: the agent's words, kept in its answer file, never in a decision of the dispatcher's.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 4000
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 8000
+    },
+    "commitMessage": {
+      "description": "the message of the commit the factory makes of this call's changes (#0-302), or null when no file changed: the agent's words.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 8000
+    },
+    "fixed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 100
+      },
+      "maxItems": 200
+    },
+    "disputed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        }
+      },
+      "maxItems": 200
+    },
+    "noticedNotTouched": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 1000
+      },
+      "maxItems": 100
+    },
+    "followUps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 1000
+      },
+      "maxItems": 100
+    }
+  }
+}

@@ -179,7 +179,7 @@ test('AC5: a gate answer missing or adding a field, or out of its contract, is r
 });
 
 test('a schema with a keyword the validator does not check is refused, at any depth', () => {
-  for (const keyword of ['oneOf', 'anyOf', 'if', 'format', 'maxLength', 'contains', 'patternProperties']) {
+  for (const keyword of ['oneOf', 'anyOf', 'if', 'format', 'contains', 'patternProperties', 'maxProperties']) {
     assert.throws(() => checkSchema({ type: 'object', properties: { a: { [keyword]: [] } } }), (error) => {
       assert.ok(error instanceof SchemaError);
       assert.match(error.message, new RegExp(`^#/properties/a: the keyword ${keyword} is not one this validator`));

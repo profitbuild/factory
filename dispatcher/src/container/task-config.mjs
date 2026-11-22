@@ -32,7 +32,9 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { ConfigError, refuseSecretShaped } from '../config/settings.mjs';
 import LIST from './task-config-list.json' with { type: 'json' };
-import { FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, WORKSPACE, taskPaths } from './paths.mjs';
+import {
+  FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, MANAGED_SETTINGS_MOUNT, MANAGED_SETTINGS_SOURCE, WORKSPACE, taskPaths,
+} from './paths.mjs';
 
 /** A task configuration, or an image's metadata, is off the list. */
 export class TaskConfigError extends Error {}
@@ -301,6 +303,8 @@ export function dispatcherMounts(runId, user) {
   const { claudeVolume } = taskPaths(runId);
   return [
     `--mount=type=bind,source=${FACTORY_CHECKOUT},target=${FACTORY_MOUNT},readonly`,
+    // The factory's managed settings, read-only on the whole of /etc/claude-code (#0-301, ADR-0064 point 1).
+    `--mount=type=bind,source=${MANAGED_SETTINGS_SOURCE},target=${MANAGED_SETTINGS_MOUNT},readonly`,
     `--mount=type=volume,source=${claudeVolume},target=/home/${user}/.claude`,
     `--mount=type=volume,source=${M2_VOLUME},target=/home/${user}/.m2`,
   ];

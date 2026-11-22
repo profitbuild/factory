@@ -3,7 +3,9 @@
  * and the listed features'. A volume by its name, a bind by its host path. task-container.mjs holds the container's
  * Mounts to them, host-config.mjs its HostConfig.Mounts.
  */
-import { FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, WORKSPACE, taskPaths } from './paths.mjs';
+import {
+  FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, MANAGED_SETTINGS_MOUNT, MANAGED_SETTINGS_SOURCE, WORKSPACE, taskPaths,
+} from './paths.mjs';
 
 /**
  * The one key of a mount, whichever form docker gives it in (review round 1 of factory#22, ARC-02): the container's
@@ -18,6 +20,7 @@ export function expectedMounts(runId, carried) {
   return [
     { Type: 'bind', Source: work, Destination: WORKSPACE, RW: true },
     { Type: 'bind', Source: FACTORY_CHECKOUT, Destination: FACTORY_MOUNT, RW: false },
+    { Type: 'bind', Source: MANAGED_SETTINGS_SOURCE, Destination: MANAGED_SETTINGS_MOUNT, RW: false },
     { Type: 'volume', Source: claudeVolume, Destination: `${home}/.claude`, RW: true },
     { Type: 'volume', Source: M2_VOLUME, Destination: `${home}/.m2`, RW: true },
     ...carried.features.flatMap((f) => (f.metadata.mounts ?? []).map((m) => ({

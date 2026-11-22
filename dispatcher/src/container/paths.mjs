@@ -13,6 +13,12 @@ export const FACTORY_CHECKOUT = '/opt/factory-checkout';
 /** ... and where the task container holds it, read-only. */
 export const FACTORY_MOUNT = '/opt/factory';
 /**
+ * The factory's managed settings for Claude Code (incident-platform backlog #0-301, ADR-0064 point 1): the checkout's
+ * claude-code/etc, mounted read-only on the whole of the task container's /etc/claude-code.
+ */
+export const MANAGED_SETTINGS_SOURCE = `${FACTORY_CHECKOUT}/claude-code/etc`;
+export const MANAGED_SETTINGS_MOUNT = '/etc/claude-code';
+/**
  * The dispatcher's env file on the VM, which Node loads with --env-file (README, "Layout"): every command of the
  * dispatcher's that a refusal names gives it.
  */

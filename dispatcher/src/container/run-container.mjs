@@ -33,7 +33,7 @@
  */
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { constants } from 'node:fs';
+import { closeSync, constants, openSync, writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
@@ -113,14 +113,16 @@ export class StderrKeepError extends ContainerRunError {}
 /**
  * @param {{ program: 'docker' | 'devcontainer', args: string[], stateDir: string, input?: Buffer | string,
  *   timeoutMs?: number, outputLimit?: number, onTimeout?: () => Promise<void>,
- *   baseEnv?: Record<string, string | undefined>, sudo?: string }} options `stateDir` $FACTORY_STATE_DIR, where the
- *   call's stderr is kept; `outputLimit` stdout's; `sudo` for the tests only (a fake that checks the rest of the
- *   command line)
+ *   baseEnv?: Record<string, string | undefined>, sudo?: string, stdoutFile?: string }} options `stateDir`
+ *   $FACTORY_STATE_DIR, where the call's stderr is kept; `outputLimit` stdout's; `stdoutFile` a new file (600,
+ *   O_EXCL, O_NOFOLLOW) stdout is written to as it comes, held to `outputLimit` but never in memory, so that a long
+ *   agent call's stream fits (incident-platform backlog #0-301): `stdout` is then empty; `sudo` for the tests only
+ *   (a fake that checks the rest of the command line)
  * @returns {Promise<{ code: number, stdout: Buffer, stderrFile: string | null }>} never the stderr's text (#0-284)
  */
 export function runContainerCommand({
   program, args, stateDir, input, timeoutMs = CONTAINER_TIMEOUT_MS, outputLimit = CONTAINER_MAX_OUTPUT, onTimeout,
-  baseEnv = process.env, sudo = SUDO,
+  baseEnv = process.env, sudo = SUDO, stdoutFile,
 }) {
   if (!Object.hasOwn(PROGRAMS, program)) {
     throw new TypeError(`runContainerCommand: ${JSON.stringify(program)} is not docker nor devcontainer`);
@@ -141,7 +143,23 @@ export function runContainerCommand({
     throw error;
   }
   const what = commandName(program, args);
-  return new Promise((resolve, reject) => {
+  if (stdoutFile !== undefined && (typeof stdoutFile !== 'string' || !isAbsolute(stdoutFile))) {
+    throw new TypeError('runContainerCommand: stdoutFile must be an absolute path');
+  }
+  const stdoutFd = stdoutFile === undefined ? null
+    : openSync(stdoutFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  const closeStdout = () => {
+    if (stdoutFd !== null) {
+      try {
+        closeSync(stdoutFd);
+      } catch {
+        // closed already
+      }
+    }
+  };
+  return new Promise((resolveCall, rejectCall) => {
+    const resolve = (value) => { closeStdout(); resolveCall(value); };
+    const reject = (error) => { closeStdout(); rejectCall(error); };
     const child = spawn(sudo, [...SUDO_OPTIONS, PROGRAMS[program], ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: childEnv({ allow: [], baseEnv }),
@@ -227,7 +245,11 @@ export function runContainerCommand({
         finish(failure);
         return;
       }
-      stdout.push(chunk);
+      if (stdoutFd === null) {
+        stdout.push(chunk);
+      } else {
+        writeSync(stdoutFd, chunk);
+      }
     });
     // Up to STDERR_KEPT bytes kept, the rest counted: a call is never stopped for what it writes there.
     child.stderr.on('data', (chunk) => {

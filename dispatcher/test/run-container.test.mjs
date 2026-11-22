@@ -240,3 +240,23 @@ test('review round 1 of factory#22, GEN-31: in the task container, a stderr that
     return true;
   });
 });
+
+test('#0-301: with stdoutFile, stdout goes to a new file 600 as it comes, not into memory, held to outputLimit; the '
+  + 'result\'s shape is the same', async () => {
+  const stateDir = join(root.dir, 'stdout-file');
+  await mkdir(stateDir, { mode: 0o700 });
+  const big = await script('big-stdout', 'head -c 300000 /dev/zero; echo end');
+  const file = join(stateDir, 'call.jsonl');
+  const result = await runContainerCommand({ program: 'docker', args: ['exec'], sudo: big, stateDir, stdoutFile: file,
+    outputLimit: 1024 * 1024 });
+  assert.deepEqual(Object.keys(result).sort(), ['code', 'stderrFile', 'stdout']);
+  assert.equal(result.stdout.length, 0, 'nothing kept in memory');
+  assert.equal((await stat(file)).size, 300004);
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.throws(() => runContainerCommand({ program: 'docker', args: ['exec'], sudo: big, stateDir, stdoutFile: file }),
+    { code: 'EEXIST' }, 'never over a file that is there');
+  await assert.rejects(runContainerCommand({ program: 'docker', args: ['exec'], sudo: big, stateDir,
+    stdoutFile: join(stateDir, 'small.jsonl'), outputLimit: 1000 }), /wrote more than 1000 bytes to its stdout: stopped/);
+  assert.throws(() => runContainerCommand({ program: 'docker', args: ['exec'], sudo: big, stateDir, stdoutFile: 'rel' }),
+    TypeError);
+});

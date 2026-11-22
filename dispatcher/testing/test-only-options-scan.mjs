@@ -33,7 +33,9 @@ export const FUNCTIONS = Object.freeze(['pushTask', 'runGit', 'initBare', 'readC
   // #0-278: the reads of the base, the fetch of main, the read of a task's commits, the item's lock, the commands.
   'lsTree', 'resolveInBase', 'subtreeFiles', 'readBlobs', 'readAdapter', 'checkAdapterPaths', 'currentAdapter',
   'itemAndBase', 'fetchMain', 'checkRepoConfig', 'withTaskObjects', 'checkOwnRepoDir', 'changedPathsOf',
-  'checkTaskPaths', 'trustedArchive', 'runProductCommand', 'openPullHeads', 'probeTools']);
+  'checkTaskPaths', 'trustedArchive', 'runProductCommand', 'openPullHeads', 'probeTools',
+  // #0-301: an agent's call, the item's read, the phases.
+  'callAgent', 'readItem', 'buildPhases']);
 /**
  * The modules that run git, push, or run a container command, and the options of a test's each may forward: all but
  * `sudo` for #0-276's, `git` and `sudo` for #0-277's (the task container's), and for the CLI's main, which a test calls
@@ -49,6 +51,8 @@ export const CHAIN = Object.freeze({
   'git/task-objects.mjs': ALL, 'git/main-fetch.mjs': ALL, 'product/base-tree.mjs': Object.freeze(['git']),
   'product/adapter-from-base.mjs': Object.freeze(['git']), 'product/trusted-paths.mjs': Object.freeze(['git', 'uid']),
   'product/commands.mjs': TASK, 'github/item-lock.mjs': Object.freeze(['apiBase']),
+  // #0-301: the flow's modules pass the task container's sudo and the reads' git down.
+  'flow/call.mjs': TASK, 'flow/item.mjs': Object.freeze(['git']), 'flow/phases.mjs': TASK,
 });
 
 /**

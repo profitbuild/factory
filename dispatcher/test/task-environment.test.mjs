@@ -121,6 +121,7 @@ async () => {
   assert.deepEqual(mounts.sort(), [
     `bind /home/factory/tasks/${RUN_ID}/w /workspace rw`,
     'bind /opt/factory-checkout /opt/factory ro',
+    'bind /opt/factory-checkout/claude-code/etc /etc/claude-code ro',
     'bind /var/run/docker.sock /var/run/docker-host.sock rw',
     `volume factory-task-${RUN_ID}-claude /home/dev/.claude rw`,
     'volume factory-dispatcher-m2 /home/dev/.m2 rw',
@@ -295,7 +296,7 @@ test('AC9, AC3: the built image\'s metadata off the list, a mount, privilege or 
       ...TASK_CONFIG_LIST.features[FEATURE].digests[FEATURE_DIGEST].metadata }, { remoteUser: 'dev' },
     { mounts: ['type=bind,source=/,target=/host'] }]) }; });
   });
-  await blocked(await setUp(), /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[5\] \(not named\)$/, (fake) => {
+  await blocked(await setUp(), /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[6\] \(not named\)$/, (fake) => {
     fake.update((s) => { s.scenario.extraMounts = [{ Type: 'bind', Source: '/srv/state', Destination: '/state', RW: true }]; });
   });
   await blocked(await setUp(), /HostConfig\.Privileged is neither what the dispatcher set nor Docker's default/, (fake) => {
@@ -349,7 +350,7 @@ test('AC11: a call that ignores SIGTERM is killed after its grace, leaves no pro
     assert.ok(fake.calls().some((c) => c.args[0] === 'kill'), 'the task\'s containers killed by their label');
     const exec = fake.calls().find((c) => c.args[0] === 'exec' && c.args.some((a) => a.includes('trap')));
     assert.deepEqual(exec.args.slice(0, 6), ['exec', '-i', '--user', 'dev', '-w', '/workspace']);
-    assert.deepEqual(exec.args.slice(7, 13), ['timeout', '-s', 'TERM', '-k', '1s', '1s']);
+    assert.deepEqual(exec.args.slice(7, 13), ['/usr/bin/timeout', '-s', 'TERM', '-k', '1s', '1s']);
   });
 
 test('AC11: a call whose CLI hangs, an orphan holding its output, is ended by the dispatcher\'s own timer',
@@ -571,7 +572,7 @@ test('#0-284 AC4: a value the daemon returned reaches no refusal and no task.jso
     [(s) => { s.scenario.imageLabels = { 'devcontainer.metadata': JSON.stringify([{ ...feature, [secret]: 1 }]) }; },
       /no key of the list's differs; 1 key off the list \(not named\)$/],
     [(s) => { s.scenario.extraMounts = [{ Type: 'bind', Source: '/', Destination: `/${secret}`, RW: true }]; },
-      /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[5\] \(not named\)$/],
+      /the task container's mounts are not the dispatcher's: 1 unexpected, at Mounts\[6\] \(not named\)$/],
     [(s) => { s.scenario.hostConfig = { CapAdd: ['CAP_NET_ADMIN', `CAP_${secret}`] }; },
       /HostConfig\.CapAdd adds 1 capability off the configuration's and its features', at CapAdd\[1\] \(not named\)$/],
     [(s) => { s.scenario.hostConfig = { [`X${secret}`]: secret }; },

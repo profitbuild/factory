@@ -87,7 +87,7 @@ test('G: two calls, the archive on the first\'s stdin; a fresh directory for eac
   assert.equal(tail.length, 4, 'no arguments of its own: the adapter\'s command has none');
   assert.deepEqual([tail[0], tail[1], tail[3]], ['factory-run', '/workspace', 'scripts/factory/run-tests.sh']);
   assert.ok(TRUSTED_DIR.test(tail[2]), 'the directory the first call printed, held to its pattern');
-  assert.deepEqual(calls[0].args.slice(calls[0].args.indexOf('timeout') + 6), ['sh', '-c',
+  assert.deepEqual(calls[0].args.slice(calls[0].args.indexOf('/usr/bin/timeout') + 6), ['sh', '-c',
     calls[0].args.at(-2), 'factory-unpack']);
   // The call sees /tmp/factory-trusted.X; the fake daemon holds the container's /tmp/ under the test's directory (f).
   const dirOf = (r) => lines(r)[2].slice('dir='.length).replace(/\/scripts\/factory$/, '');
