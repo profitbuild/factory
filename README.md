@@ -201,6 +201,17 @@ or delete a branch through the API: there the session's denies (`.claude/setting
 
 How a change is made, from the change to the merge, and who writes what: [CONTRIBUTING.md](CONTRIBUTING.md).
 
+**A module's length** (incident-platform backlog #0-317). A module opens with a header of its invariants, which holds
+only while the module is short. `dispatcher/test/max-lines.test.mjs` therefore holds every `.mjs` file of
+`dispatcher/src/`, `dispatcher/bin/`, `dispatcher/testing/` and `hooks/` to two limits. Past 400 lines it warns in
+the test's output; past 600 it fails. A test file is not held, since tests grow with what they cover. The files
+already past 600 when the test came in are on its `RATCHET`, each at its own length: an entry always equals its
+file's length. Shorten the file and lower its entry in the same change; a file down to 600 lines or fewer leaves the
+list; a new module past 600 lines is split. The test holds each entry to its file's current length. That the list
+only shrinks, that no file is added to it and that no limit is raised is held by review, which sees any change of
+`RATCHET` or `LIMITS`: the test knows no history, so a change that adds a 700-line module together with its entry,
+or raises `LIMITS`, passes it. The `Test` jobs run it, so it needs no change to CI.
+
 The session runs in `.devcontainer/`, on the owner's Mac:
 
 1. On the host, from a clone on `main`: `node dispatcher/bin/dev-token.mjs --watch`. It reads the app's key
