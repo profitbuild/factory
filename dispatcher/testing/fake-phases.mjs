@@ -26,7 +26,8 @@ export function fakePhases(log, pause) {
   });
   return [
     phase('A', () => ({ branch: 'factory/0-1-fake', baseSha: 'a'.repeat(40) })),
-    phase('B', (task) => ({ round: task.round + 1, calls: [...task.calls, { agent: 'implementer', n: task.round + 1 }] })),
+    phase('B', (task) => ({ round: task.round + 1, calls: [...task.calls, { agent: 'implementer', n: task.round + 1,
+      mode: 'implement', outcome: 'answered' }] })),
     phase('C', (task) => ({ pr: `https://github.example/pr/${task.round}`, status: 'shipped' })),
   ];
 }

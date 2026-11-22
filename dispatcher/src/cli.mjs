@@ -75,14 +75,22 @@ import { breakerRefusal, openBreaker } from './state/breaker.mjs';
 import { checkStateDir } from './state/files.mjs';
 import { DISPATCHER_WAIT_S, acquireDispatcherLock, acquireTaskLock } from './state/lock.mjs';
 import { blockTask, createTask, findTaskByBranch, listTasks, liveTasks, newRunId, runPhases } from './state/tasks.mjs';
+import { readExpectations } from './flow/expectations.mjs';
+import { readFindings } from './flow/findings.mjs';
+import { buildPhases } from './flow/phases.mjs';
 
-/** The phases of a task, in order: none in v0 (4.4 ports them from today's autopilot). */
-export const PHASES = Object.freeze([]);
+/**
+ * The phases of a task, in order (incident-platform backlog #0-301, M2.3): flow/phases.mjs's, built for each run with
+ * its container, its adapter, the expectations and, in a fix-review run, the findings. The names, for the record.
+ */
+export const PHASES = Object.freeze(['plan', 'implement', 'path-gate', 'test-gate']);
+export const FIX_REVIEW_PHASES = Object.freeze(['fix-review', 'path-gate', 'test-gate']);
 
 /** The command line is wrong. */
 export class UsageError extends Error {}
 
-const USAGE = 'usage: cli.mjs run --item 0-N | cli.mjs run --resume <branch> | cli.mjs sweep [--force]';
+const USAGE = 'usage: cli.mjs run --item 0-N | cli.mjs run --resume <branch> [--findings <file>] | '
+  + 'cli.mjs sweep [--force]';
 const ITEM = /^[0-9]+-[0-9]+$/;
 
 function parse(argv) {
@@ -90,7 +98,8 @@ function parse(argv) {
   try {
     parsed = parseArgs({
       args: argv,
-      options: { item: { type: 'string' }, resume: { type: 'string' }, force: { type: 'boolean' } },
+      options: { item: { type: 'string' }, resume: { type: 'string' }, force: { type: 'boolean' },
+        findings: { type: 'string' } },
       strict: true,
       allowPositionals: true,
     });
@@ -103,13 +112,17 @@ function parse(argv) {
   }
   const command = positionals[0];
   if (command === 'sweep') {
-    if (values.item !== undefined || values.resume !== undefined) {
+    if (values.item !== undefined || values.resume !== undefined || values.findings !== undefined) {
       throw new UsageError(`sweep takes --force alone; ${USAGE}`);
     }
     return { command, force: values.force === true };
   }
   if (values.force !== undefined) {
     throw new UsageError(`--force is sweep's; ${USAGE}`);
+  }
+  if (values.findings !== undefined && values.resume === undefined) {
+    // A fix-review run is a new run of a task on its branch (#0-301).
+    throw new UsageError(`--findings goes with --resume <branch>; ${USAGE}`);
   }
   if (values.item !== undefined && values.resume !== undefined) {
     throw new UsageError(`--item and --resume exclude each other; ${USAGE}`);
@@ -156,6 +169,12 @@ async function itemAndBase(settings, args, { builder, apiBase, gitBase, fetchImp
     fetchImpl }));
   if (args.resume !== undefined) {
     const resumed = await findTaskByBranch(settings.stateDir, args.resume);
+    if (resumed.phase !== null && args.findings === undefined) {
+      // A run's work lives in its container, which dies with the run, and the agents commit nothing before #0-302
+      // (the owner's decision 3 for #0-301): a task that completed a phase has nothing to resume from.
+      throw new Error(`the task ${resumed.runId} completed its phase ${resumed.phase}, and its work is not committed `
+        + 'before #0-302: there is nothing to resume');
+    }
     const base = resumed.baseSha ?? await mainCommit(settings.repoDir);
     const adapter = await readAdapter({ repoDir: settings.repoDir, base });
     return { resumed, base, adapter, tokens: tokenSource(adapter.repository) };
@@ -205,7 +224,8 @@ function refuseFullSlots(others, slots) {
 /**
  * @param {string[]} argv the arguments after the script
  * @param {{ env?: Record<string, string | undefined>, out?: { write: (text: string) => void },
- *   now?: () => number, random?: (size: number) => Buffer, phases?: typeof PHASES, sudo?: string, apiBase?: string,
+ *   now?: () => number, random?: (size: number) => Buffer, phases?: { name: string, run: Function }[], sudo?: string,
+ *   apiBase?: string,
  *   gitBase?: string, fetchImpl?: typeof fetch, err?: { write: (text: string) => void }, dispatcherWaitS?: number,
  *   hooks?: { inSlot?: () => Promise<void>, beforeDispatcherLock?: () => Promise<void>,
  *   taskMade?: (runId: string) => Promise<void> } }} [options] all but argv
@@ -217,7 +237,7 @@ function refuseFullSlots(others, slots) {
  * @returns {Promise<object>} the task as it was left (`run`), or what the sweep removed (`sweep`)
  */
 export async function main(argv, {
-  env = process.env, out = process.stdout, err = process.stderr, now, random, phases = PHASES, sudo,
+  env = process.env, out = process.stdout, err = process.stderr, now, random, phases, sudo,
   apiBase = GITHUB_API, gitBase = GIT_HOST, fetchImpl, dispatcherWaitS = DISPATCHER_WAIT_S, hooks = {},
 } = {}) {
   const args = parse(argv);
@@ -227,6 +247,10 @@ export async function main(argv, {
   const { stateDir } = settings;
   await checkStateDir(stateDir);
   await checkRepoDir(settings.repoDir);
+  // What a call is checked against, and a fix-review run's findings, read before the run touches anything: a file
+  // off its form refuses the run (#0-301).
+  const expectations = await readExpectations();
+  const findings = args.findings === undefined ? null : await readFindings(args.findings);
   // The locks this run holds, each released in a finally of its own (#0-303): the dispatcher's for the slot section
   // and the sweep at the end only, the task's for the whole run.
   await hooks.beforeDispatcherLock?.();
@@ -311,7 +335,13 @@ export async function main(argv, {
     } }, async () => {
       const ready = await setUpTaskContainer({ stateDir, repoDir: settings.repoDir, task, adapter,
         helperImage: settings.helperImage, sudo });
-      return ready.container === null ? ready.task : runPhases(stateDir, ready.task, phases);
+      if (ready.container === null) {
+        return ready.task;
+      }
+      // A fix-review run runs its own phases from the first (#0-301), whatever phase the task completed before.
+      const start = findings === null ? ready.task : { ...ready.task, phase: null };
+      return runPhases(stateDir, start, phases ?? buildPhases({ stateDir, repoDir: settings.repoDir, adapter,
+        container: ready.container, carried: ready.carried, expectations, findings, sudo }));
     });
     out.write(`${JSON.stringify({ runId: left.runId, item: left.item, branch: left.branch, phase: left.phase,
       status: left.status, reason: left.reason })}\n`);
