@@ -120,7 +120,7 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
 - It never sets `allowManagedHooksOnly` or `disableSideloadFlags`.
 
 **The init event**, checked before the answer is read (`INIT_CHECKS`). Any difference stops the task:
-- `agents` holds `factory:<agent>` and no plugin agent other than the factory's;
+- `agents` holds `factory:<agent>`, and every other entry is either a factory agent or one of the builtin agents listed in `claude-code/expectations.json` (a closed list, like the plugins);
 - `plugins` has exactly one entry outside the builtin ones, `factory` at `/opt/factory` from `factory@inline`, and the builtin ones are exactly those listed in `claude-code/expectations.json`;
 - `plugin_errors` is empty or absent;
 - `tools` is the agent's expected set;
@@ -129,7 +129,9 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
 - `claude_code_version` is the expected one;
 - `mcp_servers` is empty.
 
-**`claude-code/expectations.json`** holds the expected version (`claudeCodeVersion`, `MAJOR.MINOR.PATCH`), which incident-platform's `check-factory-copies.rb` compares with its `.devcontainer/claude-code.pin`. It also holds the builtin plugins measured on that version and each agent's tools; a test keeps those equal to the frontmatter.
+**`claude-code/expectations.json`** holds the expected version (`claudeCodeVersion`, `MAJOR.MINOR.PATCH`), which incident-platform's `check-factory-copies.rb` compares with its `.devcontainer/claude-code.pin`. It also holds the builtin plugins and builtin agents measured on that version, and each agent's tools; a test keeps the tools equal to the frontmatter.
+
+The file is read after `sweep`'s branch, so `cli.mjs sweep` still works when it is broken; a run is refused.
 
 **The stream and the answer.**
 - The stream is written to `tasks/<runId>/calls/<n>-<agent>.jsonl` (mode 600) as it arrives, up to 64 MiB. It is never held whole in memory.
@@ -137,8 +139,10 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
   - the first line must be the init event;
   - every line must be JSON and an event type 2.1.328 writes;
   - the last line must be the single `result`.
+- A call that exits other than 0 is a stop, even when its result is a success.
 - The answer is `structured_output` of a successful result, checked against `schemas/answers/<agent>.schema.json`, the same bytes passed to `--json-schema`. It is written to `calls/<n>-<agent>.answer.json`.
 - The agent's own words stay in that file. Only an answer's `commitMessage` is kept in the call's record, as `agentText`, for #0-302.
+- `commitMessage` has a fixed form in the schema: a subject of one line (1 to 100 characters), then a blank line and a body; printable characters and `\n` only, at most 8000 in all; no line that starts like one of the dispatcher's trailers (`Factory-…:`, `Task:`, `Feature:`).
 
 **The phases** (`flow/phases.mjs`):
 1. `plan`: the architect;
@@ -147,7 +151,7 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
 4. `test-gate`: the adapter's `gate`.
    - A pass with an artifact ends the phase.
    - A pass without one, or a stop, stops the task.
-   - A fixable result calls the implementer in fix-tests mode, at most `MAX_TEST_FIXES` (2) times.
+   - A fixable result calls the implementer in fix-tests mode, at most `MAX_TEST_FIXES` (2) times. The count is this gate's: each test gate starts it at 0.
 
 `run --resume <branch> --findings <file>` is a fix-review run: the implementer in fix-review mode, then the two gates. One run is one review round, at most `MAX_ROUNDS` (3).
 - The findings file is the owner's, mode 600, in the form of `schemas/findings.schema.json`.
@@ -156,9 +160,10 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
 
 **Records and stops.**
 - Every call is recorded in the task's `calls` before it starts, so a killed call still counts. A call beyond `MAX_AGENT_CALLS` (45) stops the task.
+- An agent call, the item's read and both gates stop the item on the same failures: a call's, the item's, GitHub out of reach, and the task container's blocking failures (`BLOCKING` in `container/environment.mjs`: a stream past its limit, a stderr that cannot be kept, a signal, sudo, git, the base tree). A call that fails this way is recorded as `failed` first.
 - Every stop goes through `stopItem`: the task is marked BLOCKED with `<stage>: <reason>` in the dispatcher's own words, and the breaker counts it with its stage.
-- The item comes from the adapter's queue files, read as blobs of the base. It must have a single `**Complexity:** low|medium|high` anywhere in its block and at least one line beginning `AC<n>.`.
-- Until #0-302 commits a run's work, a task that has completed a phase cannot be resumed.
+- The item comes from the adapter's queue files (a queue of kind `backlog-md`; any other kind is a stop), read as blobs of the base. It must have a single `**Complexity:** low|medium|high` anywhere in its block and at least one line beginning `AC<n>.`.
+- Until #0-302 commits a run's work, a task that has completed a phase cannot be resumed, with `--findings` or without.
 
 ## The locks
 
