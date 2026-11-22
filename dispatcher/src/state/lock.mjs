@@ -10,10 +10,14 @@
  *   $FACTORY_STATE_DIR/state.lock         the state's: around every read, change and write of state.json and of the
  *                                         tasks' records, a few seconds at most
  *
- * Always taken in that order, dispatcher, then task, then state, never the other way: no run waits for the
- * dispatcher's while it holds the state's. A task's lock is only ever tried, never waited for (acquireLock with no
- * `wait`, and isLive), so a run that holds its own task's while it waits for the dispatcher's at its end cannot be
- * waited for in turn: no cycle of waits can form.
+ * The order (review round 1 of factory#25, doc-3c1e): a run takes the locks in the order dispatcher, task, state. At
+ * its end it holds its own task's lock and waits for the dispatcher's; that makes no cycle of waits, since no one ever
+ * waits for a task's lock, it is only tried (acquireTaskLock, isLive). The invariant: no one waits for a task's lock,
+ * and no one waits for the dispatcher's while holding the state's.
+ *
+ * isLive and acquireTaskLock are called only under the dispatcher's lock: isLive's try takes a free lock for an
+ * instant, and a task's lock is first taken in the slot section, so a task's liveness only changes there (or falls,
+ * when a run is killed), and a count made under the dispatcher's lock holds until it is released.
  *
  * A flock(2), which Node has no call for: this process opens the lock file and lends its descriptor to util-linux's
  * flock(1) as fd 3 (`flock --nonblock --exclusive 3`, or `--timeout <s>` to wait; the shell's `exec 3>lock; flock -n
@@ -25,22 +29,27 @@
  *   child that outlives its killed run holds nothing (#0-303 AC1);
  * - a live run never loses it: there is no timeout, nothing to renew, and the descriptor is a number, which no garbage
  *   collector closes.
- * flock(1) runs as a child of its own (spawn, not spawnSync), so a run that waits for a lock does not stop this
- * process's other work: two runs in one process (the tests') wait for each other as two processes do.
+ * flock(1) runs as a child of its own (spawn), for acquireLock and isLive alike, so a run that waits for a lock does
+ * not stop this process's other work: two runs in one process (the tests') wait for each other as two processes do.
+ * When flock(1) fails, the refusal gives its exit code or signal, never its stderr.
  *
  * Once locked, the descriptor's file must still be the one at the path (the same device and inode): a lock file
  * removed or replaced by someone else would let a second run lock a new file while this one holds the old.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { RUN_ID } from '../container/paths.mjs';
 import { childEnv } from '../process/child-env.mjs';
 
 /** util-linux's flock(1), by its full path: PATH is not trusted to find it. */
 export const FLOCK = '/usr/bin/flock';
 
-/** The longest a run waits for the dispatcher's lock (another run in its slot section or its sweep), and the state's. */
+/**
+ * The longest a run waits for the dispatcher's lock, and for the state's: 30 minutes, since another run's slot section
+ * holds its fetch of main (up to 10 minutes) and its sweep's helpers (up to 10 minutes each); 5 seconds.
+ */
 export const DISPATCHER_WAIT_S = 30 * 60;
 export const STATE_WAIT_S = 5;
 
@@ -56,16 +65,24 @@ function checkLockFile(fd, path) {
   return stats;
 }
 
-/** flock(1) on `fd`, as a child: its exit status. */
+/**
+ * flock(1) on `fd`, as a child, the one for acquireLock and isLive: true once the lock is taken, false when another
+ * holds it (past the wait, when it waits); any other end is an error naming flock(1)'s exit code or signal.
+ */
 function flockOn(fd, args, flock) {
   return new Promise((resolve, reject) => {
     // No variable of the dispatcher's: flock(1) needs none (childEnv, incident-platform backlog #0-276).
-    const child = spawn(flock, [...args, '--exclusive', '3'], { stdio: ['ignore', 'ignore', 'pipe', fd],
+    const child = spawn(flock, [...args, '--exclusive', '3'], { stdio: ['ignore', 'ignore', 'ignore', fd],
       env: childEnv() });
-    let stderr = '';
-    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => reject(new Error(`flock(1) could not be run (${flock}, util-linux): ${error.message}`)));
-    child.on('close', (status, signal) => resolve({ status, signal, stderr }));
+    child.on('error', (error) => reject(new Error(`flock(1) could not be run (${flock}, util-linux): ${error.code
+      ?? error.message}`)));
+    child.on('close', (status, signal) => {
+      if (status === 0 || status === 1) {
+        resolve(status === 0);
+      } else {
+        reject(new Error(`flock(1) failed (${status === null ? `signal ${signal}` : `exit ${status}`})`));
+      }
+    });
   });
 }
 
@@ -88,13 +105,9 @@ export async function acquireLock(path, { wait = false, what = `the lock ${path}
   let held = false;
   try {
     const stats = checkLockFile(fd, path);
-    const result = await flockOn(fd, wait === false ? ['--nonblock'] : ['--timeout', String(wait)], flock);
-    if (result.status === 1) {
+    if (!await flockOn(fd, wait === false ? ['--nonblock'] : ['--timeout', String(wait)], flock)) {
       throw new LockHeldError(wait === false ? `another run holds ${what} (${path})`
         : `another run has held ${what} (${path}) for ${wait} s: refused, not waited for any longer`);
-    }
-    if (result.status !== 0) {
-      throw new Error(`flock(1) failed (${result.status ?? result.signal}): ${result.stderr.trim()}`);
     }
     afterFlock?.();
     const now = lstatSync(path, { throwIfNoEntry: false });
@@ -120,15 +133,16 @@ export async function acquireLock(path, { wait = false, what = `the lock ${path}
 }
 
 /**
- * Whether a run holds the lock at `path` (#0-303): one try, no wait, no pid. Taken, the lock is released at once and
+ * Whether a run holds the lock at `path` (#0-303): one try, no wait, no pid; under the dispatcher's lock only (see the
+ * order above). Taken, the lock is released at once and
  * the answer is no; a lock file that is not there is no live run's either. The same checks as acquireLock's: a lock
  * file that is not the dispatcher's own is refused, not read as dead.
  *
  * @param {string} path
  * @param {{ flock?: string }} [options] for the tests only
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-export function isLive(path, { flock = FLOCK } = {}) {
+export async function isLive(path, { flock = FLOCK } = {}) {
   let fd;
   try {
     fd = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW);
@@ -140,19 +154,7 @@ export function isLive(path, { flock = FLOCK } = {}) {
   }
   try {
     checkLockFile(fd, path);
-    const result = spawnSync(flock, ['--nonblock', '--exclusive', '3'], {
-      stdio: ['ignore', 'ignore', 'pipe', fd], env: childEnv(), encoding: 'utf8', timeout: 10_000,
-    });
-    if (result.error) {
-      throw new Error(`flock(1) could not be run (${flock}, util-linux): ${result.error.message}`);
-    }
-    if (result.status === 1) {
-      return true;
-    }
-    if (result.status !== 0) {
-      throw new Error(`flock(1) failed (${result.status ?? result.signal}): ${result.stderr.trim()}`);
-    }
-    return false;
+    return !await flockOn(fd, ['--nonblock'], flock);
   } finally {
     // Taken or not, the descriptor is closed: a lock it got is released with it.
     closeSync(fd);
@@ -171,22 +173,29 @@ export function acquireDispatcherLock(stateDir, { wait = DISPATCHER_WAIT_S, ...r
   return acquireLock(join(stateDir, 'lock'), { wait, what: 'the dispatcher\'s lock', ...rest });
 }
 
-/** A task's lock, tasks/<runId>/lock: tried once, never waited for; held, the task is live. */
-export const taskLockPath = (stateDir, runId) => join(stateDir, 'tasks', runId, 'lock');
+/** A task's lock, tasks/<runId>/lock: tried once, never waited for; held, the task is live. `runId` is checked. */
+export function taskLockPath(stateDir, runId) {
+  if (typeof runId !== 'string' || !RUN_ID.test(runId)) {
+    throw new TypeError('taskLockPath: runId is not one of newRunId\'s');
+  }
+  return join(stateDir, 'tasks', runId, 'lock');
+}
 
 /**
- * Takes the lock of the task `runId`, whose directory exists, or refuses: another run of it is live.
+ * Takes the lock of the task `runId`, whose directory exists, or refuses: another run of it is live. Called under
+ * the dispatcher's lock only (see the order above); `runId` is checked.
  *
  * @param {string} stateDir
  * @param {string} runId
  */
 export async function acquireTaskLock(stateDir, runId, options = {}) {
+  const path = taskLockPath(stateDir, runId);
   try {
-    return await acquireLock(taskLockPath(stateDir, runId), { ...options, wait: false,
+    return await acquireLock(path, { ...options, wait: false,
       what: `the lock of the task ${runId}` });
   } catch (error) {
     if (error instanceof LockHeldError) {
-      throw new LockHeldError(`the task ${runId} is live: another run holds its lock (${taskLockPath(stateDir, runId)})`);
+      throw new LockHeldError(`the task ${runId} is live: another run holds its lock (${path})`);
     }
     throw error;
   }

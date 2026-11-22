@@ -145,14 +145,21 @@ async function listUnlocked(stateDir) {
 
 /**
  * The runIds of the live tasks (#0-303): those whose lock a run holds, each tried once (isLive), but `except` (the
- * caller's own, which it holds). A task's directory with no lock file is no live run's.
+ * caller's own, which it holds). A task's directory with no lock file is no live run's. Under the dispatcher's lock
+ * only (lock.mjs: isLive's try takes a free lock for an instant).
  *
  * @param {string} stateDir
  * @param {{ except?: string | null }} [options]
  * @returns {Promise<string[]>}
  */
 export async function liveTasks(stateDir, { except = null } = {}) {
-  return (await runIds(stateDir)).filter((runId) => runId !== except && isLive(taskLockPath(stateDir, runId)));
+  const live = [];
+  for (const runId of await runIds(stateDir)) {
+    if (runId !== except && await isLive(taskLockPath(stateDir, runId))) {
+      live.push(runId);
+    }
+  }
+  return live;
 }
 
 /**

@@ -104,7 +104,7 @@ test('a lock file is the dispatcher\'s own: 600; one open to others is refused, 
   assert.equal((await stat(join(state.dir, 'lock'))).mode & 0o777, 0o600);
   await writeFile(join(state.dir, 'open'), '', { mode: 0o644 });
   await assert.rejects(acquireLock(join(state.dir, 'open')), /must be a regular file of this process's user with mode 600/);
-  assert.throws(() => isLive(join(state.dir, 'open')), /must be a regular file of this process's user with mode 600/);
+  await assert.rejects(isLive(join(state.dir, 'open')), /must be a regular file of this process's user with mode 600/);
 });
 
 test('a lock file removed or replaced while a run takes it is refused, and the run holds nothing', async (t) => {
@@ -131,19 +131,19 @@ test('#0-303: isLive tries a lock once: held by another process or another descr
   const state = await makeStateDir();
   t.after(state.remove);
   const path = join(state.dir, 'a-lock');
-  assert.equal(isLive(path), false, 'no lock file: no live run');
+  assert.equal(await isLive(path), false, 'no lock file: no live run');
   const held = await acquireLock(path);
-  assert.equal(isLive(path), true, 'held by this process through another descriptor');
+  assert.equal(await isLive(path), true, 'held by this process through another descriptor');
   held.release();
-  assert.equal(isLive(path), false);
+  assert.equal(await isLive(path), false);
   (await acquireLock(path)).release();
   const holder = await startUntil(await holderScript(state.dir), [path], 'locked');
   try {
-    assert.equal(isLive(path), true, 'held by another process');
+    assert.equal(await isLive(path), true, 'held by another process');
   } finally {
     await kill(holder);
   }
-  assert.equal(isLive(path), false, 'its run killed');
+  assert.equal(await isLive(path), false, 'its run killed');
 });
 
 test('#0-303 AC1: a killed run\'s task lock is free again and its task no longer live, though a child of the run still '
@@ -160,7 +160,7 @@ test('#0-303 AC1: a killed run\'s task lock is free again and its task no longer
       process.kill(sleeper, 'SIGKILL');
     }
   });
-  assert.equal(isLive(lockPath), true);
+  assert.equal(await isLive(lockPath), true);
   await assert.rejects(acquireTaskLock(state.dir, runId), (error) => {
     assert.ok(error instanceof LockHeldError);
     assert.match(error.message, new RegExp(`^the task ${runId} is live: another run holds its lock \\(`));
@@ -168,7 +168,7 @@ test('#0-303 AC1: a killed run\'s task lock is free again and its task no longer
   });
   await kill(holder);
   assert.equal(running(sleeper), true, 'the run\'s child outlives it');
-  assert.equal(isLive(lockPath), false, 'the run killed, its task no longer live, its child running or not');
+  assert.equal(await isLive(lockPath), false, 'the run killed, its task no longer live, its child running or not');
   const mine = await acquireTaskLock(state.dir, runId);
   mine.release();
 });
@@ -188,5 +188,23 @@ test('#0-303: withStateLock runs one holder at a time, waits a few seconds for a
     await slow;
     assert.deepEqual(order, ['a in', 'a out', 'b']);
     await assert.rejects(withStateLock(state.dir, async () => { throw new Error('inside'); }), /^Error: inside$/);
-    assert.equal(isLive(stateLockPath(state.dir)), false, 'released after the throw');
+    assert.equal(await isLive(stateLockPath(state.dir)), false, 'released after the throw');
   });
+
+test('review round 1 of factory#25: a task\'s lock is named by a runId of newRunId\'s only, and flock(1) failing is '
+  + 'told by its exit code, never its stderr', async (t) => {
+  const state = await makeStateDir();
+  t.after(state.remove);
+  for (const runId of ['../x', '', 'x', '20261122T101500Z-0a0303/../y']) {
+    assert.throws(() => taskLockPath(state.dir, runId), TypeError);
+    await assert.rejects(acquireTaskLock(state.dir, runId), TypeError);
+  }
+  const loud = join(state.dir, 'flock');
+  await writeFile(loud, '#!/bin/sh\necho "a secret-looking text of flock" >&2\nexit 64\n', { mode: 0o700 });
+  await assert.rejects(acquireLock(join(state.dir, 'x.lock'), { flock: loud }), (error) => {
+    assert.equal(error.message, 'flock(1) failed (exit 64)');
+    return true;
+  });
+  await writeFile(join(state.dir, 'y.lock'), '', { mode: 0o600 });
+  await assert.rejects(isLive(join(state.dir, 'y.lock'), { flock: loud }), /^Error: flock\(1\) failed \(exit 64\)$/);
+});
