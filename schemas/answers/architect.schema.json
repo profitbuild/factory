@@ -1,5 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/profitbuild/factory/blob/main/schemas/answers/architect.schema.json",
   "title": "The architect's answer",
   "description": "The structured output of a factory:architect call (incident-platform backlog #0-301, the owner's g1): the same file goes to claude's --json-schema and to dispatcher/src/schema/validate.mjs. Its example is agents/architect.md's \"## Answer (JSON)\".",

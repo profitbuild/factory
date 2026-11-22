@@ -151,6 +151,9 @@ test('#0-301 (D): the managed settings are exactly the ADR\'s keys, strictPlugin
   for (const name of AGENTS) {
     (await readAgent(name)).tools.forEach((tool) => tools.add(tool));
   }
+  // StructuredOutput needs no rule: under allowManagedPermissionRulesOnly and dontAsk its call passes with none
+  // (permission_denials empty; the owner's measure on 2.1.328), so the settings stay as they were.
+  tools.delete('StructuredOutput');
   assert.deepEqual([...settings.permissions.allow].sort(), [...tools].sort());
   assert.ok(!('allowManagedHooksOnly' in settings) && !('disableSideloadFlags' in settings));
 });
@@ -306,4 +309,22 @@ test('#0-301 (review round 1 of factory#26, arc-5c1e): GitHub out of reach in a 
   const { state: breaker } = await openBreaker(state.dir);
   assert.deepEqual(breaker.history.map((h) => h.stage), ['ship']);
   assert.equal(breaker.consecutiveBlocked, 1);
+});
+
+test('#0-301 (the owner\'s measure on Claude Code 2.1.328): the answer schemas declare no $schema, which 2.1.328\'s '
+  + 'draft-07 validator refuses at start, and every agent has StructuredOutput, through which structured_output comes',
+async () => {
+  const { readdir } = await import('node:fs/promises');
+  const dir = new URL('schemas/answers/', ROOT);
+  const files = (await readdir(dir)).filter((file) => file.endsWith('.schema.json'));
+  assert.ok(files.length >= 2);
+  for (const file of files) {
+    assert.ok(!Object.hasOwn(JSON.parse(await readFile(new URL(file, dir), 'utf8')), '$schema'), file);
+  }
+  const expectations = await readExpectations();
+  for (const name of AGENTS) {
+    const { tools } = await readAgent(name);
+    assert.ok(tools.includes('StructuredOutput'), name);
+    assert.deepEqual([...expectations.agents[name].tools].sort(), [...tools].sort(), name);
+  }
 });

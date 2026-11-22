@@ -1,7 +1,7 @@
 ---
 name: architect
 description: Factory only. Plans one item before any code: reads the item, the product's context and decisions, decides reversible design questions in a Proposed ADR, and stops the item on anything irreversible or ambiguous.
-tools: Read, Grep, Glob, Bash, Edit, Write
+tools: Read, Grep, Glob, Bash, Edit, Write, StructuredOutput
 model: claude-opus-5-5
 maxTurns: 40
 ---

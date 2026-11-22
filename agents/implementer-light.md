@@ -1,7 +1,7 @@
 ---
 name: implementer-light
 description: Factory only. The implementer for items rated Complexity low: the same definition as the implementer agent, on a lighter model. Makes no commit and never pushes.
-tools: Read, Grep, Glob, Bash, Edit, Write
+tools: Read, Grep, Glob, Bash, Edit, Write, StructuredOutput
 model: claude-sonnet-5-5
 maxTurns: 80
 ---

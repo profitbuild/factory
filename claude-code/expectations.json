@@ -24,7 +24,8 @@
         "Glob",
         "Bash",
         "Edit",
-        "Write"
+        "Write",
+        "StructuredOutput"
       ]
     },
     "implementer": {
@@ -34,7 +35,8 @@
         "Glob",
         "Bash",
         "Edit",
-        "Write"
+        "Write",
+        "StructuredOutput"
       ]
     },
     "implementer-light": {
@@ -44,7 +46,8 @@
         "Glob",
         "Bash",
         "Edit",
-        "Write"
+        "Write",
+        "StructuredOutput"
       ]
     }
   }

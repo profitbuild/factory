@@ -106,7 +106,9 @@ test('AC1: an agent\'s frontmatter holds exactly name, description, tools, model
     assert.equal(fields.name, name);
     assert.equal(fields.model, LIMITS[name].model, name);
     assert.equal(fields.maxTurns, LIMITS[name].maxTurns, name);
-    assert.equal(fields.tools, 'Read, Grep, Glob, Bash, Edit, Write', name);
+    // StructuredOutput: --agent cuts the session's tools to these, and structured_output comes back through it
+    // (measured on Claude Code 2.1.328, incident-platform backlog #0-301).
+    assert.equal(fields.tools, 'Read, Grep, Glob, Bash, Edit, Write, StructuredOutput', name);
   }
 });
 
