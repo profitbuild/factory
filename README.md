@@ -222,6 +222,29 @@ The session runs in `.devcontainer/`, on the owner's Mac:
    volume `factory-dev-claude`.
 3. `git` and `gh` there use the app's token (a credential helper and a wrapper of `gh` read the file); commits are
    `profitbuild-factory-dev[bot]`'s. Outbound traffic is HTTPS to GitHub and Anthropic only (`init-firewall.sh`).
+   `node`'s one sudo rule runs `init-firewall.sh` without arguments and nothing else (`""` in the rule: sudo refuses
+   `sudo init-firewall.sh <host>` before the script runs), and `node` is in neither `sudo` nor `admin`
+   (incident-platform backlog #0-311).
+4. Claude Code is `/usr/local/bin/claude`, root's, mode 0755, at the version of `.devcontainer/claude-code.pin`
+   (incident-platform backlog #0-311, ADR-0065). The image's build installs it as root, before `USER node`, with
+   `install-claude-code.sh`: the binary must be the one whose SHA-256 the manifest names, and that manifest must be
+   signed by the key in `.devcontainer/keys/`. Nothing in the container updates it (`DISABLE_AUTOUPDATER=1`,
+   `DISABLE_UPDATES=1`), and the image puts no `~/.local/bin` before it on `PATH`. A login shell still can:
+   `node`'s `~/.profile` (Debian's `/etc/skel/.profile`) puts `~/bin` and `~/.local/bin` first when they exist, and
+   `node` owns its home, so a session can leave a `claude` there, or a `PATH` line in `~/.bashrc`, that the owner's
+   login shell in this container runs instead. That residual is the one incident-platform's ADR-0065 names. The call
+   that is certain is `/usr/local/bin/claude` by its full path; `which -a claude` shows any other.
+   The pin, the script and the key are incident-platform's files, byte for byte (ADR-0061). incident-platform does
+   not compare them yet: its `check-factory-copies.rb` gains them in its part of #0-311 (AC3), after this one is
+   merged. They need a list of their own there, compared byte for byte, both ways: that check's copy mode wants a
+   NOTICE paragraph in the copy, which a copy byte for byte, the key's `.asc` among them, cannot hold. Being byte for
+   byte, their comments name incident-platform's files (`scripts/factory/preflight.sh`,
+   `.github/scripts/test-install-claude-code.sh`, "every task container"), which factory does not have: they speak
+   of the repository they come from, where the installer's test is. A new version is a change of the pin there
+   first, copied here, then a rebuild. The build fetches from `downloads.claude.ai`; the running container
+   never does, and its firewall does not allow it. CI builds no image: `Lint Workflows` runs
+   `.devcontainer/test-dockerfile.sh` (the Dockerfile read as text, with its own mutations) and
+   `install-claude-code.sh --check` (the pin against the signed manifest).
 
 Security issues: report them privately through the repository's **Security** tab ("Report a vulnerability"), not in
 a public place.

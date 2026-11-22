@@ -23,10 +23,31 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o 
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*
 
-# The image's user `node` (uid 1000) is the one that works here; sudo only for the firewall script, which takes no
-# argument, so it allows no other list (run again, it cuts the network until a restart: init-firewall.sh).
-RUN echo "node ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/node \
-    && chmod 0440 /etc/sudoers.d/node
+# The image's user `node` (uid 1000) is the one that works here; sudo only for the firewall script, and only without
+# arguments: `""` is sudoers' "no arguments" (incident-platform backlog #0-311, as its #0-283 did for its own image).
+# The script refuses any argument too, and takes no list (run again, it cuts the network until a restart:
+# init-firewall.sh); the rule no longer leans on that alone. The base image's `node` is in no group but its own; it
+# leaves `sudo`, and `admin`, the other group /etc/sudoers grants every command to, should a new base image put it in
+# one: with a password set later, or a NOPASSWD rule for the group, it would have every command.
+RUN for g in sudo admin; do if id -nG node | tr ' ' '\n' | grep -qx "$g"; then gpasswd -d node "$g"; fi; done \
+    && echo "node ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh \"\"" > /etc/sudoers.d/node \
+    && chmod 0440 /etc/sudoers.d/node \
+    && visudo -cf /etc/sudoers.d/node
+
+# Claude Code at claude-code.pin's version, from the manifest Anthropic signed, root's and read-only to `node` in
+# /usr/local/bin (incident-platform backlog #0-311, ADR-0065; its #0-249 and #0-283 for its own image). It was
+# `curl -fsSL https://claude.ai/install.sh | bash` as `node`: whatever version was newest the day the image was built,
+# into `node`'s ~/.local, where code a session ran could replace the binary. claude-code.pin, install-claude-code.sh
+# and keys/ are incident-platform's files, byte for byte (ADR-0061). incident-platform does not compare them yet: its
+# check-factory-copies.rb gains them in its part of #0-311 (AC3), after this one is merged. They need a list of their
+# own there, compared byte for byte, both ways: that check's copy mode wants a NOTICE paragraph in the copy, which a
+# copy byte for byte, the key's .asc among them, cannot hold. Until then their equality was checked by hand (the
+# SHA-256 and git blob of each, in factory#27). The build fetches from downloads.claude.ai, with no firewall yet; the
+# running container never does. Before the scripts' layer below, so a change there does not download the binary again.
+COPY claude-code.pin install-claude-code.sh /usr/local/share/claude-code/
+COPY keys/ /usr/local/share/claude-code/keys/
+RUN /usr/local/share/claude-code/install-claude-code.sh --pin /usr/local/share/claude-code/claude-code.pin \
+        --keys /usr/local/share/claude-code/keys --into /usr/local/bin
 
 COPY init-firewall.sh credential-check.sh gh-app-token.sh git-credential-app-token.sh factory-workspace.sh /usr/local/bin/
 RUN mv /usr/local/bin/gh-app-token.sh /usr/local/bin/gh \
@@ -46,8 +67,14 @@ RUN mkdir -p /workspace /home/node/.claude && chown node:node /workspace /home/n
 USER node
 WORKDIR /home/node
 
-# Claude Code, native installer. Updates are off in the container: the version is the one this image was built with
-# (rebuild to upgrade). Its pin is incident-platform #0-249's, for both devcontainers.
-RUN curl -fsSL https://claude.ai/install.sh | bash
-ENV PATH="/home/node/.local/bin:${PATH}" \
-    DISABLE_AUTOUPDATER=1
+# Claude Code updates nothing in the container: DISABLE_AUTOUPDATER stops the background check only, and
+# `claude update` or `claude install` would still lay a newer version out under ~/.local; DISABLE_UPDATES blocks every
+# path (Claude Code's setup documentation). The installed binary is root's, /usr/local/bin/claude (above), and the
+# image puts no ~/.local/bin before it on PATH. A login shell still can: Debian's /etc/skel/.profile, `node`'s
+# ~/.profile here, puts ~/bin and ~/.local/bin first when they exist, and `node` owns its home, so a session can leave
+# a `claude` there (or a PATH line in ~/.bashrc) that the owner's login shell in this container runs instead. That
+# residual is ADR-0065's, named there; the call that is certain is /usr/local/bin/claude by its full path, and
+# `which -a claude` shows any other (the owner's check after a rebuild). A bump is a change to claude-code.pin, made
+# in incident-platform and copied here, then a rebuild.
+ENV DISABLE_AUTOUPDATER=1 \
+    DISABLE_UPDATES=1
