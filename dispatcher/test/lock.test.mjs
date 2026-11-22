@@ -10,7 +10,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
-  LockHeldError, acquireDispatcherLock, acquireLock, acquireTaskLock, isLive, stateLockPath, taskLockPath,
+  FLOCK_LIMIT_S, LockHeldError, acquireDispatcherLock, acquireLock, acquireTaskLock, isLive, stateLockPath, taskLockPath,
   withStateLock,
 } from '../src/state/lock.mjs';
 import { kill, startUntil } from '../testing/children.mjs';
@@ -207,4 +207,32 @@ test('review round 1 of factory#25: a task\'s lock is named by a runId of newRun
   });
   await writeFile(join(state.dir, 'y.lock'), '', { mode: 0o600 });
   await assert.rejects(isLive(join(state.dir, 'y.lock'), { flock: loud }), /^Error: flock\(1\) failed \(exit 64\)$/);
+});
+
+test('review round 2 of factory#25, 4: a flock(1) that does not end within its limit is killed, and the call refused '
+  + 'with that, never with its stderr', async (t) => {
+  const state = await makeStateDir();
+  t.after(state.remove);
+  assert.equal(FLOCK_LIMIT_S, 10, 'the limit of --nonblock, and the margin past --timeout');
+  const pidFile = join(state.dir, 'sleeper.pid');
+  const sleeping = join(state.dir, 'sleeping-flock');
+  await writeFile(sleeping, `#!/bin/sh\necho "a text of flock's" >&2\necho $$ > ${pidFile}\nexec sleep 30\n`, { mode: 0o700 });
+  await assert.rejects(acquireLock(join(state.dir, 'a.lock'), { flock: sleeping, limitMs: 300 }), (error) => {
+    assert.equal(error.message, 'flock(1) did not end within 300 ms: killed');
+    return true;
+  });
+  const pid = Number((await readFile(pidFile, 'utf8')).trim());
+  await new Promise((resolve) => { setTimeout(resolve, 100); });
+  let alive = true;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    alive = false;
+  }
+  assert.equal(alive, false, 'the flock(1) that ran past its limit is killed');
+  await writeFile(join(state.dir, 'b.lock'), '', { mode: 0o600 });
+  await assert.rejects(isLive(join(state.dir, 'b.lock'), { flock: sleeping, limitMs: 300 }),
+    /^Error: flock\(1\) did not end within 300 ms: killed$/);
+  await assert.rejects(acquireLock(join(state.dir, 'c.lock'), { flock: sleeping, wait: 1, limitMs: 300 }),
+    /did not end within 300 ms/);
 });

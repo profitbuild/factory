@@ -47,8 +47,8 @@ import { childEnv } from '../process/child-env.mjs';
 export const FLOCK = '/usr/bin/flock';
 
 /**
- * The longest a run waits for the dispatcher's lock, and for the state's: 30 minutes, since another run's slot section
- * holds its fetch of main (up to 10 minutes) and its sweep's helpers (up to 10 minutes each); 5 seconds.
+ * The longest a run waits for each lock: 30 minutes for the dispatcher's (another run's slot section holds its fetch of
+ * main, up to 10 minutes, and its sweep's helpers, up to 10 minutes each), 5 seconds for the state's.
  */
 export const DISPATCHER_WAIT_S = 30 * 60;
 export const STATE_WAIT_S = 5;
@@ -65,19 +65,38 @@ function checkLockFile(fd, path) {
   return stats;
 }
 
+/** The longest flock(1) itself may run past its own wait (all of it, for --nonblock), as isLive's spawnSync had. */
+export const FLOCK_LIMIT_S = 10;
+
 /**
  * flock(1) on `fd`, as a child, the one for acquireLock and isLive: true once the lock is taken, false when another
- * holds it (past the wait, when it waits); any other end is an error naming flock(1)'s exit code or signal.
+ * holds it (past the wait, when it waits); any other end is an error naming flock(1)'s exit code or signal. A flock(1)
+ * that runs past its limit (FLOCK_LIMIT_S, past `wait` when it waits) is killed, and the call refused with that,
+ * never with its stderr (review round 2 of factory#25, 4).
+ *
+ * @param {number} fd
+ * @param {{ wait: number | false, flock: string, limitMs?: number }} options `limitMs` for the tests only
  */
-function flockOn(fd, args, flock) {
+function flockOn(fd, { wait, flock, limitMs = ((wait === false ? 0 : wait) + FLOCK_LIMIT_S) * 1000 }) {
+  const args = wait === false ? ['--nonblock'] : ['--timeout', String(wait)];
   return new Promise((resolve, reject) => {
     // No variable of the dispatcher's: flock(1) needs none (childEnv, incident-platform backlog #0-276).
     const child = spawn(flock, [...args, '--exclusive', '3'], { stdio: ['ignore', 'ignore', 'ignore', fd],
       env: childEnv() });
-    child.on('error', (error) => reject(new Error(`flock(1) could not be run (${flock}, util-linux): ${error.code
-      ?? error.message}`)));
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, limitMs);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(new Error(`flock(1) could not be run (${flock}, util-linux): ${error.code ?? error.message}`));
+    });
     child.on('close', (status, signal) => {
-      if (status === 0 || status === 1) {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`flock(1) did not end within ${limitMs} ms: killed`));
+      } else if (status === 0 || status === 1) {
         resolve(status === 0);
       } else {
         reject(new Error(`flock(1) failed (${status === null ? `signal ${signal}` : `exit ${status}`})`));
@@ -90,14 +109,17 @@ function flockOn(fd, args, flock) {
  * Takes the lock at `path` (made 600 if it is missing), or refuses.
  *
  * @param {string} path the lock file
- * @param {{ wait?: number | false, what?: string, flock?: string, afterFlock?: () => void }} [options] `wait` false
+ * @param {{ wait?: number | false, what?: string, flock?: string, afterFlock?: () => void, limitMs?: number }}
+ *   [options] `wait` false
  *   (the default) tries once (`--nonblock`), a number of seconds waits that long (`--timeout`); `what` names the lock
  *   in the refusal; `flock` flock(1)'s path, for a test that has it elsewhere; `afterFlock` runs between the flock and
  *   the check of the inode, where a swap would be seen: for the tests only
  * @returns {Promise<{ path: string, release: () => void }>}
  * @throws {LockHeldError} when another run holds it (past `wait`, when it waits)
  */
-export async function acquireLock(path, { wait = false, what = `the lock ${path}`, flock = FLOCK, afterFlock } = {}) {
+export async function acquireLock(path, {
+  wait = false, what = `the lock ${path}`, flock = FLOCK, afterFlock, limitMs,
+} = {}) {
   if (wait !== false && !(Number.isSafeInteger(wait) && wait > 0)) {
     throw new TypeError('acquireLock: wait must be false or a positive number of seconds');
   }
@@ -105,7 +127,7 @@ export async function acquireLock(path, { wait = false, what = `the lock ${path}
   let held = false;
   try {
     const stats = checkLockFile(fd, path);
-    if (!await flockOn(fd, wait === false ? ['--nonblock'] : ['--timeout', String(wait)], flock)) {
+    if (!await flockOn(fd, { wait, flock, limitMs })) {
       throw new LockHeldError(wait === false ? `another run holds ${what} (${path})`
         : `another run has held ${what} (${path}) for ${wait} s: refused, not waited for any longer`);
     }
@@ -142,7 +164,7 @@ export async function acquireLock(path, { wait = false, what = `the lock ${path}
  * @param {{ flock?: string }} [options] for the tests only
  * @returns {Promise<boolean>}
  */
-export async function isLive(path, { flock = FLOCK } = {}) {
+export async function isLive(path, { flock = FLOCK, limitMs } = {}) {
   let fd;
   try {
     fd = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW);
@@ -154,7 +176,7 @@ export async function isLive(path, { flock = FLOCK } = {}) {
   }
   try {
     checkLockFile(fd, path);
-    return !await flockOn(fd, ['--nonblock'], flock);
+    return !await flockOn(fd, { wait: false, flock, limitMs });
   } finally {
     // Taken or not, the descriptor is closed: a lock it got is released with it.
     closeSync(fd);

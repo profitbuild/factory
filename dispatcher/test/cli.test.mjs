@@ -649,3 +649,25 @@ test('#0-303, review round 1 of factory#25 (security 1): a run that cannot take 
   }
   assert.ok(runId, 'the run made its task');
 });
+
+test('#0-303, review round 2 of factory#25, 3: a new task whose lock cannot be taken right after its record ends '
+  + 'BLOCKED with a fixed reason, the details in the refusal', async (t) => {
+  const { stateDir, call, fake } = await setUpDaemon(t);
+  let held;
+  try {
+    await assert.rejects(call(['run', '--item', '0-1'], { hooks: { taskMade: async (runId) => {
+      held = await acquireTaskLock(stateDir, runId);
+    } } }), (error) => {
+      assert.match(error.message, /^the task \d{8}T\d{6}Z-[0-9a-f]{6} is live: another run holds its lock \(/);
+      return true;
+    });
+  } finally {
+    held?.release();
+  }
+  const [runId] = await readdir(join(stateDir, 'tasks'));
+  const task = JSON.parse(await readFile(join(stateDir, 'tasks', runId, 'task.json'), 'utf8'));
+  assert.equal(task.status, 'blocked');
+  assert.equal(task.reason, 'refused before its container: its task lock could not be taken');
+  assert.ok(!fake.calls().some((c) => c.args[0] === 'rm' || c.args[0] === 'run' || c.program === 'devcontainer'),
+    'no sweep, no container');
+});

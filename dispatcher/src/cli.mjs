@@ -18,7 +18,7 @@
  *   4. the breaker (state.json, under the state's lock): tripped, or unreadable, refuses the run;
  *   5. the item and its base (incident-platform backlog #0-278, ADR-0060 D6 and D8 as amended). A new task
  *      (`--item`, which v0 requires: the owner names the item) is refused when one of the dispatcher's own tasks
- *      holds the item (running, with a branch); the adapter is read from FACTORY_REPO_DIR's main as it is, for the
+ *      holds the item (running, on a branch, or live with none yet: #0-303); the adapter is read from FACTORY_REPO_DIR's main as it is, for the
  *      repository builder-app's token is narrowed to; main is brought up to GitHub's with that token, fast-forward
  *      only (git/main-fetch.mjs); the base is main's commit, and the adapter is read again from it, the one every
  *      later read of the task uses, its repository the same; the item is refused when an open pull request holds it
@@ -207,12 +207,13 @@ function refuseFullSlots(others, slots) {
  * @param {{ env?: Record<string, string | undefined>, out?: { write: (text: string) => void },
  *   now?: () => number, random?: (size: number) => Buffer, phases?: typeof PHASES, sudo?: string, apiBase?: string,
  *   gitBase?: string, fetchImpl?: typeof fetch, err?: { write: (text: string) => void }, dispatcherWaitS?: number,
- *   hooks?: { inSlot?: () => Promise<void>, beforeDispatcherLock?: () => Promise<void> } }} [options] all but argv
+ *   hooks?: { inSlot?: () => Promise<void>, beforeDispatcherLock?: () => Promise<void>,
+ *   taskMade?: (runId: string) => Promise<void> } }} [options] all but argv
  *   for the tests (`sudo`: the fake daemon's;
  *   `apiBase`, `gitBase`, `fetchImpl`: the fake GitHub's; `dispatcherWaitS` the wait for the dispatcher's lock;
  *   `hooks.inSlot` runs in the slot section, once the slot is counted, for a test that holds a run there;
  *   `hooks.beforeDispatcherLock` right before the run asks for the dispatcher's lock, for a test that knows a run is
- *   waiting for it)
+ *   waiting for it; `hooks.taskMade` between a new task's record and its lock, for a test that takes that lock first)
  * @returns {Promise<object>} the task as it was left (`run`), or what the sweep removed (`sweep`)
  */
 export async function main(argv, {
@@ -264,21 +265,30 @@ export async function main(argv, {
     await refuseOffEnvironment({ stateDir, sudo });
     // A resumed task whose lock another run holds is live: refused, its record as it was.
     let task = resumed ?? await createTask(stateDir, { runId, item: args.item, baseSha: base });
-    taskLock = await acquireTaskLock(stateDir, runId);
-    try {
-      await sweepForRun({ runId, helperImage: settings.helperImage, stateDir, sudo, othersLive: others });
-    } catch (error) {
-      // The sweep failed with the task made: a new one ends BLOCKED, with the reason, so that a record still running
-      // does not hold its item. The sweep's error stays the refusal; a failure to block is told with it (#0-303).
+    await hooks.taskMade?.(runId);
+    // A new task whose lock or start sweep fails ends BLOCKED, so that no record is left running with no reason: its
+    // lock's failure with a fixed reason (its details go to stderr with the refusal: review round 2 of factory#25, 3),
+    // the sweep's with its message. The first error stays the refusal; a failure to block is told with it (#0-303).
+    const blockNew = async (error, reason) => {
       if (resumed === null) {
         try {
-          task = await blockTask(stateDir, task, `refused before its container: ${error.message}`);
+          task = await blockTask(stateDir, task, reason);
         } catch (blocking) {
           error.message = `${error.message}; and the task could not be blocked: ${blocking.message}`;
           error.cause ??= blocking;
         }
       }
-      throw error;
+      return error;
+    };
+    try {
+      taskLock = await acquireTaskLock(stateDir, runId);
+    } catch (error) {
+      throw await blockNew(error, 'refused before its container: its task lock could not be taken');
+    }
+    try {
+      await sweepForRun({ runId, helperImage: settings.helperImage, stateDir, sudo, othersLive: others });
+    } catch (error) {
+      throw await blockNew(error, `refused before its container: ${error.message}`);
     }
     dispatcher.release();
     dispatcher = null;
