@@ -432,10 +432,13 @@ function exec(context, input) {
 /**
  * The task image's Claude Code (incident-platform backlog #0-301), which CI does not have and no test may run: an exec
  * of /usr/local/bin/claude takes the next of scenario.claude, a list a test sets, each { stream: (event | string)[],
- * exit?: number, files?: Record<path, text> }: the stream printed one line per item (an object as JSON, a string as
- * it is), `files` written in the container's workspace first (an agent's changes), the exit code `exit` (0). Each
- * call's argv (after the container's ID) and its stdin are recorded to claude-calls.jsonl. With no call left, it
- * prints nothing and exits 1.
+ * exit?: number, files?: Record<path, text>, flood?: number, signal?: string, stderr?: string, lockStderr?: string }:
+ * the stream printed one line per item (an object as JSON, a string as it is), `files` written in the container's
+ * workspace first (an agent's changes), the exit code `exit` (0). For the stops of review round 1 of factory#26:
+ * `flood` prints that many bytes of one line after the stream; `signal` ends the call by it; `stderr` is written
+ * to stderr, and `lockStderr` makes that directory (the state's stderr/) open to others first (755), so the starter
+ * cannot keep it. Each call's argv (after the container's ID) and its stdin are recorded to claude-calls.jsonl.
+ * With no call left, it prints nothing and exits 1.
  */
 function fakeClaude(context, argv, input, container) {
   const { state, config, save } = context;
@@ -453,6 +456,21 @@ function fakeClaude(context, argv, input, container) {
     writeFileSync(target, text);
   }
   out(next.stream.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))).map((line) => `${line}\n`).join(''));
+  if (next.lockStderr) {
+    mkdirSync(next.lockStderr, { recursive: true, mode: 0o700 });
+    chmodSync(next.lockStderr, 0o755);
+  }
+  if (next.stderr) {
+    process.stderr.write(next.stderr);
+  }
+  if (next.flood) {
+    return new Promise((resolve) => {
+      process.stdout.write(Buffer.alloc(next.flood, 'x'), () => resolve());
+    });
+  }
+  if (next.signal) {
+    process.kill(process.pid, next.signal);
+  }
   process.exitCode = next.exit ?? 0;
   return undefined;
 }

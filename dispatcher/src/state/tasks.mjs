@@ -261,7 +261,8 @@ export async function runPhases(stateDir, task, phases) {
       changes = await phase.run(current);
     } catch (error) {
       if (error instanceof GitHubUnavailableError) {
-        return blockTask(stateDir, current, `${phase.name}: ${error.message}`);
+        // Through stopItem, so that the breaker counts it (review round 1 of factory#26, arc-5c1e).
+        return stopItem(stateDir, current, { stage: phase.name, reason: error.message });
       }
       if (error instanceof StopError) {
         return stopItem(stateDir, error.task ?? current, { stage: error.stage, reason: error.reason });

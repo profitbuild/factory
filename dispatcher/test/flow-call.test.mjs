@@ -101,7 +101,9 @@ test('#0-301: env -i\'s list holds literals alone: HOME, the locale, PATH\'s sys
 
 /** A value of each init field that breaks its rule. */
 const OFF = {
-  agents: [['claude', 'factory:implementer'], ['factory:architect', 'evil:spy'], 'factory:architect', undefined],
+  agents: [['claude', 'factory:implementer'], ['factory:architect', 'evil:spy'], 'factory:architect', undefined,
+    // A builtin agent off expectations.json's closed list (review round 1 of factory#26, 6).
+    ['factory:architect', 'Explore', 'agent-words'], ['factory:architect', 'factory:spy']],
   plugins: [
     [{ name: 'factory', path: '/opt/factory', source: 'factory@inline' }],
     [...initEvent('architect').plugins, { name: 'evil', path: '/x', source: 'evil@market' }],
@@ -171,6 +173,17 @@ test('#0-301 AC1: no structured_output, a result that is no success, or an answe
       /^the call's answer is not its schema's \(1 error; /);
     await refused('implementer', [initEvent('implementer'), resultEvent(ARCHITECT_ANSWER)],
       /^the call's answer is not its schema's \(\d+ errors; /);
+  });
+
+test('#0-301 (review round 1 of factory#26, 7): a call that exits other than 0 is a stop, its result a success',
+  async () => {
+    await assert.rejects(callWith('architect', stream('architect', ARCHITECT_ANSWER), { exit: 1 }), (error) => {
+      assert.ok(error instanceof CallError, error.message);
+      assert.match(error.message, /^the call exited 1 \(.*\/calls\/\d+-architect\.jsonl\)$/);
+      return true;
+    });
+    const { answer } = await callWith('architect', stream('architect', ARCHITECT_ANSWER));
+    assert.deepEqual(answer, ARCHITECT_ANSWER, 'the same stream, exit 0, answers');
   });
 
 test('#0-301 AC1: a stream off 2.1.328\'s form is refused by its line, never quoted', async () => {

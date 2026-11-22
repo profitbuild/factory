@@ -79,12 +79,6 @@ import { readExpectations } from './flow/expectations.mjs';
 import { readFindings } from './flow/findings.mjs';
 import { buildPhases } from './flow/phases.mjs';
 
-/**
- * The phases of a task, in order (incident-platform backlog #0-301, M2.3): flow/phases.mjs's, built for each run with
- * its container, its adapter, the expectations and, in a fix-review run, the findings. The names, for the record.
- */
-export const PHASES = Object.freeze(['plan', 'implement', 'path-gate', 'test-gate']);
-export const FIX_REVIEW_PHASES = Object.freeze(['fix-review', 'path-gate', 'test-gate']);
 
 /** The command line is wrong. */
 export class UsageError extends Error {}
@@ -169,9 +163,10 @@ async function itemAndBase(settings, args, { builder, apiBase, gitBase, fetchImp
     fetchImpl }));
   if (args.resume !== undefined) {
     const resumed = await findTaskByBranch(settings.stateDir, args.resume);
-    if (resumed.phase !== null && args.findings === undefined) {
+    if (resumed.phase !== null) {
       // A run's work lives in its container, which dies with the run, and the agents commit nothing before #0-302
-      // (the owner's decision 3 for #0-301): a task that completed a phase has nothing to resume from.
+      // (the owner's decision 3 for #0-301, with no exception: review round 1 of factory#26, 3): a task that
+      // completed a phase has nothing to resume from, for a fix-review run too.
       throw new Error(`the task ${resumed.runId} completed its phase ${resumed.phase}, and its work is not committed `
         + 'before #0-302: there is nothing to resume');
     }
@@ -247,10 +242,6 @@ export async function main(argv, {
   const { stateDir } = settings;
   await checkStateDir(stateDir);
   await checkRepoDir(settings.repoDir);
-  // What a call is checked against, and a fix-review run's findings, read before the run touches anything: a file
-  // off its form refuses the run (#0-301).
-  const expectations = await readExpectations();
-  const findings = args.findings === undefined ? null : await readFindings(args.findings);
   // The locks this run holds, each released in a finally of its own (#0-303): the dispatcher's for the slot section
   // and the sweep at the end only, the task's for the whole run.
   await hooks.beforeDispatcherLock?.();
@@ -264,6 +255,11 @@ export async function main(argv, {
       out.write(`${JSON.stringify({ swept: removed })}\n`);
       return removed;
     }
+    // What a call is checked against, and a fix-review run's findings, read before the run touches the daemon or the
+    // state: a file off its form refuses the run (#0-301); after the sweep's branch, which needs neither (review
+    // round 1 of factory#26, 5).
+    const expectations = await readExpectations();
+    const findings = args.findings === undefined ? null : await readFindings(args.findings);
     // The slot section (#0-303; review round 1 of factory#25, the owner's decision 2), under the dispatcher's lock:
     //   a. the breaker;
     //   b. the fetch of main (FACTORY_REPO_DIR is shared, and two fetches at once collide on git's own locks);

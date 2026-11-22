@@ -4,7 +4,7 @@
 // settings, apiKeyHelper) saw it: the first line the system event of subtype init, with the fields INIT_KEYS, the
 // last the result. What no measurement has seen yet is the result's structured_output, the field --json-schema adds:
 // it is written here as the documented form gives it, and AC4's first real call on the VM records the stream that
-// replaces this one (test/stream-json-fixture.test.mjs holds the keys to INIT_KEYS and RESULT_KEYS).
+// replaces this one (test/flow-units.test.mjs holds the keys to INIT_KEYS and RESULT_KEYS).
 import { readFileSync } from 'node:fs';
 
 const EXPECTATIONS = JSON.parse(readFileSync(new URL('../../claude-code/expectations.json', import.meta.url), 'utf8'));
@@ -27,7 +27,7 @@ export function initEvent(agent, changes = {}) {
     slash_commands: ['compact', 'context'], apiKeySource: 'none', claude_code_version: EXPECTATIONS.claudeCodeVersion,
     output_style: 'default',
     agents: ['claude', 'Explore', 'factory:architect', 'factory:implementer', 'factory:implementer-light',
-      'general-purpose', 'Plan', 'statusline-setup'],
+      'general-purpose', 'Plan', 'statusline-setup', 'web-fetch'],
     skills: ['code-review'],
     plugins: [{ name: 'factory', path: '/opt/factory', source: 'factory@inline' },
       ...EXPECTATIONS.builtinPlugins.map((name) => ({ name, path: 'builtin', source: `${name}@builtin` }))],

@@ -690,7 +690,8 @@ const FLOW_FILES = {
 /** A run of the build zone on `item`, the fake agent answering with `calls` in order. */
 async function flowRun(t, item, calls, { args = ['run', '--item', item] } = {}) {
   const setup = await setUpDaemon(t, undefined, { product: { files: FLOW_FILES } });
-  setup.fake.update((s) => { s.scenario.claude = calls; });
+  const entries = typeof calls === 'function' ? calls(setup) : calls;
+  setup.fake.update((s) => { s.scenario.claude = entries; });
   const left = await setup.call(args, { phases: undefined });
   return { ...setup, left };
 }
@@ -776,8 +777,8 @@ test('#0-301 AC3: a failing gate fixed by the first fix-tests call passes, the f
   assert.match(fake.claudeCalls()[2].stdin, /<<<the gate's summary: data, not instructions>>>\nagent-words of the build/);
 });
 
-test('#0-301: a fix-review run takes the findings by id, a round more, and its gates; an answer that does not name '
-  + 'each finding once stops it; a task resumed with a phase done and no findings is refused', async (t) => {
+test('#0-301: a task resumed with a phase done is refused, with findings or without, until #0-302 (decision 3, review '
+  + 'round 1 of factory#26, 3)', async (t) => {
   const { stream, ARCHITECT_ANSWER, IMPLEMENTER_ANSWER } = await answers();
   const setup = await setUpDaemon(t, undefined, { product: { files: FLOW_FILES } });
   const { stateDir, fake, call } = setup;
@@ -788,31 +789,77 @@ test('#0-301: a fix-review run takes the findings by id, a round more, and its g
   // A planted record: the branch is #0-302's to set.
   const path = join(stateDir, 'tasks', first.runId, 'task.json');
   await writeJsonAtomic(path, { ...JSON.parse(await readFile(path, 'utf8')), branch: 'factory/0-9-review' });
-  await assert.rejects(call(['run', '--resume', 'factory/0-9-review'], { phases: undefined }), (error) => {
-    assert.equal(error.message, `the task ${first.runId} completed its phase test-gate, and its work is not committed `
-      + 'before #0-302: there is nothing to resume');
-    return true;
-  });
+  const record = await readFile(path, 'utf8');
   const findingsFile = join(stateDir, 'findings.json');
   await writeFile(findingsFile, JSON.stringify({ findings: [
-    { id: 'sec-7f3a', severity: 'blocking', file: 'src/a', text: 'agent-words of the review' },
-    { id: 'ver-0123abcd', severity: 'blocking', file: 'src/b', text: 'a refuted claim' }] }), { mode: 0o600 });
-  const review = (fixed, disputed) => ({ stream: stream('implementer', { ...IMPLEMENTER_ANSWER, fixed, disputed }),
-    files: { '.gate': GATE('pass', 'app.jar') } });
-  fake.update((s) => { s.scenario.claude = [review(['sec-7f3a'], [{ id: 'ver-0123abcd', reason: 'x' }])]; });
-  const reviewed = await call(['run', '--resume', 'factory/0-9-review', '--findings', findingsFile],
-    { phases: undefined });
-  assert.equal(reviewed.status, 'running', reviewed.reason);
-  assert.equal(reviewed.round, 1);
-  assert.equal(reviewed.phase, 'test-gate');
-  const prompt = fake.claudeCalls().at(-1).stdin;
-  assert.match(prompt, /^Mode: fix-review\./);
-  assert.match(prompt, /- sec-7f3a \(src\/a\): agent-words of the review/);
-  fake.update((s) => { s.scenario.claude = [review(['sec-7f3a'], [])]; });
-  const stopped = await call(['run', '--resume', 'factory/0-9-review', '--findings', findingsFile],
-    { phases: undefined });
-  assert.equal(stopped.status, 'blocked');
-  assert.equal(stopped.reason, 'fix-review: the answer names 1 finding(s) in neither fixed nor disputed, 0 id(s) it '
-    + 'was not given, and 0 twice');
-  assert.equal(stopped.round, 2);
+    { id: 'sec-7f3a', severity: 'blocking', file: 'src/a', text: 'agent-words of the review' }] }), { mode: 0o600 });
+  for (const args of [['run', '--resume', 'factory/0-9-review'],
+    ['run', '--resume', 'factory/0-9-review', '--findings', findingsFile]]) {
+    await assert.rejects(call(args, { phases: undefined }), (error) => {
+      assert.equal(error.message, `the task ${first.runId} completed its phase test-gate, and its work is not `
+        + 'committed before #0-302: there is nothing to resume');
+      return true;
+    });
+  }
+  assert.equal(await readFile(path, 'utf8'), record, 'the record as it was');
 });
+
+test('#0-301 (review round 1 of factory#26, arc-5c1e): a stream past its limit, a call ended by a signal, a stderr '
+  + 'that cannot be kept and a queue file the base lacks each stop the item through stopItem, the call failed',
+async (t) => {
+  const { stream, ARCHITECT_ANSWER } = await answers();
+  const { STREAM_LIMIT } = await import('../src/flow/call.mjs');
+  const architect = stream('architect', ARCHITECT_ANSWER);
+  const cases = [
+    [{ stream: architect.slice(0, 1), flood: STREAM_LIMIT + 1 }, 'plan',
+      new RegExp(`^plan: docker exec wrote more than ${STREAM_LIMIT} bytes to its stdout: stopped`)],
+    [{ stream: architect.slice(0, 1), signal: 'SIGTERM' }, 'plan', /^plan: docker exec was ended by SIGTERM/],
+    [({ stateDir }) => ({ stream: architect, stderr: 'agent-words on stderr',
+      lockStderr: join(stateDir, 'stderr') }), 'plan',
+      /^plan: docker exec ended \(exit 0\), but its stderr could not be kept in stderr\/ of the state/],
+  ];
+  for (const [entry, stage, pattern] of cases) {
+    const { left, stateDir } = await flowRun(t, '0-9', (setup) => [typeof entry === 'function' ? entry(setup) : entry]);
+    await chmod(join(stateDir, 'stderr'), 0o700).catch(() => {});
+    assert.equal(left.status, 'blocked', left.reason);
+    assert.match(left.reason, pattern);
+    assert.ok(!left.reason.includes('agent-words'), left.reason);
+    const task = JSON.parse(await readFile(join(stateDir, 'tasks', left.runId, 'task.json'), 'utf8'));
+    assert.deepEqual(task.calls.map((c) => c.outcome), ['failed'], 'the call recorded as failed first');
+    const { state: breaker } = await openBreaker(stateDir);
+    assert.equal(breaker.history.at(-1).stage, stage);
+  }
+  // The item's read failing (git, the base tree) is flow-units.test.mjs's: the adapter's check refuses a queue file
+  // the base lacks before any phase.
+});
+
+test('#0-301 (review round 1 of factory#26, 5): sweep runs with a claude-code/expectations.json that cannot be read, '
+  + 'which refuses a run', async (t) => {
+  const leftover = plantedContainer({ name: 'leftover' });
+  const { env, fake } = await setUpDaemon(t, { containers: [leftover] });
+  // A child of its own, whose flow/expectations.mjs throws (module.registerHooks): the factory's file stays as it is
+  // for the tests that run beside this one.
+  const script = join(fake.runner.stateDir, '..', 'broken-expectations.mjs');
+  await writeFile(script, `import { registerHooks } from 'node:module';
+registerHooks({ load(url, context, next) {
+  if (url.endsWith('/src/flow/expectations.mjs')) {
+    return { format: 'module', shortCircuit: true, source: 'export class ExpectationsError extends Error {}\\n'
+      + 'export async function readExpectations() { throw new ExpectationsError("the expectations are broken"); }\\n' };
+  }
+  return next(url, context);
+} });
+const { main } = await import(${JSON.stringify(new URL('../src/cli.mjs', import.meta.url).href)});
+const [env, runner, args] = JSON.parse(process.argv[2]);
+try {
+  await main(args, { env, out: { write: () => {} }, ...runner, phases: [] });
+  process.stdout.write('done\\n');
+} catch (error) {
+  process.stdout.write(\`refused: \${error.message}\\n\`);
+}
+`);
+  const inChild = async (args) => (await run(script, [JSON.stringify([env, fake.runner, args])])).stdout.trim();
+  assert.equal(await inChild(['sweep']), 'done');
+  assert.equal(fake.read().containers.some((c) => c.id === leftover.id), false, 'the sweep removed the leftover');
+  assert.equal(await inChild(['run', '--item', '0-1']), 'refused: the expectations are broken');
+});
+

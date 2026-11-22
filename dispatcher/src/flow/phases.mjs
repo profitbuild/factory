@@ -18,7 +18,9 @@
  * preflight, the pick, the review rounds, verify, acceptance, ship. The agents make no commit (#0-302): an answer's
  * commitMessage is kept in its call's record, as agentText.
  */
-import { CallError, CallTimeoutError, callAgent } from './call.mjs';
+import { BLOCKING } from '../container/environment.mjs';
+import { GitHubUnavailableError } from '../github/retry.mjs';
+import { CallError, callAgent } from './call.mjs';
 import { coverageProblem } from './findings.mjs';
 import { ItemError, readItem } from './item.mjs';
 import { fixReviewPrompt, fixTestsPrompt, implementPrompt, planPrompt } from './prompts.mjs';
@@ -43,23 +45,35 @@ const fieldsOf = (task) => Object.fromEntries(Object.entries(task).filter(([k]) 
  * The phases of a run.
  *
  * @param {{ stateDir: string, repoDir: string, adapter: object, container: object, carried: object,
- *   expectations: object, findings?: object[] | null, sudo?: string, git?: string, root?: URL }} context `findings`
- *   a fix-review run's (findings.mjs); `root` for the tests only
+ *   expectations: object, findings?: object[] | null, sudo?: string, git?: string }} context `findings` a fix-review
+ *   run's (findings.mjs)
  * @returns {{ name: string, run: (task: object) => Promise<object> }[]}
  */
 export function buildPhases({
-  stateDir, repoDir, adapter, container, carried, expectations, findings = null, sudo, git, root,
+  stateDir, repoDir, adapter, container, carried, expectations, findings = null, sudo, git,
 }) {
-  const item = async (task) => {
+  /**
+   * Whether `error` stops the item (review round 1 of factory#26, arc-5c1e): a call's, the item's, or one of the task
+   * container's blocking failures (environment.mjs's BLOCKING: the starter's, a stream past its limit, a stderr not
+   * kept, a signal, sudo; git's and the base tree's), or GitHub out of reach. Anything else is a bug, and is thrown.
+   */
+  const stops = (error) => error instanceof CallError || error instanceof ItemError
+    || error instanceof GitHubUnavailableError || BLOCKING.some((kind) => error instanceof kind);
+
+  /** Runs `work`; an error that stops the item is a StopError in `stage`, with the task `task()` gives. */
+  const guarded = async (stage, task, work) => {
     try {
-      return await readItem({ repoDir, base: task.baseSha, adapter, id: task.item, git });
+      return await work();
     } catch (error) {
-      if (error instanceof ItemError) {
-        throw new StopError('item', error.message, task);
+      if (!(error instanceof StopError) && stops(error)) {
+        throw new StopError(stage, error.message, task());
       }
       throw error;
     }
   };
+
+  const item = (task) => guarded('item', () => task, () => readItem({ repoDir, base: task.baseSha, adapter,
+    id: task.item, git }));
 
   /** MAX_AGENT_CALLS, checked before a phase reads anything for its call, and again by the call itself. */
   const callsLeft = (task, stage) => {
@@ -78,7 +92,7 @@ export function buildPhases({
       ? { ...c, ...fields } : c)) });
     try {
       const { answer, file, answerFile } = await callAgent({ container, task: current, n, agentName, prompt, carried,
-        expectations, stateDir, sudo, root });
+        expectations, stateDir, sudo });
       current = await settle({ outcome: 'answered', file, answerFile,
         agentText: { commitMessage: answer.commitMessage } });
       if (answer.blocked === true) {
@@ -86,7 +100,7 @@ export function buildPhases({
       }
       return { task: current, answer };
     } catch (error) {
-      if (error instanceof CallError || error instanceof CallTimeoutError) {
+      if (!(error instanceof StopError) && stops(error)) {
         current = await settle({ outcome: 'failed' });
         throw new StopError(stage, error.message, current);
       }
@@ -129,8 +143,8 @@ export function buildPhases({
   } };
 
   const pathGate = { name: 'path-gate', run: async (task) => {
-    const result = await runProductCommand({ container, repoDir, task, which: 'changedPaths',
-      limitS: PATH_GATE_LIMIT_S, sudo, git });
+    const result = await guarded('path-gate', () => task, () => runProductCommand({ container, repoDir, task,
+      which: 'changedPaths', limitS: PATH_GATE_LIMIT_S, sudo, git }));
     if (result.code !== 0) {
       throw new StopError('path-gate', `the adapter's changedPaths refused the task's changes (exit ${result.code})`,
         task);
@@ -139,10 +153,12 @@ export function buildPhases({
   } };
 
   const testGate = { name: 'test-gate', run: async (task) => {
-    let current = task;
+    // MAX_TEST_FIXES counts this gate's fixes, not the task's (review round 1 of factory#26, gen-3c1f): a gate starts
+    // at 0, so a fix-review run's gate may fix as a first run's could.
+    let current = await updateTask(stateDir, task, { fixes: 0 });
     for (;;) {
-      const result = await runProductCommand({ container, repoDir, task: current, which: 'gate',
-        limitS: TEST_GATE_LIMIT_S, sudo, git });
+      const result = await guarded('test-gate', () => current, () => runProductCommand({ container, repoDir,
+        task: current, which: 'gate', limitS: TEST_GATE_LIMIT_S, sudo, git }));
       let gate;
       try {
         gate = JSON.parse(result.stdout.toString('utf8'));
@@ -163,7 +179,7 @@ export function buildPhases({
       if (gate.status === 'stop') {
         throw new StopError('test-gate', 'the gate stopped: the environment failed, a human looks', current);
       }
-      const fixes = current.fixes ?? 0;
+      const { fixes } = current;
       if (fixes >= MAX_TEST_FIXES) {
         throw new StopError('test-gate', `tests still failing after ${MAX_TEST_FIXES} fix attempts`, current);
       }

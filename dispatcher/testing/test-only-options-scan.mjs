@@ -35,7 +35,7 @@ export const FUNCTIONS = Object.freeze(['pushTask', 'runGit', 'initBare', 'readC
   'itemAndBase', 'fetchMain', 'checkRepoConfig', 'withTaskObjects', 'checkOwnRepoDir', 'changedPathsOf',
   'checkTaskPaths', 'trustedArchive', 'runProductCommand', 'openPullHeads', 'probeTools',
   // #0-301: an agent's call, the item's read, the phases.
-  'callAgent', 'readItem', 'buildPhases']);
+  'callAgent', 'readItem', 'buildPhases', 'readAgent', 'readAnswerSchema', 'readExpectations', 'readFindings']);
 /**
  * The modules that run git, push, or run a container command, and the options of a test's each may forward: all but
  * `sudo` for #0-276's, `git` and `sudo` for #0-277's (the task container's), and for the CLI's main, which a test calls
@@ -43,6 +43,10 @@ export const FUNCTIONS = Object.freeze(['pushTask', 'runGit', 'initBare', 'readC
  */
 const ALL = Object.freeze(OPTIONS.filter((option) => !['sudo', 'apiBase'].includes(option)));
 const TASK = Object.freeze(['git', 'sudo']);
+/** The flow's own test options, by the function that takes them, and the modules that may forward them (#0-301). */
+export const FLOW_OPTIONS = Object.freeze({ readAgent: ['root'], readAnswerSchema: ['root'],
+  readExpectations: ['root'], readFindings: ['root'], callAgent: ['root', 'limitS'], buildPhases: ['root', 'limitS'] });
+const FLOW_CHAIN = Object.freeze({ 'flow/expectations.mjs': ['root'] });
 export const CHAIN = Object.freeze({
   'git/run-git.mjs': ALL, 'git/bundle.mjs': ALL, 'git/config-allowlist.mjs': ALL, 'github/push.mjs': ALL,
   'git/base-bundle.mjs': TASK, 'container/run-container.mjs': TASK, 'container/work-dir.mjs': TASK,
@@ -87,6 +91,16 @@ export function testOnlyOptions(path, source) {
       for (const string of strings.filter((st) => st.start > open && st.end <= close && OPTIONS.includes(st.value))) {
         if (/^\s*:/.test(code.slice(string.end))) {
           found.push(`${path}: ${name}( gives ${string.value} a value, its key in quotes`);
+        }
+      }
+      // #0-301 (review round 1 of factory#26, 10): the flow's readers of the factory checkout take `root`, a test's,
+      // and an agent's call takes no `limitS` but its own: no module gives either a value, the one that forwards
+      // `root` (flow/expectations.mjs, its parameter) apart.
+      for (const extra of FLOW_OPTIONS[name] ?? []) {
+        for (const key of args.matchAll(new RegExp(`(?:[{,]\\s*)(${extra})\\s*([:,}])`, 'g'))) {
+          if (key[2] === ':' || !(FLOW_CHAIN[path] ?? []).includes(extra) || declaresLocal(extra)) {
+            found.push(`${path}: ${name}( gives or forwards ${extra}, a test's`);
+          }
         }
       }
       if (name === 'pushTarget') {

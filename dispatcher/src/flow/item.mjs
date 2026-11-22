@@ -64,6 +64,10 @@ export function parseItem(id, texts) {
  * @param {{ repoDir: string, base: string, adapter: { queue: { files: string[] } }, id: string, git?: string }} options
  */
 export async function readItem({ repoDir, base, adapter, id, git }) {
+  if (adapter?.queue?.kind !== 'backlog-md') {
+    // The one kind this parser reads (review round 1 of factory#26, 9).
+    throw new ItemError('the adapter\'s queue is not of the kind backlog-md, the one the dispatcher reads');
+  }
   const texts = [];
   for (const path of adapter.queue.files) {
     texts.push({ path, text: await blobOf({ repoDir, base, path, git, what: `the queue file ${path}` }) });

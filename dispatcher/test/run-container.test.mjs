@@ -260,3 +260,27 @@ test('#0-301: with stdoutFile, stdout goes to a new file 600 as it comes, not in
   assert.throws(() => runContainerCommand({ program: 'docker', args: ['exec'], sudo: big, stateDir, stdoutFile: 'rel' }),
     TypeError);
 });
+
+test('#0-301 (review round 1 of factory#26, arc-5c1e): a write of stdoutFile that fails (here EFBIG, past a file size '
+  + 'limit; ENOSPC and EIO alike) is the call\'s ContainerRunError, naming the errno', async () => {
+  const stateDir = join(root.dir, 'stdout-file-full');
+  await mkdir(stateDir, { mode: 0o700 });
+  const big = await script('big-stdout-full', 'head -c 300000 /dev/zero; echo end');
+  const child = join(stateDir, 'child.mjs');
+  await writeFile(child, `process.on('SIGXFSZ', () => {});
+const { ContainerRunError, runContainerCommand } = await import(
+  ${JSON.stringify(new URL('../src/container/run-container.mjs', import.meta.url).href)});
+try {
+  await runContainerCommand({ program: 'docker', args: ['exec'], sudo: process.argv[2], stateDir: process.argv[3],
+    stdoutFile: process.argv[3] + '/call.jsonl', outputLimit: 1024 * 1024 });
+  process.stdout.write('resolved\\n');
+} catch (error) {
+  process.stdout.write(\`\${error instanceof ContainerRunError} \${error.message}\\n\`);
+}
+`);
+  const { execFileSync } = await import('node:child_process');
+  // ulimit -f counts 512-byte blocks: 64 KiB, far below the call's 300 KB.
+  const out = execFileSync('/bin/sh', ['-c', 'ulimit -f 128; exec "$0" "$@"', process.execPath, child, big, stateDir],
+    { encoding: 'utf8' }).trim();
+  assert.equal(out, 'true docker exec: its stdout could not be written to its file (EFBIG)');
+});

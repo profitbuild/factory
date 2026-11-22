@@ -1,11 +1,51 @@
 {
-  "$comment": "What an agent call of the dispatcher's must show in its init event on the pinned Claude Code (incident-platform backlog #0-301, ADR-0064 points 3 and 5, ADR-0065): the version, the builtin plugins measured on it (F3, managed settings, 2026-11-22), and each agent's tools. claudeCodeVersion is the one value incident-platform's check-factory-copies.rb compares with its .devcontainer/claude-code.pin (#0-301 AC6): MAJOR.MINOR.PATCH, no v. Read by dispatcher/src/flow/expectations.mjs, checked by dispatcher/test/expectations.test.mjs.",
+  "$comment": "What an agent call of the dispatcher's must show in its init event on the pinned Claude Code (incident-platform backlog #0-301, ADR-0064 points 3 and 5, ADR-0065): the version, the builtin plugins and the builtin agents measured on it (F3, managed settings, 2026-11-22; the spike of #0-300 for the agents, web-fetch listed in some of its calls), and each agent's tools. claudeCodeVersion is the one value incident-platform's check-factory-copies.rb compares with its .devcontainer/claude-code.pin (#0-301 AC6): MAJOR.MINOR.PATCH, no v. Read by dispatcher/src/flow/expectations.mjs, checked by dispatcher/test/flow-units.test.mjs.",
   "claudeCodeVersion": "2.1.328",
-  "builtinPlugins": ["cc-plugin-sec-default", "cc-plugin-agents-md", "cc-plugin-telemetry", "cc-plugin-privacy",
-    "cc-plugin-plugin-authoring"],
+  "builtinPlugins": [
+    "cc-plugin-sec-default",
+    "cc-plugin-agents-md",
+    "cc-plugin-telemetry",
+    "cc-plugin-privacy",
+    "cc-plugin-plugin-authoring"
+  ],
+  "builtinAgents": [
+    "claude",
+    "Explore",
+    "general-purpose",
+    "Plan",
+    "statusline-setup",
+    "web-fetch"
+  ],
   "agents": {
-    "architect": { "tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"] },
-    "implementer": { "tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"] },
-    "implementer-light": { "tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"] }
+    "architect": {
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "Edit",
+        "Write"
+      ]
+    },
+    "implementer": {
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "Edit",
+        "Write"
+      ]
+    },
+    "implementer-light": {
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "Edit",
+        "Write"
+      ]
+    }
   }
 }

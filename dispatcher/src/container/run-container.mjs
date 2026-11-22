@@ -247,8 +247,21 @@ export function runContainerCommand({
       }
       if (stdoutFd === null) {
         stdout.push(chunk);
-      } else {
+        return;
+      }
+      try {
         writeSync(stdoutFd, chunk);
+      } catch (error) {
+        // A full disk or an I/O error is the call's refusal, a ContainerRunError (review round 1 of factory#26).
+        failure ??= new ContainerRunError(`${what}: its stdout could not be written to its file (${error.code
+          ?? error.name})`);
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // as above
+        }
+        drop();
+        finish(failure);
       }
     });
     // Up to STDERR_KEPT bytes kept, the rest counted: a call is never stopped for what it writes there.

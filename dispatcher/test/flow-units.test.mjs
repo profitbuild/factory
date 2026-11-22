@@ -221,3 +221,84 @@ test('#0-301 AC6: expectations whose tools are not an agent\'s frontmatter\'s, o
         && pattern.test(error.message));
     }
   });
+
+test('#0-301 (review round 1 of factory#26, arc-5c1e and 9): git failing, a queue file the base lacks, and a queue of '
+  + 'another kind each stop the item in its stage through stopItem', async (t) => {
+  const state = await makeStateDir();
+  t.after(state.remove);
+  const { execFileSync } = await import('node:child_process');
+  // A bare clone of one commit, as FACTORY_REPO_DIR is.
+  const work = join(state.dir, 'work');
+  const repoDir = join(state.dir, 'repo.git');
+  const run = (args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
+  run(['init', '-q', '-b', 'main', work]);
+  await writeFile(join(work, 'README.md'), '# r\n');
+  run(['-C', work, 'add', '.']);
+  run(['-C', work, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '-m', 'x']);
+  run(['clone', '-q', '--bare', work, repoDir]);
+  const head = run(['-C', repoDir, 'rev-parse', 'HEAD']);
+  const failing = join(state.dir, 'git');
+  // base-tree.mjs names git's first lines of stderr, as before #0-301: git's, of the dispatcher's own clone.
+  await writeFile(failing, '#!/bin/sh\nexit 128\n', { mode: 0o700 });
+  const kind = { kind: 'backlog-md', files: ['README.md'] };
+  const cases = [
+    [{ queue: kind }, failing, /^item: git ls-tree of the base failed \(exit 128\)/],
+    [{ queue: { ...kind, files: ['no-such-queue.md'] } }, undefined, /^item: .*no-such-queue\.md/],
+    [{ queue: { ...kind, kind: 'linear' } }, undefined,
+      /^item: the adapter's queue is not of the kind backlog-md, the one the dispatcher reads$/],
+  ];
+  for (const [i, [adapter, git, reason]] of cases.entries()) {
+    const task = await createTask(state.dir, { runId: `20261122T14000${i}Z-0e0301`, item: '0-1', baseSha: head });
+    const left = await runPhases(state.dir, task, buildPhases({ stateDir: state.dir, repoDir,
+      adapter, container: null, carried: null, expectations: null, git }));
+    assert.equal(left.status, 'blocked', `case ${i}`);
+    assert.match(left.reason, reason);
+  }
+  const { state: breaker } = await openBreaker(state.dir);
+  assert.deepEqual(breaker.history.map((h) => h.stage), ['item', 'item', 'item']);
+});
+
+test('#0-301 (review round 1 of factory#26, 8): the agents of task.schema.json, CALL_LIMIT_S and ANSWER_SCHEMAS are '
+  + 'agents.mjs\'s AGENTS', async () => {
+  const { CALL_LIMIT_S } = await import('../src/flow/call.mjs');
+  const task = JSON.parse(await readFile(new URL('dispatcher/src/state/task.schema.json', ROOT), 'utf8'));
+  const sorted = (list) => [...list].sort();
+  assert.deepEqual(sorted(task.properties.calls.items.properties.agent.enum), sorted(AGENTS));
+  assert.deepEqual(sorted(Object.keys(CALL_LIMIT_S)), sorted(AGENTS));
+  assert.deepEqual(sorted(Object.keys(ANSWER_SCHEMAS)), sorted(AGENTS));
+});
+
+test('#0-301 (review round 1 of factory#26, 4): an answer\'s commitMessage is a subject of one line of at most 100, '
+  + 'a blank line and a body, printable, with no line of the dispatcher\'s trailers', async () => {
+  for (const agent of ['architect', 'implementer']) {
+    const { schema } = await readAnswerSchema(agent);
+    const { ARCHITECT_ANSWER, IMPLEMENTER_ANSWER } = await import('../testing/stream-json.mjs');
+    const example = agent === 'architect' ? ARCHITECT_ANSWER : IMPLEMENTER_ANSWER;
+    const ok = (value) => answerErrors(schema, { ...example, commitMessage: value }).length === 0;
+    assert.ok(schema.properties.commitMessage, agent);
+    for (const value of [null, 'feat(x): a thing', 'feat(x): a thing\n\nWhy, and how.\nMore.', 'x'.repeat(100),
+      'fix: y\n\nThe Task: in a sentence is fine', `fix: y\n\n${'b'.repeat(7000)}`]) {
+      assert.ok(ok(value), `${agent}: ${JSON.stringify(value).slice(0, 40)}`);
+    }
+    for (const value of ['', 'x'.repeat(101), 'a\nb', 'a\n\nb\tc', 'a\r\n\r\nb', 'a\n\nb\u0007', 'Task: x',
+      'a\n\nFactory-Run-Id: 1', 'a\n\nbody\nFeature: y', 'a\n\nTask: 0-1', `a\n\n${'b'.repeat(8000)}`]) {
+      assert.ok(!ok(value), `${agent}: ${JSON.stringify(value).slice(0, 40)}`);
+    }
+  }
+});
+
+test('#0-301 (review round 1 of factory#26, arc-5c1e): GitHub out of reach in a phase blocks the task through '
+  + 'stopItem, counted in the breaker with its stage', async (t) => {
+  const { GitHubUnavailableError } = await import('../src/github/retry.mjs');
+  const state = await makeStateDir();
+  t.after(state.remove);
+  const task = await createTask(state.dir, { runId: '20261122T160000Z-100301', item: '0-1' });
+  const left = await runPhases(state.dir, task, [{ name: 'ship', run: async () => {
+    throw new GitHubUnavailableError('GitHub did not answer: ten transient failures in a row');
+  } }]);
+  assert.equal(left.status, 'blocked');
+  assert.equal(left.reason, 'ship: GitHub did not answer: ten transient failures in a row');
+  const { state: breaker } = await openBreaker(state.dir);
+  assert.deepEqual(breaker.history.map((h) => h.stage), ['ship']);
+  assert.equal(breaker.consecutiveBlocked, 1);
+});

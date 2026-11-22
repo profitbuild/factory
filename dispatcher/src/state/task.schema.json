@@ -3,156 +3,41 @@
   "title": "A task's state, $FACTORY_STATE_DIR/tasks/<runId>/task.json",
   "description": "The dispatcher's own (incident-platform backlog #0-275), not a product's: phase is the last phase completed (null before the first); a restart resumes at the phase after it. No field holds a time, so a phase run twice writes the same file. imageId is the task image's ID, once built (#0-277): every container of the task runs from it. calls are the agent calls of the task (incident-platform backlog #0-301), each recorded before it starts, so that a killed call counts in MAX_AGENT_CALLS too; agentText holds the agent's words the record keeps (commitMessage, for #0-302), labelled so, never read for a decision; fixes counts the test gate's fix-tests calls.",
   "type": "object",
-  "required": [
-    "version",
-    "runId",
-    "item",
-    "branch",
-    "baseSha",
-    "phase",
-    "round",
-    "calls",
-    "status",
-    "reason",
-    "pr",
-    "imageId"
-  ],
+  "required": ["version", "runId", "item", "branch", "baseSha", "phase", "round", "calls", "status", "reason", "pr",
+    "imageId"],
   "additionalProperties": false,
   "properties": {
-    "version": {
-      "const": 1
-    },
-    "runId": {
-      "type": "string",
-      "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$"
-    },
-    "item": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "pattern": "^[0-9]+-[0-9]+$"
-    },
-    "branch": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "minLength": 1
-    },
-    "baseSha": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "pattern": "^[0-9a-f]{40}$"
-    },
-    "phase": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "minLength": 1
-    },
-    "round": {
-      "type": "integer",
-      "minimum": 0
-    },
+    "version": { "const": 1 },
+    "runId": { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$" },
+    "item": { "type": ["string", "null"], "pattern": "^[0-9]+-[0-9]+$" },
+    "branch": { "type": ["string", "null"], "minLength": 1 },
+    "baseSha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+    "phase": { "type": ["string", "null"], "minLength": 1 },
+    "round": { "type": "integer", "minimum": 0 },
     "calls": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "n",
-          "agent",
-          "mode",
-          "outcome"
-        ],
+        "required": ["n", "agent", "mode", "outcome"],
         "additionalProperties": false,
         "properties": {
-          "n": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "agent": {
-            "enum": [
-              "architect",
-              "implementer",
-              "implementer-light"
-            ]
-          },
-          "mode": {
-            "enum": [
-              "plan",
-              "implement",
-              "fix-tests",
-              "fix-review"
-            ]
-          },
-          "outcome": {
-            "enum": [
-              "started",
-              "answered",
-              "failed"
-            ]
-          },
-          "file": {
-            "type": "string",
-            "minLength": 1
-          },
-          "answerFile": {
-            "type": "string",
-            "minLength": 1
-          },
+          "n": { "type": "integer", "minimum": 1 },
+          "agent": { "enum": ["architect", "implementer", "implementer-light"] },
+          "mode": { "enum": ["plan", "implement", "fix-tests", "fix-review"] },
+          "outcome": { "enum": ["started", "answered", "failed"] },
+          "file": { "type": "string", "minLength": 1 },
+          "answerFile": { "type": "string", "minLength": 1 },
           "agentText": {
-            "type": "object",
-            "required": [
-              "commitMessage"
-            ],
-            "additionalProperties": false,
-            "properties": {
-              "commitMessage": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "maxLength": 8000
-              }
-            }
+            "type": "object", "required": ["commitMessage"], "additionalProperties": false,
+            "properties": { "commitMessage": { "type": ["string", "null"], "maxLength": 8000 } }
           }
         }
       }
     },
-    "status": {
-      "enum": [
-        "running",
-        "blocked",
-        "stopped",
-        "shipped"
-      ]
-    },
-    "reason": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "pr": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "imageId": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "pattern": "^sha256:[0-9a-f]{64}$"
-    },
-    "fixes": {
-      "type": "integer",
-      "minimum": 0
-    }
+    "status": { "enum": ["running", "blocked", "stopped", "shipped"] },
+    "reason": { "type": ["string", "null"] },
+    "pr": { "type": ["string", "null"] },
+    "imageId": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
+    "fixes": { "type": "integer", "minimum": 0 }
   }
 }

@@ -16,12 +16,13 @@ export class ExpectationsError extends Error {}
 
 const SCHEMA = {
   type: 'object',
-  required: ['claudeCodeVersion', 'builtinPlugins', 'agents'],
+  required: ['claudeCodeVersion', 'builtinPlugins', 'builtinAgents', 'agents'],
   additionalProperties: false,
   properties: {
     $comment: { type: 'string' },
     claudeCodeVersion: { type: 'string', pattern: '^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$' },
     builtinPlugins: { type: 'array', items: { type: 'string', pattern: '^[a-z0-9-]+$' }, uniqueItems: true },
+    builtinAgents: { type: 'array', items: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9-]*$' }, uniqueItems: true },
     agents: {
       type: 'object',
       required: AGENTS,
@@ -39,7 +40,7 @@ const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
 
 /**
  * @param {{ root?: URL }} [options] for the tests only
- * @returns {Promise<{ claudeCodeVersion: string, builtinPlugins: string[],
+ * @returns {Promise<{ claudeCodeVersion: string, builtinPlugins: string[], builtinAgents: string[],
  *   agents: Record<string, { tools: string[] }> }>}
  */
 export async function readExpectations({ root = FACTORY_ROOT } = {}) {

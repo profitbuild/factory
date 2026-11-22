@@ -24,7 +24,7 @@ import { FACTORY_MOUNT, WORKSPACE } from '../container/paths.mjs';
 import { CallTimeoutError, execInTask } from '../container/task-container.mjs';
 import { ensureOwnDirectory } from '../state/files.mjs';
 import { answerErrors, readAnswerSchema } from './answers.mjs';
-import { readAgent } from './agents.mjs';
+import { AGENTS, readAgent } from './agents.mjs';
 import { StreamError, readStream } from './stream.mjs';
 
 /** Claude Code in the task image, by its full path (ADR-0065). */
@@ -82,8 +82,10 @@ const sameSet = (a, b) => Array.isArray(a) && a.length === b.length && new Set(a
  * field keeps it. A field of the event not here is not read; one here that is missing breaks its rule.
  */
 export const INIT_CHECKS = Object.freeze({
-  agents: (v, { agent }) => Array.isArray(v) && v.includes(`factory:${agent.name}`)
-    && v.every((a) => typeof a === 'string' && (!a.includes(':') || a.startsWith('factory:'))),
+  // factory:<agent> there, and every other one either a factory agent or a builtin of expectations.json's closed list
+  // (review round 1 of factory#26, 6).
+  agents: (v, { agent, expectations }) => Array.isArray(v) && v.includes(`factory:${agent.name}`)
+    && v.every((a) => AGENTS.some((name) => a === `factory:${name}`) || expectations.builtinAgents.includes(a)),
   plugins: (v, { expectations }) => Array.isArray(v) && v.every(isObject)
     && v.filter((p) => p.path !== 'builtin').length === 1
     && v.some((p) => p.name === 'factory' && p.path === FACTORY_MOUNT && p.source === 'factory@inline')
@@ -106,19 +108,18 @@ export function initViolations(init, context) {
  * One call, read to its answer, or a CallError (CallTimeoutError past its limit).
  *
  * @param {{ container: object, task: object, n: number, agentName: string, prompt: string, carried: object,
- *   expectations: object, stateDir: string, sudo?: string, root?: URL, limitS?: number }} options `n` the call's
- *   number in the task; `root` for the tests only
+ *   expectations: object, stateDir: string, sudo?: string }} options `n` the call's number in the task
  * @returns {Promise<{ answer: object, file: string, answerFile: string }>}
  */
 export async function callAgent({
-  container, task, n, agentName, prompt, carried, expectations, stateDir, sudo, root, limitS,
+  container, task, n, agentName, prompt, carried, expectations, stateDir, sudo,
 }) {
-  const agent = await readAgent(agentName, { root });
-  const { schema, text: schemaText } = await readAnswerSchema(agentName, { root });
+  const agent = await readAgent(agentName);
+  const { schema, text: schemaText } = await readAnswerSchema(agentName);
   const dir = join(stateDir, 'tasks', task.runId, 'calls');
   await ensureOwnDirectory(dir);
   const file = join(dir, `${n}-${agentName}.jsonl`);
-  const result = await execInTask({ container, sudo, limitS: limitS ?? CALL_LIMIT_S[agentName], graceS: 30,
+  const result = await execInTask({ container, sudo, limitS: CALL_LIMIT_S[agentName], graceS: 30,
     input: prompt, outputLimit: STREAM_LIMIT, stdoutFile: file, args: callArgs({ agent, schemaText, carried }) });
   let stream;
   try {
@@ -132,6 +133,10 @@ export async function callAgent({
   const violations = initViolations(stream.init, { agent, expectations });
   if (violations.length > 0) {
     throw new CallError(`the call's init event is not the one expected: ${violations.join(', ')} (${file})`);
+  }
+  // An exit other than 0 is a stop, whatever the result says (review round 1 of factory#26, 7).
+  if (result.code !== 0) {
+    throw new CallError(`the call exited ${result.code} (${file})`);
   }
   const { result: end } = stream;
   if (end.subtype !== 'success' || end.is_error !== false) {
