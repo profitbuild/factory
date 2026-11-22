@@ -38,9 +38,12 @@ RUN for g in sudo admin; do if id -nG node | tr ' ' '\n' | grep -qx "$g"; then g
 # /usr/local/bin (incident-platform backlog #0-311, ADR-0065; its #0-249 and #0-283 for its own image). It was
 # `curl -fsSL https://claude.ai/install.sh | bash` as `node`: whatever version was newest the day the image was built,
 # into `node`'s ~/.local, where code a session ran could replace the binary. claude-code.pin, install-claude-code.sh
-# and keys/ are incident-platform's files, byte for byte (its check-factory-copies.rb compares them, ADR-0061). The
-# build fetches from downloads.claude.ai, with no firewall yet; the running container never does. Before the scripts'
-# layer below, so a change there does not download the binary again.
+# and keys/ are incident-platform's files, byte for byte (ADR-0061). incident-platform does not compare them yet: its
+# check-factory-copies.rb gains them in its part of #0-311 (AC3), after this one is merged. They need a list of their
+# own there, compared byte for byte, both ways: that check's copy mode wants a NOTICE paragraph in the copy, which a
+# copy byte for byte, the key's .asc among them, cannot hold. Until then their equality was checked by hand (the
+# SHA-256 and git blob of each, in factory#27). The build fetches from downloads.claude.ai, with no firewall yet; the
+# running container never does. Before the scripts' layer below, so a change there does not download the binary again.
 COPY claude-code.pin install-claude-code.sh /usr/local/share/claude-code/
 COPY keys/ /usr/local/share/claude-code/keys/
 RUN /usr/local/share/claude-code/install-claude-code.sh --pin /usr/local/share/claude-code/claude-code.pin \
@@ -66,8 +69,12 @@ WORKDIR /home/node
 
 # Claude Code updates nothing in the container: DISABLE_AUTOUPDATER stops the background check only, and
 # `claude update` or `claude install` would still lay a newer version out under ~/.local; DISABLE_UPDATES blocks every
-# path (Claude Code's setup documentation). ~/.local/bin is not put on PATH: the installed binary is
-# /usr/local/bin/claude (above), and a `claude` a session left in ~/.local/bin must not shadow it. A bump is a change
-# to claude-code.pin, made in incident-platform and copied here, then a rebuild.
+# path (Claude Code's setup documentation). The installed binary is root's, /usr/local/bin/claude (above), and the
+# image puts no ~/.local/bin before it on PATH. A login shell still can: Debian's /etc/skel/.profile, `node`'s
+# ~/.profile here, puts ~/bin and ~/.local/bin first when they exist, and `node` owns its home, so a session can leave
+# a `claude` there (or a PATH line in ~/.bashrc) that the owner's login shell in this container runs instead. That
+# residual is ADR-0065's, named there; the call that is certain is /usr/local/bin/claude by its full path, and
+# `which -a claude` shows any other (the owner's check after a rebuild). A bump is a change to claude-code.pin, made
+# in incident-platform and copied here, then a rebuild.
 ENV DISABLE_AUTOUPDATER=1 \
     DISABLE_UPDATES=1
