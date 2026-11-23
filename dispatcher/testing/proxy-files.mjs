@@ -1,7 +1,9 @@
 // Not a test file. What a test's run needs of the credential proxy (incident-platform backlog #0-313), in a directory
 // of the test's own: Claude's key (a marker, made at run time so no key-shaped literal is in the repository), the
 // proxy's configuration as provision.sh writes it (ADDR a non-loopback IPv4 of this host, PORTS a few random ports
-// below the ephemeral range, so tests side by side seldom meet), and the fresh-VM marker as create.sh writes it. Each
+// below the ephemeral range, so tests side by side seldom meet), a route table whose default route leaves by an
+// interface this host has not (on the VM, ADDR is a dummy interface's and the default route another's; the test's
+// ADDR is the host's one non-loopback address, its own default route's), and the fresh-VM marker create.sh writes. Each
 // file is the test's user's, 600 or 644; `proxyTesting` names them and that owner for the run (a test's only, kept
 // from src/ by test-only-options-scan.mjs).
 import { randomBytes, randomInt } from 'node:crypto';
@@ -9,7 +11,7 @@ import { writeFile } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 
-/** A non-loopback IPv4 of this host: where the test's proxy listens, as the VM's address would be. */
+/** A non-loopback IPv4 of this host: where the test's proxy listens, as the dummy interface's would be on the VM. */
 export function localAddress() {
   const found = Object.values(networkInterfaces()).flat()
     .find((entry) => entry?.family === 'IPv4' && !entry.internal && !entry.address.startsWith('169.254.'));
@@ -18,6 +20,12 @@ export function localAddress() {
   }
   return found.address;
 }
+
+/** /proc/net/route's text, its default route leaving by `iface`. */
+export const routeTable = (iface) => 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU'
+  + '\tWindow\tIRTT\n'
+  + `${iface}\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n`
+  + `${iface}\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n`;
 
 /** A key of Anthropic's form that no one holds: what AC2's tests look for everywhere. */
 export const keyMarker = () => `sk-ant-api03-${randomBytes(24).toString('hex')}-MARKER`;
@@ -41,11 +49,13 @@ export async function makeProxyFiles(dir, { upstream, ports = testPorts(), addr 
   const keyPath = join(dir, 'claude.key');
   const conf = join(dir, 'factory-proxy.conf');
   const freshVm = join(dir, 'factory-fresh-vm');
+  const routes = join(dir, 'route');
   await writeFile(keyPath, `${key}\n`, { mode: 0o600 });
   await writeFile(conf, `ADDR=${addr}\nPORTS=${ports.join(',')}\n`, { mode: 0o644 });
   await writeFile(freshVm, `${randomBytes(16).toString('hex')}\n`, { mode: 0o644 });
+  await writeFile(routes, routeTable('nonexistent0'));
   return {
-    key, keyPath, conf, freshVm, addr, ports,
-    proxyTesting: { conf, freshVm, owner: process.getuid(), upstream },
+    key, keyPath, conf, freshVm, routes, addr, ports,
+    proxyTesting: { conf, freshVm, owner: process.getuid(), upstream, routes },
   };
 }

@@ -221,10 +221,10 @@ The proxy writes it under the state's lock, at most once a second, and once more
 
 **`/etc/factory-proxy.conf`** (`proxy/conf.mjs`), written by incident-platform's `provision.sh` at every boot, `root:root` 0644:
 
-    ADDR=<the VM's address: the same one it gives the daemon as host-gateway-ip>
+    ADDR=<the address of the dummy interface provision.sh sets up for the proxy>
     PORTS=8770
 
-`ADDR` must be an IPv4 literal of a local interface, neither `0.0.0.0` nor of `127.0.0.0/8`. `PORTS` (one port per slot, comma-separated) must lie in 1024–65535, outside the ephemeral range 32768–60999, with no port twice. The file must be root's and writable by no one else. A refusal names the file and the field, never a value. The address comes from this file alone, so it is never worked out a second time in Node. `provision.sh` also drops the ports from any device but `lo` (the proxy is unreachable from outside the VM), and lets `factory`'s containers reach them through `FACTORY-EGRESS`.
+The proxy has an address of its own, on a dummy interface (the owner's measurement on the VM). `ADDR` must be an IPv4 literal of a local interface, neither a wildcard nor of `127.0.0.0/8`, and not the address of an interface a default route leaves by (read from `/proc/net/route`): that is the VM's own address, which in a cloud its network sees. A route table that cannot be read refuses the run too. `PORTS` (one port per slot, comma-separated) must lie in 1024–65535, outside the ephemeral range 32768–60999, with no port twice. The file must be root's and writable by no one else. A refusal names the file and the field, never a value. The address comes from this file alone: the dispatcher works out no address of the VM's. `provision.sh` also drops the ports from any device but `lo` (the proxy is unreachable from outside the VM), and lets `factory`'s containers reach them through `FACTORY-EGRESS`.
 
 **The fresh VM** (`proxy/fresh-vm.mjs`, #0-313 AC6): until #0-285, a run that holds a token runs only on a VM made anew that has run nothing before.
 - incident-platform's `create.sh` writes `/etc/factory-fresh-vm` as root once provisioning has finished: `root:root` 0644, one line of 32 hex. `provision.sh` never writes it.

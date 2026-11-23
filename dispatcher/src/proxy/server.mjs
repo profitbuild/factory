@@ -8,8 +8,9 @@
  * lives. In M5 each slot's run has its own, on the next free port of /etc/factory-proxy.conf (conf.mjs), and knows no
  * token but its own.
  *
- * - It listens on ADDR:<port> alone (conf.mjs): the VM's address, the containers' host-gateway, never 0.0.0.0 or the
- *   loopback (#0-313 AC5); the VM's filter keeps the port unreachable from outside (provision.sh).
+ * - It listens on ADDR:<port> alone (conf.mjs): the proxy's own address, on the dummy interface provision.sh sets up,
+ *   never a wildcard, the loopback or the VM's own (#0-313 AC5); the VM's filter keeps the port unreachable from
+ *   outside (provision.sh).
  * - The token: 32 random bytes (base64url), made when the proxy starts, valid once `activate()` is called (the task's
  *   container checked, its token file written) and until `revoke()` (the run's phases over, in a finally). A request
  *   carries it in x-api-key or `Authorization: Bearer` (Claude Code sends both, #0-313's measurement 1); both present

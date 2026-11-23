@@ -7,15 +7,18 @@ import assert from 'node:assert/strict';
 import { chmod, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { EPHEMERAL, ProxyConfError, parseProxyConf, readProxyConf } from '../src/proxy/conf.mjs';
+import {
+  EPHEMERAL, ProxyConfError, defaultRouteInterfaces, parseProxyConf, readProxyConf,
+} from '../src/proxy/conf.mjs';
 import { ClaudeKeyError, DEFAULT_CLAUDE_KEY, readClaudeEnv, readClaudeKey } from '../src/proxy/key.mjs';
 import { FreshVmError, consumeFreshVm, consumedPath, readFreshVmMarker } from '../src/proxy/fresh-vm.mjs';
-import { keyMarker, localAddress } from '../testing/proxy-files.mjs';
+import { keyMarker, localAddress, routeTable } from '../testing/proxy-files.mjs';
 import { makeStateDir } from '../testing/state-dir.mjs';
 
 const ADDR = localAddress();
 const local = () => [ADDR, '127.0.0.1'];
-const parse = (text) => parseProxyConf(text, { path: '/etc/factory-proxy.conf', local });
+const parse = (text, routed = ['10.0.2.15']) => parseProxyConf(text, { path: '/etc/factory-proxy.conf', local,
+  routed });
 
 test('#0-313 (A): the proxy\'s configuration is ADDR and PORTS: a local, non-loopback IPv4 and ports outside the '
   + 'ephemeral range; anything else is refused by file and field, never by value', () => {
@@ -29,6 +32,7 @@ test('#0-313 (A): the proxy\'s configuration is ADDR and PORTS: a local, non-loo
     ['ADDR=203.0.113.77\nPORTS=8770\n', /ADDR is the address of no interface of this host/],
     ['ADDR=10.0.0.256\nPORTS=8770\n', /ADDR is not an IPv4 literal/],
     ['ADDR=fe80::1\nPORTS=8770\n', /ADDR is not an IPv4 literal/],
+    ['ADDR=::\nPORTS=8770\n', /ADDR is not an IPv4 literal/],
     ['ADDR=proxy.invalid\nPORTS=8770\n', /ADDR is not an IPv4 literal/],
     [`ADDR=${ADDR} \nPORTS=8770\n`, /ADDR is not an IPv4 literal/],
     [`ADDR=${ADDR}\n`, /PORTS is missing/],
@@ -58,6 +62,43 @@ test('#0-313 (A): the proxy\'s configuration is ADDR and PORTS: a local, non-loo
     });
   }
   assert.deepEqual(parse(`ADDR=${ADDR}\nPORTS=60001\n`.replace('60001', '61000')), { addr: ADDR, ports: [61000] });
+  // The VM's own address, a default route's interface's (the owner's answer, 2026-11-23); and a table not read.
+  for (const routed of [[ADDR], ['10.0.2.15', ADDR], null]) {
+    assert.throws(() => parse(`ADDR=${ADDR}\nPORTS=8770\n`, routed), (error) => error instanceof ProxyConfError
+      && /^\/etc\/factory-proxy\.conf: ADDR is the address of an interface a default route leaves by, not one of the /
+        .test(error.message) && !error.message.includes(ADDR));
+  }
+});
+
+test('#0-313 (the owner\'s answer, 2026-11-23): the interfaces a default route leaves by come from /proc/net/route; '
+  + 'ADDR on one of them, or a table that cannot be read, refuses the run', async (t) => {
+  assert.deepEqual(defaultRouteInterfaces(routeTable('eth0')), ['eth0']);
+  assert.deepEqual(defaultRouteInterfaces(`${routeTable('eth0')}${routeTable('wg0').split('\n').slice(1).join('\n')}`),
+    ['eth0', 'wg0']);
+  assert.deepEqual(defaultRouteInterfaces(routeTable('eth0').split('\n').filter((l) => !l.includes('\t00000000\t0'))
+    .join('\n')), [], 'no default route');
+  assert.equal(defaultRouteInterfaces('eth0\t00000000\n'), null, 'no header of the kernel\'s');
+  assert.equal(defaultRouteInterfaces(''), null);
+  const state = await makeStateDir();
+  t.after(state.remove);
+  const conf = join(state.dir, 'proxy.conf');
+  const routes = join(state.dir, 'route');
+  await writeFile(conf, `ADDR=${ADDR}\nPORTS=8770\n`, { mode: 0o644 });
+  const owner = process.getuid();
+  const iface = Object.entries((await import('node:os')).networkInterfaces())
+    .find(([, entries]) => entries.some((e) => e.address === ADDR))[0];
+  await writeFile(routes, routeTable(iface));
+  await assert.rejects(readProxyConf({ proxyTesting: { conf, owner, routes } }),
+    /ADDR is the address of an interface a default route leaves by/);
+  // This host's own table, as the VM's would be read: ADDR (the host's address) is its default route's.
+  await assert.rejects(readProxyConf({ proxyTesting: { conf, owner } }),
+    /ADDR is the address of an interface a default route leaves by|ADDR is the address of no interface/);
+  await writeFile(routes, routeTable('nonexistent0'));
+  assert.deepEqual(await readProxyConf({ proxyTesting: { conf, owner, routes } }), { addr: ADDR, ports: [8770] });
+  for (const bad of [join(state.dir, 'none'), conf]) {
+    await assert.rejects(readProxyConf({ proxyTesting: { conf, owner, routes: bad } }),
+      /^Error: \S+: ADDR cannot be checked: the route table \/proc\/net\/route cannot be read/);
+  }
 });
 
 test('#0-313 (A): the file must be root\'s and writable by no one else, no link; missing, it refuses the run',
@@ -67,7 +108,9 @@ test('#0-313 (A): the file must be root\'s and writable by no one else, no link;
     const conf = join(state.dir, 'proxy.conf');
     await writeFile(conf, `ADDR=${ADDR}\nPORTS=8770\n`, { mode: 0o644 });
     const owner = process.getuid();
-    assert.deepEqual(await readProxyConf({ proxyTesting: { conf, owner } }), { addr: ADDR, ports: [8770] });
+    const routes = join(state.dir, 'route');
+    await writeFile(routes, routeTable('nonexistent0'));
+    assert.deepEqual(await readProxyConf({ proxyTesting: { conf, owner, routes } }), { addr: ADDR, ports: [8770] });
     await assert.rejects(readProxyConf({ proxyTesting: { conf, owner: owner + 1 } }),
       /is owned by uid \d+, not by this process's/);
     await assert.rejects(readProxyConf({ proxyTesting: { conf } }), /is owned by uid \d+, not by this process's \(0\)/,
