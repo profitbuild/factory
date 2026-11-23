@@ -342,7 +342,7 @@ export async function main(argv, {
       }
       return sweepForRun({ runId, helperImage: settings.helperImage, stateDir, sudo,
         othersLive: await liveTasks(stateDir, { except: runId }) });
-    } }, () => runTaskWithProxy({ stateDir, task, conf: proxyConf, key: claudeKey,
+    } }, () => runTaskWithProxy({ stateDir, task, conf: proxyConf, key: claudeKey, betas: expectations.anthropicBetas,
       helperImage: settings.helperImage, err, sudo, proxyTesting }, {
       setUp: () => setUpTaskContainer({ stateDir, repoDir: settings.repoDir, task, adapter,
         helperImage: settings.helperImage, sudo }),

@@ -16,13 +16,17 @@ export class ExpectationsError extends Error {}
 
 const SCHEMA = {
   type: 'object',
-  required: ['claudeCodeVersion', 'builtinPlugins', 'builtinAgents', 'agents'],
+  required: ['claudeCodeVersion', 'builtinPlugins', 'builtinAgents', 'anthropicBetas', 'agents'],
   additionalProperties: false,
   properties: {
     $comment: { type: 'string' },
     claudeCodeVersion: { type: 'string', pattern: '^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$' },
     builtinPlugins: { type: 'array', items: { type: 'string', pattern: '^[a-z0-9-]+$' }, uniqueItems: true },
     builtinAgents: { type: 'array', items: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9-]*$' }, uniqueItems: true },
+    // The anthropic-beta values Claude Code's calls send, measured on the pinned version (#0-313, review round 1 of
+    // factory#29, sec-5a7e): the proxy forwards no other.
+    anthropicBetas: { type: 'array', items: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{0,79}$' },
+      uniqueItems: true },
     agents: {
       type: 'object',
       required: AGENTS,
@@ -41,6 +45,7 @@ const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
 /**
  * @param {{ root?: URL }} [options] for the tests only
  * @returns {Promise<{ claudeCodeVersion: string, builtinPlugins: string[], builtinAgents: string[],
+ *   anthropicBetas: string[],
  *   agents: Record<string, { tools: string[] }> }>}
  */
 export async function readExpectations({ root = FACTORY_ROOT } = {}) {

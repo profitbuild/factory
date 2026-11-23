@@ -33,12 +33,15 @@ const KEY = keyMarker();
 let next = 0;
 
 /** A proxy of a run of its own, with the fake upstream, its log lines kept. */
+/** The betas a test's proxy allows: its own list, as expectations.json's would be on the VM. */
+const BETAS = Object.freeze(['b1', 'beta-allowed-2025']);
+
 async function proxyOf({ ports = testPorts(), upstream = anthropic.upstream } = {}) {
   next += 1;
   const runId = `20261122T17${String(next).padStart(4, '0')}Z-0d0313`;
   await mkdir(join(root.dir, 'tasks', runId), { recursive: true, mode: 0o700 });
   const lines = [];
-  const proxy = await startProxy({ addr: ADDR, ports, key: KEY, runId, stateDir: root.dir,
+  const proxy = await startProxy({ addr: ADDR, ports, key: KEY, betas: BETAS, runId, stateDir: root.dir,
     err: { write: (line) => lines.push(line) }, proxyTesting: { upstream } });
   after(() => proxy.close());
   return { proxy, runId, lines };
@@ -356,3 +359,108 @@ test('#0-313 AC3: the meter holds one line at most and counts a response it cann
   assert.equal(record.usage.unmetered, 3);
   assert.equal(record.usage.input_tokens, 0);
 });
+
+// The body's filter (review round 1 of factory#29, sec-5a7e). Until the owner's shape measurement on the pinned Claude
+// Code is committed as a fixture, the request that passes is one made here in a call's form: client tools with no
+// type, one custom tool, an allowed beta.
+const CLIENT_CALL = { model: 'claude-opus-5-5', max_tokens: 32000, stream: true, system: [{ type: 'text', text: 's' }],
+  messages: [{ role: 'user', content: 'TEXT-OF-THE-PROMPT' }], metadata: { user_id: 'u' },
+  tools: [{ name: 'Bash', description: 'd', input_schema: { type: 'object' } },
+    { type: 'custom', name: 'StructuredOutput', description: 'd', input_schema: { type: 'object' } }] };
+
+test('review round 1 of factory#29, sec-5a7e: only a body of client tools and the measured betas reaches upstream; '
+  + 'a server tool, an MCP connector, an unknown beta, a body that is no JSON object, or one past the limit sent '
+  + 'chunked, is 400 (413) with nothing upstream, counted by reason, logged by reason alone', async () => {
+  const { proxy, runId, lines } = await proxyOf();
+  proxy.activate();
+  const start = anthropic.requests.length;
+  const passed = await send(proxy.baseUrl, { token: proxy.token, body: JSON.stringify(CLIENT_CALL),
+    headers: { 'anthropic-beta': 'b1,beta-allowed-2025' } });
+  assert.equal(passed.status, 200);
+  assert.equal(anthropic.requests.length, start + 1);
+  assert.equal(anthropic.requests[start].body, JSON.stringify(CLIENT_CALL), 'the body as it was sent');
+  assert.equal(anthropic.requests[start].headers['content-length'],
+    String(Buffer.byteLength(JSON.stringify(CLIENT_CALL))));
+  const withTools = (...tools) => JSON.stringify({ ...CLIENT_CALL, tools });
+  const cases = [
+    ['server-tool', withTools({ type: 'web_search_20250305', name: 'web_search', max_uses: 5 })],
+    ['server-tool', withTools({ type: 'web_fetch_20250910', name: 'web_fetch' })],
+    ['server-tool', withTools(CLIENT_CALL.tools[0], { type: 'bash_20250124', name: 'bash' })],
+    ['server-tool', withTools({ type: 'TOOL-TYPE-MARKER', name: 'TOOL-NAME-MARKER' })],
+    ['server-tool', withTools({ type: null, name: 'x' })],
+    ['server-tool', withTools('a string')],
+    ['tools-not-list', JSON.stringify({ ...CLIENT_CALL, tools: { name: 'x' } })],
+    ['mcp-servers', JSON.stringify({ ...CLIENT_CALL, mcp_servers: [{ type: 'url', url: 'https://MCP-MARKER' }] })],
+    ['mcp-servers', JSON.stringify({ ...CLIENT_CALL, mcp_servers: null })],
+    ['mcp-servers', JSON.stringify({ ...CLIENT_CALL, mcp_servers: [] })],
+    ['body-not-object', '[]'],
+    ['body-not-object', 'null'],
+    ['body-not-object', '"BODY-MARKER"'],
+    ['body-not-json', '{"model":'],
+    ['body-not-json', ''],
+  ];
+  for (const [reason, body] of cases) {
+    const answer = await send(proxy.baseUrl, { token: proxy.token, body });
+    assert.equal(answer.status, 400, `${reason}: ${body.slice(0, 60)}`);
+    assert.equal(errorOf(answer).error.type, 'invalid_request_error');
+    assert.equal(answer.headers['x-should-retry'], 'false');
+  }
+  for (const beta of ['BETA-MARKER', 'b1,BETA-MARKER', 'b1,', ' , b1', 'B1']) {
+    const answer = await send(proxy.baseUrl, { token: proxy.token, body: JSON.stringify(CLIENT_CALL),
+      headers: { 'anthropic-beta': beta } });
+    assert.equal(answer.status, 400, beta);
+  }
+  // Past the limit with no content-length (chunked): refused as it comes, nothing upstream.
+  const { BODY_LIMIT: limit } = await import('../src/proxy/upstream.mjs');
+  const chunked = await new Promise((resolve) => {
+    const url = new URL(proxy.baseUrl);
+    const req = request({ host: url.hostname, port: url.port, method: 'POST', path: '/v1/messages',
+      headers: { 'x-api-key': proxy.token, 'transfer-encoding': 'chunked' } }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', () => resolve('error'));
+    const piece = Buffer.alloc(1024 * 1024, 'x');
+    let sent = 0;
+    const more = () => {
+      while (sent <= limit) {
+        sent += piece.length;
+        if (!req.write(piece)) {
+          req.once('drain', more);
+          return;
+        }
+      }
+      req.end();
+    };
+    more();
+  });
+  assert.ok(chunked === 413 || chunked === 'error', String(chunked));
+  assert.equal(anthropic.requests.length, start + 1, 'nothing refused reached upstream');
+  await proxy.close();
+  const record = await readProxyRecord(root.dir, runId);
+  assert.deepEqual(record.refused, { 'server-tool': 6, 'tools-not-list': 1, 'mcp-servers': 3, 'body-not-object': 3,
+    'body-not-json': 2, beta: 5, ...(chunked === 413 ? { 'body-too-large': 1 } : {}) });
+  assert.equal(record.forwarded, 1);
+  const logged = lines.join('');
+  for (const marker of ['MARKER', 'web_search', 'web_fetch', 'bash_2025', 'TEXT-OF-THE-PROMPT', 'b1']) {
+    assert.ok(!logged.includes(marker), `the log names no ${marker}`);
+  }
+  assert.ok(!JSON.stringify(record).includes('MARKER'), 'nor the record');
+});
+
+test('review round 1 of factory#29, sec-5a7e: the filter\'s rules one by one, and the betas a proxy must be given',
+  async () => {
+    const { requestRefusal, FILTER_REASONS } = await import('../src/proxy/request-filter.mjs');
+    const check = (body, beta, betas = BETAS) => requestRefusal({ body: Buffer.from(body), beta, betas });
+    assert.equal(check(JSON.stringify(CLIENT_CALL), undefined), null);
+    assert.equal(check(JSON.stringify(CLIENT_CALL), 'b1'), null);
+    assert.equal(check(JSON.stringify(CLIENT_CALL), ['b1', 'beta-allowed-2025']), null, 'a repeated header');
+    assert.equal(check(JSON.stringify(CLIENT_CALL), 'b1', []), 'beta', 'an empty list allows no beta');
+    assert.equal(check(JSON.stringify({ model: 'm' }), undefined), null, 'no tools at all');
+    assert.equal(check(JSON.stringify({ tools: [] }), undefined), null);
+    assert.equal(check(JSON.stringify({ tools: [{ type: 'custom', name: 'x' }] }), undefined), null);
+    assert.deepEqual(FILTER_REASONS, ['body-not-json', 'body-not-object', 'mcp-servers', 'tools-not-list',
+      'server-tool', 'beta']);
+    await assert.rejects(startProxy({ addr: ADDR, ports: testPorts(), key: KEY, runId: '20261123T100000Z-0d0313',
+      stateDir: root.dir, err: { write() {} } }), TypeError);
+  });

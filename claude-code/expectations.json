@@ -1,5 +1,5 @@
 {
-  "$comment": "What an agent call of the dispatcher's must show in its init event on the pinned Claude Code (incident-platform backlog #0-301, ADR-0064 points 3 and 5, ADR-0065): the version, the builtin plugins and the builtin agents measured on it (F3, managed settings, 2026-11-22; the spike of #0-300 for the agents, web-fetch listed in some of its calls), and each agent's tools. Both builtin lists are measured with the whole of callEnv's variables (dispatcher/src/flow/call.mjs), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 among them; the first call on the VM (#0-301 AC4) records those of its init event, and lists that differ are corrected before any run (until then a run stops at the init check, as it should). claudeCodeVersion is the one value incident-platform's check-factory-copies.rb compares with its .devcontainer/claude-code.pin (#0-301 AC6): MAJOR.MINOR.PATCH, no v. Read by dispatcher/src/flow/expectations.mjs, checked by dispatcher/test/flow-units.test.mjs.",
+  "$comment": "What an agent call of the dispatcher's must show in its init event on the pinned Claude Code (incident-platform backlog #0-301, ADR-0064 points 3 and 5, ADR-0065): the version, the builtin plugins and the builtin agents measured on it (F3, managed settings, 2026-11-22; the spike of #0-300 for the agents, web-fetch listed in some of its calls), and each agent's tools. Both builtin lists are measured with the whole of callEnv's variables (dispatcher/src/flow/call.mjs), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 among them; the first call on the VM (#0-301 AC4) records those of its init event, and lists that differ are corrected before any run (until then a run stops at the init check, as it should). claudeCodeVersion is the one value incident-platform's check-factory-copies.rb compares with its .devcontainer/claude-code.pin (#0-301 AC6): MAJOR.MINOR.PATCH, no v. Read by dispatcher/src/flow/expectations.mjs, checked by dispatcher/test/flow-units.test.mjs. anthropicBetas: the anthropic-beta values Claude Code's calls send on the pinned version, the only ones dispatcher/src/proxy/request-filter.mjs forwards (#0-313, review round 1 of factory#29, sec-5a7e); empty until the owner's shape measurement is recorded, so until then a call with any beta is refused.",
   "claudeCodeVersion": "2.1.328",
   "builtinPlugins": [
     "cc-plugin-sec-default",
@@ -16,6 +16,7 @@
     "statusline-setup",
     "web-fetch"
   ],
+  "anthropicBetas": [],
   "agents": {
     "architect": {
       "tools": [

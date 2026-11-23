@@ -22,14 +22,15 @@ import { FreshVmError, consumeFreshVm } from './fresh-vm.mjs';
 import { ProxyError, startProxy } from './server.mjs';
 
 /**
- * @param {{ stateDir: string, task: object, conf: { addr: string, ports: number[] }, key: string,
+ * @param {{ stateDir: string, task: object, conf: { addr: string, ports: number[] }, key: string, betas: string[],
  *   helperImage: string, err: { write: (line: string) => void }, sudo?: string, proxyTesting?: object }} options
  * @param {{ setUp: () => Promise<{ task: object, container: object | null }>,
  *   run: (ready: object, baseUrl: string) => Promise<object> }} steps `setUp` the task's container (step 3), `run`
  *   its phases (step 6)
  * @returns {Promise<object>} the task as it was left
  */
-export async function runTaskWithProxy({ stateDir, task, conf, key, helperImage, err, sudo, proxyTesting }, { setUp,
+export async function runTaskWithProxy({ stateDir, task, conf, key, betas, helperImage, err, sudo, proxyTesting }, {
+  setUp,
   run }) {
   const { runId } = task;
   try {
@@ -46,7 +47,7 @@ export async function runTaskWithProxy({ stateDir, task, conf, key, helperImage,
   }
   let proxy;
   try {
-    proxy = await startProxy({ addr: conf.addr, ports: conf.ports, key, runId, stateDir, err, proxyTesting });
+    proxy = await startProxy({ addr: conf.addr, ports: conf.ports, key, betas, runId, stateDir, err, proxyTesting });
   } catch (error) {
     if (error instanceof ProxyError) {
       return stopItem(stateDir, ready.task, { stage: 'proxy', reason: error.message });

@@ -12,13 +12,17 @@
  *   the hop-by-hop ones', which are dropped by rule). The list is a guess until AC4 compares it with a call that
  *   answered (review of #0-313's plan, E).
  * - Response headers: those of RESPONSE_HEADERS and anthropic-ratelimit-*; `set-cookie` and every other is dropped.
- * - The body is streamed both ways (pipe, and each response chunk written as it comes, with backpressure): neither is
- *   read whole, logged or held; the request's is counted to BODY_LIMIT, past which the request is ended.
+ * - The request's body is held to BODY_LIMIT and checked before anything goes upstream (request-filter.mjs: review
+ *   round 1 of factory#29, sec-5a7e, which reverses #0-313's first rule "the body is never read"); it is read only for
+ *   that check, never logged, written or kept after the request. The response is streamed, each chunk written as it
+ *   comes, with backpressure: never held.
  * - Timeouts: CONNECT_MS to a socket, HEADERS_MS to the response's headers, IDLE_MS with no byte of the stream
  *   (Anthropic sends a ping event within that). A client that closes ends the upstream request with it.
  */
 import { request as httpRequest } from 'node:http';
 import { Agent, request as httpsRequest } from 'node:https';
+
+import { readBody, requestRefusal } from './request-filter.mjs';
 
 /** Anthropic's API: the one target (#0-313). */
 export const UPSTREAM = Object.freeze({ protocol: 'https:', hostname: 'api.anthropic.com', port: 443 });
@@ -84,20 +88,36 @@ export function upstreamAgent(upstream) {
  * Forwards one request (`req`, `res`: the client's) to `upstream`, streaming both ways.
  *
  * @param {{ req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, path: string,
- *   key: string, upstream: object, agent?: object, onResponse: (status: number, headers: object) => void,
+ *   key: string, betas: readonly string[], upstream: object, agent?: object,
+ *   onResponse: (status: number, headers: object) => void,
  *   onChunk: (chunk: Buffer) => void, onDropped: (names: string[]) => void,
  *   refuse: (status: number, type: string, message: string, reason: string) => void }} options `refuse` answers the
- *   client before upstream's headers (413, 503)
+ *   client before upstream's headers (400, 413, 503); `betas` the anthropic-beta values allowed
  * @returns {Promise<'done' | 'refused' | 'aborted'>} once the exchange is over
  */
-export function forward({ req, res, path, key, upstream, agent, onResponse, onChunk, onDropped, refuse }) {
+export async function forward({ req, res, path, key, betas, upstream, agent, onResponse, onChunk, onDropped, refuse }) {
   const declared = req.headers['content-length'];
   if (declared !== undefined && (!/^[0-9]{1,12}$/.test(declared) || Number(declared) > BODY_LIMIT)) {
     refuse(413, 'request_too_large', 'the request body is larger than the proxy takes', 'body-too-large');
-    return Promise.resolve('refused');
+    return 'refused';
+  }
+  // The body whole, to the limit, then checked (request-filter.mjs): nothing goes upstream before.
+  const body = await readBody(req, BODY_LIMIT);
+  if (body === 'aborted') {
+    return 'aborted';
+  }
+  if (body === 'too-large') {
+    refuse(413, 'request_too_large', 'the request body is larger than the proxy takes', 'body-too-large');
+    return 'refused';
+  }
+  const refusal = requestRefusal({ body, beta: req.headers['anthropic-beta'], betas });
+  if (refusal !== null) {
+    refuse(400, 'invalid_request_error', 'the request asks for what the proxy does not forward: only the client\'s '
+      + 'own tools, and the betas of Claude Code\'s calls', refusal);
+    return 'refused';
   }
   const { headers, dropped } = upstreamHeaders(req.headers, { key, hostname: upstream.hostname,
-    contentLength: declared });
+    contentLength: String(body.length) });
   onDropped(dropped);
   const send = upstream.protocol === 'https:' ? httpsRequest : httpRequest;
   return new Promise((resolve) => {
@@ -166,18 +186,6 @@ export function forward({ req, res, path, key, upstream, agent, onResponse, onCh
         end('aborted');
       }
     });
-    let sent = 0;
-    req.on('data', (chunk) => {
-      sent += chunk.length;
-      if (sent > BODY_LIMIT) {
-        req.unpipe(up);
-        up.destroy();
-        if (!res.headersSent) {
-          refuse(413, 'request_too_large', 'the request body is larger than the proxy takes', 'body-too-large');
-          end('refused');
-        }
-      }
-    });
-    req.pipe(up);
+    up.end(body);
   });
 }

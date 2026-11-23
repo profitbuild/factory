@@ -19,6 +19,9 @@
  *   else; the owner's answer on the plan: HEAD /api/hello and count_tokens are 404 until AC4 shows a need). Anything
  *   else is 404, logged by its path alone (refusal-log.mjs).
  * - At most IN_FLIGHT requests at once; one more is 429 with Retry-After: 1 (AC8).
+ * - The body and the betas, checked before anything goes upstream (request-filter.mjs; review round 1 of factory#29,
+ *   sec-5a7e): only the client's own tools, no MCP connector, and only the betas Claude Code's calls send. A request
+ *   past that is 400 invalid_request_error.
  * - Every refusal is in Anthropic's error shape, `{ type: "error", error: { type, message } }`, the message the proxy's
  *   own words, with X-Should-Retry false on 400, 401, 403, 404 and 413, and true with Retry-After: 1 on 429 and 503
  *   (opencomputer's modelproxy, its design only), so Claude Code retries only what can succeed.
@@ -62,13 +65,17 @@ export function presentedToken(headers) {
 /**
  * Starts the run's proxy on the first free port of `ports`, at `addr`.
  *
- * @param {{ addr: string, ports: number[], key: string, runId: string, stateDir: string,
- *   err: { write: (line: string) => void }, proxyTesting?: { upstream?: object } }} options `proxyTesting.upstream`
- *   a fake upstream, for the tests only
+ * @param {{ addr: string, ports: number[], key: string, betas: readonly string[], runId: string, stateDir: string,
+ *   err: { write: (line: string) => void }, proxyTesting?: { upstream?: object } }} options `betas` the
+ *   anthropic-beta values allowed (expectations.json's anthropicBetas); `proxyTesting.upstream` a fake upstream, for
+ *   the tests only
  * @returns {Promise<{ baseUrl: string, token: string, port: number, activate: () => void, revoke: () => void,
  *   close: () => Promise<void> }>}
  */
-export async function startProxy({ addr, ports, key, runId, stateDir, err, proxyTesting = {} }) {
+export async function startProxy({ addr, ports, key, betas, runId, stateDir, err, proxyTesting = {} }) {
+  if (!Array.isArray(betas) || !betas.every((beta) => typeof beta === 'string')) {
+    throw new TypeError('startProxy: betas must be the list of anthropic-beta values allowed');
+  }
   const upstream = proxyTesting.upstream ?? UPSTREAM;
   const agent = upstreamAgent(upstream);
   const token = randomBytes(32).toString('base64url');
@@ -137,7 +144,7 @@ export async function startProxy({ addr, ports, key, runId, stateDir, err, proxy
       inFlight += 1;
       let meter = null;
       try {
-        const how = await forward({ req, res, path: req.url, key, upstream, agent,
+        const how = await forward({ req, res, path: req.url, key, betas, upstream, agent,
           onDropped: (names) => {
             if (names.length > 0) {
               noteDropped(record, names);
