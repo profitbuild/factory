@@ -20,6 +20,10 @@
  * owner's answer, 2026-11-23). A route table that cannot be read refuses the run too. PORTS 1024 to 65535, outside
  * Linux's ephemeral range (32768 to 60999: rootlesskit publishes a container's ports there, and the VM's filter opens
  * that range to every container), none twice. A refusal names the file and the field, never a value.
+ *
+ * PORTS has a port per slot, for M5. Until #0-285 the fresh-VM marker allows one run per VM, whatever FACTORY_SLOTS
+ * and however many ports (fresh-vm.mjs): a second port added early is no working second slot (review round 1 of
+ * factory#29).
  */
 import { readFile } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';

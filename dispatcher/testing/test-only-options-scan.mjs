@@ -37,7 +37,9 @@ export const FUNCTIONS = Object.freeze(['pushTask', 'runGit', 'initBare', 'readC
   // #0-301: an agent's call, the item's read, the phases.
   'callAgent', 'readItem', 'buildPhases', 'readAgent', 'readAnswerSchema', 'readExpectations', 'readFindings',
   // #0-313: the credential proxy's files, their owner and its upstream are a test's (proxyTesting).
-  'readProxyConf', 'readFreshVmMarker', 'consumeFreshVm', 'startProxy', 'runTaskWithProxy']);
+  'readProxyConf', 'readFreshVmMarker', 'consumeFreshVm', 'startProxy', 'runTaskWithProxy',
+  // Review round 1 of factory#29 (FAC-S03): the token's helper, whose sudo is the fake daemon's in a test.
+  'writeTokenFile']);
 /**
  * The modules that run git, push, or run a container command, and the options of a test's each may forward: all but
  * `sudo` for #0-276's, `git` and `sudo` for #0-277's (the task container's), and for the CLI's main, which a test calls
@@ -66,6 +68,8 @@ export const CHAIN = Object.freeze({
   'product/commands.mjs': TASK, 'github/item-lock.mjs': Object.freeze(['apiBase']),
   // #0-301: the flow's modules pass the task container's sudo and the reads' git down.
   'flow/call.mjs': TASK, 'flow/item.mjs': Object.freeze(['git']), 'flow/phases.mjs': TASK,
+  // #0-313: a run's proxy passes the task container's sudo to the token's helper.
+  'proxy/task-proxy.mjs': Object.freeze(['sudo']),
 });
 
 /**

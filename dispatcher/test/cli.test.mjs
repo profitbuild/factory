@@ -348,6 +348,18 @@ test('#0-278 AC9: the dispatcher\'s own task holds its item while it runs on a b
     assert.equal((await call(['run', '--item', '0-10'])).status, 'running', 'another item goes ahead');
   });
 
+test('review round 1 of factory#29 (GEN-08): through the CLI\'s own process, a refusal read before the breaker is '
+  + 'one line on stderr with the dispatcher\'s prefix, and exit 1: no Claude key at its default path', async (t) => {
+  // In a child, no test's option can be given (proxyTesting is main()'s): the key's default path, which no test
+  // machine has, refuses the run there, before the breaker. The breaker's own refusals are tested in this process,
+  // below, where the proxy's files can be a test's.
+  const { env, stateDir } = await setUp(t);
+  refusedWith(await cli(['run', '--item', '0-1'], env),
+    new RegExp('^dispatcher: Claude\'s key /home/dispatcher/\\.config/factory/claude\\.key cannot be read '
+      + '\\(ENOENT\\): the owner puts '));
+  assert.ok(!(await readdir(stateDir)).includes('tasks'), 'no task is made');
+});
+
 test('the breaker tripped refuses the run; state.json unreadable tells the owner what to do', async (t) => {
   const { stateDir, env: base, repoParent } = await setUp(t);
   // In this process: the proxy's files are a test's (#0-313), read before the breaker.
@@ -1044,4 +1056,41 @@ test('#0-313: Claude\'s key or the proxy\'s configuration off their form, or mor
   } finally {
     holders.forEach((server) => server.close());
   }
+});
+
+test('review round 1 of factory#29, gen-6b1d: a token helper that fails stops the task in stage proxy, through '
+  + 'stopItem, before any phase, the proxy closed', async (t) => {
+  const setup = await setUpDaemon(t, undefined, { product: { files: FLOW_FILES } });
+  const { fake, proxy, stateDir } = setup;
+  // The token's helper alone fails (a full disk, the daemon's error): its script is the one writing token/token.
+  fake.update((s) => { s.scenario.helperFails = 'token/token'; });
+  let ran = false;
+  const left = await setup.call(['run', '--item', '0-9'], { phases: [{ name: 'probe', run: async () => {
+    ran = true;
+    return {};
+  } }] });
+  assert.equal(left.status, 'blocked');
+  assert.match(left.reason, new RegExp(`^proxy: the token of ${left.runId} could not be written`));
+  assert.equal(ran, false, 'no phase ran');
+  assert.equal((await openBreaker(stateDir)).state.history.at(-1).stage, 'proxy');
+  for (const port of proxy.ports) {
+    assert.equal((await askProxy(`http://${proxy.addr}:${port}`, 'x'.repeat(43))).error, 'ECONNREFUSED',
+      'the proxy closed, its token with it');
+  }
+});
+
+test('review round 1 of factory#29, sec-5a7e: a run\'s proxy allows the betas of expectations.json alone: a call with '
+  + 'any other is refused 400, and nothing of it reaches upstream', async (t) => {
+  const { stream, ARCHITECT_ANSWER } = await answers();
+  const { readExpectations } = await import('../src/flow/expectations.mjs');
+  assert.ok(!(await readExpectations()).anthropicBetas.includes('beta-marker-0313'));
+  const start = anthropic.requests.length;
+  const { fake, stateDir, left } = await flowRun(t, '0-9', [{ stream: stream('architect', ARCHITECT_ANSWER),
+    proxy: { headers: { 'anthropic-beta': 'beta-marker-0313' } } }]);
+  const [call] = await proxyCalls(fake);
+  assert.equal(call.status, 400, JSON.stringify(call));
+  assert.equal(JSON.parse(call.body).error.type, 'invalid_request_error');
+  assert.equal(anthropic.requests.length, start, 'nothing upstream');
+  const record = JSON.parse(await readFile(join(stateDir, 'tasks', left.runId, 'proxy.json'), 'utf8'));
+  assert.equal(record.refused.beta, 1);
 });
