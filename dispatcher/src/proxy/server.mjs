@@ -158,7 +158,8 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
           onChunk: (chunk) => meter?.feed(chunk),
           refuse: (status, type, message, reason) => refuse(res, status, type, message, reason),
         });
-        if (how !== 'refused') {
+        // Forwarded: what reached upstream, done or ended midway; not a refusal, nor a client gone before its body.
+        if (how === 'done' || how === 'aborted') {
           record.forwarded += 1;
           if (meter === null) {
             record.usage.unmetered += 1;

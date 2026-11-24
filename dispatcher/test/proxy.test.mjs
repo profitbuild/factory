@@ -32,10 +32,10 @@ const ADDR = localAddress();
 const KEY = keyMarker();
 let next = 0;
 
-/** A proxy of a run of its own, with the fake upstream, its log lines kept. */
 /** The betas a test's proxy allows: its own list, as expectations.json's would be on the VM. */
 const BETAS = Object.freeze(['b1', 'beta-allowed-2025']);
 
+/** A proxy of a run of its own, with the fake upstream, its log lines kept. */
 async function proxyOf({ ports = testPorts(), upstream = anthropic.upstream } = {}) {
   next += 1;
   const runId = `20261122T17${String(next).padStart(4, '0')}Z-0d0313`;
@@ -378,7 +378,8 @@ test('review round 1 of factory#29, sec-5a7e: only a body of client tools and th
     headers: { 'anthropic-beta': 'b1,beta-allowed-2025' } });
   assert.equal(passed.status, 200);
   assert.equal(anthropic.requests.length, start + 1);
-  assert.equal(anthropic.requests[start].body, JSON.stringify(CLIENT_CALL), 'the body as it was sent');
+  // What goes upstream is the checked value, serialized again (review round 2 of factory#29): the same value.
+  assert.deepEqual(JSON.parse(anthropic.requests[start].body), CLIENT_CALL, 'the body\'s value as it was sent');
   assert.equal(anthropic.requests[start].headers['content-length'],
     String(Buffer.byteLength(JSON.stringify(CLIENT_CALL))));
   const withTools = (...tools) => JSON.stringify({ ...CLIENT_CALL, tools });
@@ -460,7 +461,105 @@ test('review round 1 of factory#29, sec-5a7e: the filter\'s rules one by one, an
     assert.equal(check(JSON.stringify({ tools: [] }), undefined), null);
     assert.equal(check(JSON.stringify({ tools: [{ type: 'custom', name: 'x' }] }), undefined), null);
     assert.deepEqual(FILTER_REASONS, ['body-not-json', 'body-not-object', 'mcp-servers', 'tools-not-list',
-      'server-tool', 'beta']);
+      'server-tool', 'content-source', 'beta']);
     await assert.rejects(startProxy({ addr: ADDR, ports: testPorts(), key: KEY, runId: '20261123T100000Z-0d0313',
       stateDir: root.dir, err: { write() {} } }), TypeError);
   });
+
+test('review round 2 of factory#29, sec-c41e: a content source other than base64 or text, in a message, a '
+  + 'tool_result\'s content at any depth or the system, is 400 content-source with nothing upstream; base64 and text '
+  + 'pass', async () => {
+  const { proxy, runId } = await proxyOf();
+  proxy.activate();
+  const start = anthropic.requests.length;
+  const user = (...content) => JSON.stringify({ ...CLIENT_CALL, messages: [{ role: 'user', content }] });
+  const image = (type) => ({ type: 'image', source: { type, media_type: 'image/png', data: 'AAAA',
+    url: 'https://URL-MARKER' } });
+  const refused = [
+    user({ type: 'image', source: { type: 'url', url: 'https://URL-MARKER/a.png' } }),
+    user({ type: 'document', source: { type: 'url', url: 'https://URL-MARKER/a.pdf' } }),
+    user({ type: 'tool_result', tool_use_id: 't', content: [{ type: 'text', text: 'x' },
+      { type: 'image', source: { type: 'url', url: 'https://URL-MARKER' } }] }),
+    user({ type: 'tool_result', tool_use_id: 't', content: [{ type: 'tool_result', content: [image('url')] }] }),
+    user({ type: 'document', source: { type: 'file', file_id: 'file_1' } }),
+    user({ type: 'document', source: { type: 'content', content: [{ type: 'text', text: 'x' }] } }),
+    user({ type: 'image', source: 'https://URL-MARKER' }),
+    user({ type: 'image', source: null }),
+    JSON.stringify({ ...CLIENT_CALL, system: [{ type: 'text', text: 's' }, { type: 'document', source: { type: 'url',
+      url: 'https://URL-MARKER' } }] }),
+  ];
+  for (const body of refused) {
+    const answer = await send(proxy.baseUrl, { token: proxy.token, body });
+    assert.equal(answer.status, 400, body.slice(0, 120));
+    assert.equal(errorOf(answer).error.type, 'invalid_request_error');
+  }
+  assert.equal(anthropic.requests.length, start, 'nothing upstream');
+  for (const body of [user(image('base64')), user({ type: 'document', source: { type: 'text', media_type: 'text/plain',
+    data: 'x' } }), user({ type: 'tool_result', tool_use_id: 't', content: [image('base64')] }),
+  JSON.stringify({ ...CLIENT_CALL, system: 'a system as a string' })]) {
+    assert.equal((await send(proxy.baseUrl, { token: proxy.token, body })).status, 200, body.slice(0, 120));
+  }
+  await proxy.close();
+  const record = await readProxyRecord(root.dir, runId);
+  assert.equal(record.refused['content-source'], refused.length);
+  assert.equal(record.forwarded, 4);
+});
+
+test('review round 2 of factory#29: what goes upstream is the value the filter checked: a key given twice is sent '
+  + 'as the one checked, never as the raw bytes', async () => {
+  const { proxy } = await proxyOf();
+  proxy.activate();
+  const start = anthropic.requests.length;
+  const raw = '{"model":"m","messages":[],"tools":[{"name":"x","type":"web_search_20250305","type":"custom"}]}';
+  assert.equal((await send(proxy.baseUrl, { token: proxy.token, body: raw })).status, 200);
+  const sent = anthropic.requests[start];
+  assert.deepEqual(JSON.parse(sent.body), { model: 'm', messages: [], tools: [{ name: 'x', type: 'custom' }] });
+  assert.ok(!sent.body.includes('web_search'), 'the raw bytes are not what is sent');
+  assert.equal(sent.headers['content-length'], String(Buffer.byteLength(sent.body)));
+  // Bytes that are no UTF-8: sent as what the check read (replacement characters), valid UTF-8.
+  const bad = Buffer.concat([Buffer.from('{"model":"'), Buffer.from([0xff, 0xfe]), Buffer.from('","messages":[]}')]);
+  const answer = await new Promise((resolve) => {
+    const url = new URL(proxy.baseUrl);
+    const req = request({ host: url.hostname, port: url.port, method: 'POST', path: '/v1/messages',
+      headers: { 'x-api-key': proxy.token, 'content-type': 'application/json' } }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    });
+    req.end(bad);
+  });
+  assert.equal(answer, 200);
+  assert.equal(JSON.parse(anthropic.requests[start + 1].body).model, '\ufffd\ufffd');
+});
+
+test('review round 2 of factory#29: a client gone before its body is whole sends nothing upstream and is not counted '
+  + 'as forwarded', async () => {
+  const { proxy, runId } = await proxyOf();
+  proxy.activate();
+  const start = anthropic.requests.length;
+  await new Promise((resolve) => {
+    const url = new URL(proxy.baseUrl);
+    const req = request({ host: url.hostname, port: url.port, method: 'POST', path: '/v1/messages',
+      headers: { 'x-api-key': proxy.token, 'content-length': '1000' } });
+    req.on('error', () => resolve());
+    req.write('{"model":');
+    setTimeout(() => { req.destroy(); resolve(); }, 200);
+  });
+  await new Promise((resolve) => { setTimeout(resolve, 200); });
+  await proxy.close();
+  assert.equal(anthropic.requests.length, start, 'nothing upstream');
+  assert.equal((await readProxyRecord(root.dir, runId)).forwarded, 0);
+});
+
+test('review round 2 of factory#29 (FAC-A01): the filter\'s reasons are each a key of proxy.json\'s refused, so a '
+  + 'reason added in one place and not the other fails here, not in a record on the VM', async () => {
+  const { FILTER_REASONS } = await import('../src/proxy/request-filter.mjs');
+  const schema = JSON.parse(await readFile(new URL('../src/state/proxy.schema.json', import.meta.url), 'utf8'));
+  const keys = Object.keys(schema.properties.refused.properties);
+  for (const reason of FILTER_REASONS) {
+    assert.ok(keys.includes(reason), reason);
+  }
+  // And every other key is a refusal of the server's own.
+  const own = ['no-token', 'credentials-differ', 'unknown-token', 'token-not-active', 'path', 'in-flight',
+    'body-too-large', 'upstream'];
+  assert.deepEqual([...keys].sort(), [...own, ...FILTER_REASONS].sort());
+});

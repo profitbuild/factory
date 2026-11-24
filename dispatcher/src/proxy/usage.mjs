@@ -7,7 +7,7 @@
  * - usage, summed from each response's SSE stream as it passes (sseMeter): message_start's usage and message_delta's
  *   output_tokens, read from those two events' data lines only. The meter holds one line at most (1 MiB); a response
  *   it cannot count (not SSE, a line past that, a data line off its form) adds to `unmetered`, and still passes. The
- *   stream is never held, and the request's body never read.
+ *   stream is never held; the request's body is read only to check it (request-filter.mjs), never logged or kept.
  * - the rate-limit headers of the last response (retry-after, anthropic-ratelimit-*), for M5's slots: a name of that
  *   form, a value a number or an ISO time, or it is not kept, and counted.
  * - the names of the request headers the proxy dropped (upstream.mjs's list is a guess until AC4 compares it with a

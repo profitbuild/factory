@@ -22,7 +22,7 @@
 import { request as httpRequest } from 'node:http';
 import { Agent, request as httpsRequest } from 'node:https';
 
-import { readBody, requestRefusal } from './request-filter.mjs';
+import { filterRequest, readBody } from './request-filter.mjs';
 
 /** Anthropic's API: the one target (#0-313). */
 export const UPSTREAM = Object.freeze({ protocol: 'https:', hostname: 'api.anthropic.com', port: 443 });
@@ -93,7 +93,8 @@ export function upstreamAgent(upstream) {
  *   onChunk: (chunk: Buffer) => void, onDropped: (names: string[]) => void,
  *   refuse: (status: number, type: string, message: string, reason: string) => void }} options `refuse` answers the
  *   client before upstream's headers (400, 413, 503); `betas` the anthropic-beta values allowed
- * @returns {Promise<'done' | 'refused' | 'aborted'>} once the exchange is over
+ * @returns {Promise<'done' | 'refused' | 'aborted' | 'gone'>} once the exchange is over: `gone` a client that left
+ *   before its body was whole, nothing sent upstream
  */
 export async function forward({ req, res, path, key, betas, upstream, agent, onResponse, onChunk, onDropped, refuse }) {
   const declared = req.headers['content-length'];
@@ -104,20 +105,23 @@ export async function forward({ req, res, path, key, betas, upstream, agent, onR
   // The body whole, to the limit, then checked (request-filter.mjs): nothing goes upstream before.
   const body = await readBody(req, BODY_LIMIT);
   if (body === 'aborted') {
-    return 'aborted';
+    // Gone before its body was whole: nothing went upstream (review round 2 of factory#29: not counted as forwarded).
+    return 'gone';
   }
   if (body === 'too-large') {
     refuse(413, 'request_too_large', 'the request body is larger than the proxy takes', 'body-too-large');
     return 'refused';
   }
-  const refusal = requestRefusal({ body, beta: req.headers['anthropic-beta'], betas });
+  const { reason: refusal, json } = filterRequest({ body, beta: req.headers['anthropic-beta'], betas });
   if (refusal !== null) {
     refuse(400, 'invalid_request_error', 'the request asks for what the proxy does not forward: only the client\'s '
       + 'own tools, and the betas of Claude Code\'s calls', refusal);
     return 'refused';
   }
+  // What goes upstream is what was checked: the parsed body serialized again (review round 2 of factory#29).
+  const checked = Buffer.from(json, 'utf8');
   const { headers, dropped } = upstreamHeaders(req.headers, { key, hostname: upstream.hostname,
-    contentLength: String(body.length) });
+    contentLength: String(checked.length) });
   onDropped(dropped);
   const send = upstream.protocol === 'https:' ? httpsRequest : httpRequest;
   return new Promise((resolve) => {
@@ -186,6 +190,6 @@ export async function forward({ req, res, path, key, betas, upstream, agent, onR
         end('aborted');
       }
     });
-    up.end(body);
+    up.end(checked);
   });
 }

@@ -26,6 +26,7 @@
         "mcp-servers": { "type": "integer", "minimum": 0 },
         "tools-not-list": { "type": "integer", "minimum": 0 },
         "server-tool": { "type": "integer", "minimum": 0 },
+        "content-source": { "type": "integer", "minimum": 0 },
         "beta": { "type": "integer", "minimum": 0 }
       }
     },
