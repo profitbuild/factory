@@ -563,3 +563,49 @@ test('review round 2 of factory#29 (FAC-A01): the filter\'s reasons are each a k
     'body-too-large', 'upstream'];
   assert.deepEqual([...keys].sort(), [...own, ...FILTER_REASONS].sort());
 });
+
+/** A request of the fixture's shape (the owner's measurement, 2026-11-24): its keys, types and roles, made-up values. */
+async function measuredCall() {
+  const { call } = JSON.parse(await readFile(new URL('../testing/fixtures/claude-code-2.1.328-request-shape.json',
+    import.meta.url), 'utf8'));
+  const block = (shape) => ({ type: shape.type, ...(shape.type === 'text' ? { text: 't' } : {}) });
+  const content = (shape) => (shape === 'string' ? 's' : shape.map(block));
+  const values = { context_management: {}, max_tokens: 1, metadata: { user_id: 'u' }, model: 'claude-opus-5-5',
+    output_config: {}, stream: true, thinking: {}, system: content(call.system),
+    messages: call.messages.map((m) => ({ role: m.role, content: content(m.content) })),
+    tools: call.tools.map((tool, i) => Object.fromEntries(tool.keys.map((key) => [key, { name: `tool-${i}`,
+      description: 'd', input_schema: { type: 'object' }, defer_loading: true }[key]]))) };
+  assert.deepEqual(Object.keys(values).sort(), call.bodyKeys, 'every key of the measured body, and no other');
+  const headers = Object.fromEntries(call.headerNames.filter((name) => !['authorization', 'x-api-key', 'host',
+    'connection', 'content-length'].includes(name)).map((name) => [name, name === 'anthropic-beta'
+    ? call.betas.join(',') : name === 'content-type' ? 'application/json' : 'v']));
+  return { call, body: JSON.stringify(values), headers };
+}
+
+test('#0-313 (the owner\'s measurement, 2026-11-24): the call Claude Code 2.1.328 makes passes the filter whole, its '
+  + 'betas those of expectations.json; the headers it sends off the list are dropped and named', async () => {
+  const { call, body, headers } = await measuredCall();
+  const { readExpectations } = await import('../src/flow/expectations.mjs');
+  const { anthropicBetas } = await readExpectations();
+  assert.deepEqual([...anthropicBetas].sort(), [...call.betas].sort(), 'the list is the measured one');
+  assert.ok(call.tools.every((tool) => !tool.keys.includes('type')), 'no tool of the call is typed');
+  const { filterRequest } = await import('../src/proxy/request-filter.mjs');
+  const checked = filterRequest({ body: Buffer.from(body), beta: headers['anthropic-beta'], betas: anthropicBetas });
+  assert.equal(checked.reason, null);
+  next += 1;
+  const runId = `20261124T19${String(next).padStart(4, '0')}Z-0d0313`;
+  await mkdir(join(root.dir, 'tasks', runId), { recursive: true, mode: 0o700 });
+  const proxy = await startProxy({ addr: ADDR, ports: testPorts(), key: KEY, betas: anthropicBetas, runId,
+    stateDir: root.dir, err: { write() {} }, proxyTesting: { upstream: anthropic.upstream } });
+  proxy.activate();
+  const start = anthropic.requests.length;
+  const answer = await send(proxy.baseUrl, { token: proxy.token, headers, body });
+  assert.equal(answer.status, 200);
+  assert.deepEqual(JSON.parse(anthropic.requests[start].body), JSON.parse(body));
+  assert.equal(anthropic.requests[start].headers['anthropic-beta'], call.betas.join(','));
+  await proxy.close();
+  // The measured headers off the list (review of #0-313's plan, E): known now, dropped knowingly; AC4 shows whether
+  // a call answers without them.
+  assert.deepEqual((await readProxyRecord(root.dir, runId)).droppedHeaders.sort(),
+    ['anthropic-dangerous-direct-browser-access', 'x-app', 'x-claude-code-session-id']);
+});
