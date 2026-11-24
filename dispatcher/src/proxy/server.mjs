@@ -75,9 +75,11 @@ export function presentedToken(headers) {
  *
  * @param {{ addr: string, ports: number[], key: string, betas: readonly string[], runId: string, stateDir: string,
  *   err: { write: (line: string) => void }, proxyTesting?: { upstream?: object, filter?: Function, forward?: Function,
- *   accounting?: { noteRateLimits?: Function, sseMeter?: Function } } }} options `betas` the
- *   anthropic-beta values allowed (expectations.json's anthropicBetas); `proxyTesting.upstream` a fake upstream and
- *   `proxyTesting.filter` a filter in filterRequest's place (one that throws), for the tests only
+ *   accounting?: { noteDropped?: Function, noteRateLimits?: Function, sseMeter?: Function } } }} options `betas` the
+ *   anthropic-beta values allowed (expectations.json's anthropicBetas); for the tests only: `proxyTesting.upstream` a
+ *   fake upstream, `proxyTesting.filter` a filter in filterRequest's place (one that throws), `proxyTesting.forward` a
+ *   forward in upstream.mjs's place (one that wraps it to throw), and `proxyTesting.accounting` the callbacks that
+ *   count a response (noteDropped, noteRateLimits, sseMeter) in usage.mjs's place
  * @returns {Promise<{ baseUrl: string, token: string, port: number, activate: () => void, revoke: () => void,
  *   close: () => Promise<void> }>}
  */
@@ -90,6 +92,7 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
   const forwardOne = proxyTesting.forward ?? forward;
   const rateLimitsOf = proxyTesting.accounting?.noteRateLimits ?? noteRateLimits;
   const meterOf = proxyTesting.accounting?.sseMeter ?? sseMeter;
+  const droppedOf = proxyTesting.accounting?.noteDropped ?? noteDropped;
   const agent = upstreamAgent(upstream);
   const token = randomBytes(32).toString('base64url');
   const tokenDigest = digest(token);
@@ -177,7 +180,7 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
         const how = await forwardOne({ req, res, path: req.url, key, betas, upstream, agent, filter,
           onDropped: counted((names) => {
             if (names.length > 0) {
-              noteDropped(record, names);
+              droppedOf(record, names);
               log('dropped request headers off the list', `(${names.length}; their names in proxy.json)`);
             }
           }),
@@ -192,10 +195,11 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
           }),
           refuse: (status, type, message, reason) => refuse(res, status, type, message, reason),
         });
-        // Forwarded: what reached upstream, done or ended midway; not a refusal, nor a client gone before its body.
-        if (how === 'done' || how === 'aborted') {
+        // Forwarded: what reached upstream, done, ended midway or faulted in a listener (its tokens spent, its count
+        // not taken); not a refusal, nor a client gone before its body (review round 5 of factory#29).
+        if (how === 'done' || how === 'aborted' || how === 'faulted') {
           record.forwarded += 1;
-          if (meter === null) {
+          if (meter === null || how === 'faulted') {
             record.usage.unmetered += 1;
           } else {
             counted(() => meter.end())();
@@ -205,7 +209,8 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
           }
         } else if (how === 'gone') {
           record.gone += 1;
-        } else if (how === 'faulted') {
+        }
+        if (how === 'faulted') {
           count('internal');
         }
       } catch {

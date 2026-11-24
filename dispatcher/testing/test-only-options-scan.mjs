@@ -39,9 +39,10 @@ export const FUNCTIONS = Object.freeze(['pushTask', 'runGit', 'initBare', 'readC
   // #0-313: the credential proxy's files, their owner and its upstream are a test's (proxyTesting).
   'readProxyConf', 'readFreshVmMarker', 'consumeFreshVm', 'startProxy', 'runTaskWithProxy',
   // Review round 1 of factory#29 (FAC-S03): the token's helper, whose sudo is the fake daemon's in a test.
-  'writeTokenFile',
-  // Review round 4 of factory#29: one exchange with upstream.
-  'forward']);
+  'writeTokenFile']);
+// Not forward (review round 5 of factory#29, ARC-02): it takes no option of OPTIONS, and its one call in src/ goes
+// through the alias forwardOne. What keeps its test seams (filter, a fake upstream) from src/ is startProxy's own
+// row, proxyTesting, below: no module gives proxyTesting a value.
 /**
  * The modules that run git, push, or run a container command, and the options of a test's each may forward: all but
  * `sudo` for #0-276's, `git` and `sudo` for #0-277's (the task container's), and for the CLI's main, which a test calls

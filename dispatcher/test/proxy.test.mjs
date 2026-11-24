@@ -179,7 +179,8 @@ test('#0-313 AC8: the client\'s Authorization, X-Api-Key and Cookie and every he
   const start = anthropic.requests.length;
   const answer = await send(proxy.baseUrl, { token: proxy.token, headers: { cookie: 'c=COOKIE-VALUE',
     'x-foo': 'FOO-VALUE', 'x-stainless-arch': 'x64', 'user-agent': 'claude-cli/2.1.328', 'anthropic-beta': 'b1',
-    'accept-encoding': 'gzip', host: 'evil.example', 'x_odd': 'v' }, body: '{"messages":[],"marker":"BODY-MARKER"}' });
+    'accept-encoding': 'gzip', host: 'evil.example', 'x_odd': 'v' },
+    body: '{"messages":[{"role":"user","content":"BODY-MARKER"}]}' });
   assert.equal(answer.status, 200);
   const seen = anthropic.requests[start];
   assert.equal(seen.headers['x-api-key'], KEY, 'the key, set by the proxy');
@@ -192,7 +193,7 @@ test('#0-313 AC8: the client\'s Authorization, X-Api-Key and Cookie and every he
     assert.ok(seen.headers[name] !== undefined, name);
   }
   assert.equal(seen.url, '/v1/messages?beta=true');
-  assert.equal(seen.body, '{"messages":[],"marker":"BODY-MARKER"}', 'the body as it was sent');
+  assert.equal(seen.body, '{"messages":[{"role":"user","content":"BODY-MARKER"}]}', 'the body as it was sent');
   // The response: the proxy's list, set-cookie and the organization's id dropped.
   assert.equal(answer.headers['set-cookie'], undefined);
   assert.equal(answer.headers['anthropic-organization-id'], undefined);
@@ -462,8 +463,8 @@ test('review round 1 of factory#29, sec-5a7e: the filter\'s rules one by one, an
     assert.equal(check(JSON.stringify({ messages: [], tools: [] }), undefined), null);
     assert.equal(check(JSON.stringify({ messages: [], tools: [{ type: 'custom', name: 'x' }] }), undefined), null);
     assert.deepEqual(FILTER_REASONS, ['body-not-json', 'body-not-object', 'depth', 'size', 'messages-form',
-      'mcp-servers', 'tools-not-list', 'server-tool', 'content-type', 'content-source', 'content-file', 'beta',
-      'invalid']);
+      'mcp-servers', 'body-key', 'tools-not-list', 'server-tool', 'content-type', 'content-source', 'content-file',
+      'beta', 'invalid']);
     await assert.rejects(startProxy({ addr: ADDR, ports: testPorts(), key: KEY, runId: '20261123T100000Z-0d0313',
       stateDir: root.dir, err: { write() {} } }), TypeError);
   });
@@ -774,31 +775,46 @@ test('review round 4 of factory#29 (FAC-S02): a content block of a type off BLOC
   await proxy.close();
 });
 
-test('review round 4 of factory#29 (SEC-21): a body of MAX_NODES + 1 arrays is 400 size on its bytes, nothing '
-  + 'upstream, the next call 200; one at the limit passes; the parsed tree is held to it too', async () => {
+test('review rounds 4 and 5 of factory#29 (SEC-21): MAX_NODES bounds every item, arrays, objects, keys and values: '
+  + 'one past it, of scalars or of keys, is 400 size on the bytes before JSON.parse, nothing upstream, the next call '
+  + '200; one at it passes; the tree counts the same', async () => {
   const { MAX_NODES, filterRequest, treeBounds, byteShape } = await import('../src/proxy/request-filter.mjs');
-  assert.equal(MAX_NODES, 100_000);
-  // The body, messages and metadata: three nodes, then n empty arrays.
-  const flat = (n) => `{"messages":[],"metadata":[${Array(n).fill('[]').join(',')}]}`;
-  assert.equal(filterRequest({ body: Buffer.from(flat(MAX_NODES - 3)), betas: [] }).reason, null, 'at the limit');
-  assert.equal(filterRequest({ body: Buffer.from(flat(MAX_NODES - 2)), betas: [] }).reason, 'size');
-  assert.equal(byteShape(Buffer.from(flat(MAX_NODES - 2))), 'size', 'refused on the bytes, before JSON.parse');
-  // Before JSON.parse: a body past the limit and no JSON at all is refused by its size, never parsed.
-  assert.equal(filterRequest({ body: Buffer.from(`${flat(MAX_NODES)}not JSON`), betas: [] }).reason, 'size');
-  assert.equal(byteShape(Buffer.from(`{"messages":[],"s":"${'['.repeat(MAX_NODES + 1)}"}`)), null,
-    'brackets in a string are no nodes');
-  assert.equal(byteShape(Buffer.from('{"s":"\\"[[[","messages":[]}')), null, 'an escaped quote keeps the string open');
-  // The second layer, on the tree, whatever the bytes said.
-  assert.equal(treeBounds({ messages: [], metadata: Array.from({ length: MAX_NODES }, () => []) }), 'size');
-  assert.equal(treeBounds({ messages: [], metadata: Array.from({ length: MAX_NODES - 3 }, () => []) }), null);
+  assert.equal(MAX_NODES, 200_000);
+  const check = (body) => filterRequest({ body: Buffer.from(body), betas: [] }).reason;
+  // {"messages":[],"metadata":X}: the body's brace, two colons, messages' bracket and one comma, five items, then X's.
+  // An array of n scalars: its bracket and n - 1 commas, n; an object of k keys: its brace, k colons, k - 1 commas.
+  const scalars = (n) => `{"messages":[],"metadata":[${Array(n).fill(1).join(',')}]}`;
+  const keys = (k) => `{"messages":[],"metadata":{${Array.from({ length: k }, (_, i) => `"k${i}":0`).join(',')}}}`;
+  assert.equal(check(scalars(MAX_NODES - 5)), null, 'scalars at the limit');
+  assert.equal(check(scalars(MAX_NODES - 4)), 'size');
+  assert.equal(check(keys((MAX_NODES - 5 - 1) / 2)), null, 'keys at the limit (one under it)');
+  assert.equal(check(keys((MAX_NODES - 5 - 1) / 2 + 1)), 'size');
+  assert.equal(check(`${scalars(MAX_NODES)}not JSON`), 'size', 'on the bytes, before JSON.parse');
+  // Empty arrays: each one's bracket counts as its comma does, on the bytes (an invalid body: never parsed).
+  const arrays = (n) => `{"messages":[],"metadata":[${Array(n).fill('[]').join(',')}]}`;
+  assert.equal(check(`${arrays(MAX_NODES / 2)}not JSON`), 'size', 'containers counted on the bytes');
+  // n empty arrays make 2n + 5 items: under the limit, they pass.
+  assert.equal(check(arrays(Math.floor((MAX_NODES - 5) / 2))), null);
+  // Brackets, commas and colons inside a string are no items, after an escaped quote too.
+  const filler = '[{,:'.repeat(MAX_NODES);
+  assert.equal(byteShape(Buffer.from(`{"messages":[],"metadata":"${filler}"}`)), null);
+  assert.equal(byteShape(Buffer.from(`{"messages":[],"metadata":"\\"${filler}"}`)), null, 'after \\"');
+  assert.equal(byteShape(Buffer.from(`{"messages":[],"metadata":"\\\\"${',' .repeat(MAX_NODES)}}`)), 'size',
+    'an escaped backslash closes the string at its quote');
+  // The tree counts what the bytes count, for valid JSON: the same limit, the same items.
+  assert.equal(treeBounds(JSON.parse(scalars(MAX_NODES - 5))), null);
+  assert.equal(treeBounds(JSON.parse(scalars(MAX_NODES - 4))), 'size');
+  assert.equal(treeBounds(JSON.parse(keys((MAX_NODES - 5 - 1) / 2 + 1))), 'size');
   const { proxy, runId } = await proxyOf();
   proxy.activate();
   const start = anthropic.requests.length;
-  assert.equal((await send(proxy.baseUrl, { token: proxy.token, body: flat(MAX_NODES) })).status, 400);
+  for (const body of [scalars(MAX_NODES), keys(MAX_NODES / 2)]) {
+    assert.equal((await send(proxy.baseUrl, { token: proxy.token, body })).status, 400);
+  }
   assert.equal(anthropic.requests.length, start, 'nothing upstream');
   assert.equal((await send(proxy.baseUrl, { token: proxy.token })).status, 200, 'the next call');
   await proxy.close();
-  assert.equal((await readProxyRecord(root.dir, runId)).refused.size, 1);
+  assert.equal((await readProxyRecord(root.dir, runId)).refused.size, 2);
 });
 
 /** A proxy with test's own callbacks (proxyTesting): the record and the log lines kept. */
@@ -860,7 +876,12 @@ test('review round 4 of factory#29 (SEC-21): a listener of upstream\'s response 
         return forward({ ...options, onResponse: () => { throw new Error('agent-words in a listener'); } });
       }
       if (calls === 2) {
-        return forward({ ...options, onChunk: () => { throw new Error('agent-words in a chunk\'s listener'); } });
+        // The chunk fed to the meter first (its message_start counted), then the throw: a faulted exchange is
+        // unmetered, never counted from a part of its stream.
+        return forward({ ...options, onChunk: (chunk) => {
+          options.onChunk(chunk);
+          throw new Error('agent-words in a chunk\'s listener');
+        } });
       }
       if (calls === 3) {
         await forward(options);
@@ -868,19 +889,67 @@ test('review round 4 of factory#29 (SEC-21): a listener of upstream\'s response 
       }
       return forward(options);
     } });
-    const first = await send(proxy.baseUrl, { token: proxy.token });
-    assert.ok(first.error !== undefined || first.status === 200, JSON.stringify(first).slice(0, 80));
-    const second = await send(proxy.baseUrl, { token: proxy.token });
-    assert.ok(second.error !== undefined || second.status === 200, JSON.stringify(second).slice(0, 80));
+    // A fault in a listener destroys both sides: the client's connection is reset, the answer half sent or not.
+    assert.deepEqual(await send(proxy.baseUrl, { token: proxy.token }), { error: 'ECONNRESET' });
+    assert.deepEqual(await send(proxy.baseUrl, { token: proxy.token }), { error: 'ECONNRESET' });
+    // An exception after forward is over: the answer was whole already, the socket ended after it.
     const third = await send(proxy.baseUrl, { token: proxy.token });
-    assert.ok(third.error !== undefined || third.status === 200, JSON.stringify(third).slice(0, 80));
+    assert.equal(third.status, 200);
+    assert.equal(third.body, sseAnswer().join(''));
     assert.equal((await send(proxy.baseUrl, { token: proxy.token })).status, 200, 'the next call');
     await proxy.close();
-    assert.equal((await readProxyRecord(root.dir, runId)).refused.internal, 3);
+    const record = await readProxyRecord(root.dir, runId);
+    assert.equal(record.refused.internal, 3);
+    // The two faulted exchanges reached upstream, their tokens spent: forwarded and unmetered, besides internal
+    // (review round 5 of factory#29); with the fourth, forwarded 3.
+    assert.equal(record.forwarded, 3);
+    assert.equal(record.usage.unmetered, 2);
     assert.ok(lines.every((line) => !line.includes('agent-words')), lines.join(''));
     await new Promise((resolve) => { setImmediate(resolve); });
     assert.deepEqual(rejections, []);
   } finally {
     process.off('unhandledRejection', onRejection);
   }
+});
+
+test('review round 5 of factory#29 (FAC-S02): the body\'s top-level keys are BODY_KEYS alone, the measured ones: any '
+  + 'other is 400 body-key with nothing upstream, mcp_servers by its own rule, each listed key passing', async () => {
+  const { BODY_KEYS, filterRequest } = await import('../src/proxy/request-filter.mjs');
+  assert.deepEqual(BODY_KEYS, ['context_management', 'max_tokens', 'messages', 'metadata', 'model', 'output_config',
+    'stream', 'system', 'thinking', 'tools']);
+  const fixture = await readFixture();
+  for (const call of fixture.calls) {
+    assert.ok(call.bodyKeys.every((key) => BODY_KEYS.includes(key)), `variant ${call.variant}'s keys are listed`);
+  }
+  const check = (value) => filterRequest({ body: Buffer.from(JSON.stringify(value)), betas: [] }).reason;
+  for (const key of ['KEY-MARKER', 'container', 'tool_choice', 'temperature', '__proto__x']) {
+    assert.equal(check({ messages: [], [key]: {} }), 'body-key', key);
+  }
+  assert.equal(check({ messages: [], mcp_servers: [] }), 'mcp-servers', 'by its own rule, first');
+  const values = { context_management: {}, max_tokens: 1, metadata: {}, model: 'm', output_config: {}, stream: true,
+    system: 's', thinking: {}, tools: [] };
+  for (const key of BODY_KEYS.filter((k) => k !== 'messages')) {
+    assert.equal(check({ messages: [], [key]: values[key] }), null, key);
+  }
+  const { proxy, runId, lines } = await proxyWith({});
+  const start = anthropic.requests.length;
+  const answer = await send(proxy.baseUrl, { token: proxy.token, body: '{"messages":[],"container":"KEY-MARKER"}' });
+  assert.equal(answer.status, 400);
+  assert.equal(anthropic.requests.length, start, 'nothing upstream');
+  await proxy.close();
+  assert.equal((await readProxyRecord(root.dir, runId)).refused['body-key'], 1);
+  assert.ok(lines.every((line) => !line.includes('KEY-MARKER') && !line.includes('container')), lines.join(''));
+});
+
+test('review round 5 of factory#29 (SEC-21): a throwing noteDropped stops that count, never the stream', async () => {
+  const { proxy, runId, lines } = await proxyWith({ accounting: { noteDropped: () => {
+    throw new Error('agent-words in a header\'s name');
+  } } });
+  const answer = await send(proxy.baseUrl, { token: proxy.token, headers: { 'x-off-the-list': 'v' } });
+  assert.equal(answer.status, 200);
+  assert.equal(answer.body, sseAnswer().join(''));
+  assert.equal((await send(proxy.baseUrl, { token: proxy.token })).status, 200, 'the next call');
+  await proxy.close();
+  assert.ok((await readProxyRecord(root.dir, runId)).accountingErrors >= 1);
+  assert.ok(lines.every((line) => !line.includes('agent-words')), lines.join(''));
 });

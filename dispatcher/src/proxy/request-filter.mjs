@@ -8,7 +8,9 @@
  * anything goes upstream:
  *
  * - the body is held, to the proxy's BODY_LIMIT (a chunked body too), and parsed as JSON; it must be an object, no
- *   deeper than MAX_DEPTH anywhere and of no more than MAX_NODES arrays and objects (below);
+ *   deeper than MAX_DEPTH anywhere and of no more than MAX_NODES items, its arrays, objects, keys and values (below);
+ * - its top-level keys are of BODY_KEYS alone (review round 5 of factory#29: a beta passed might add a parameter of
+ *   the body that runs a tool or a fetch on Anthropic's side);
  * - `messages` is an array of objects, each with a `content` that is a string or an array (review round 3 of
  *   factory#29: one that is no array was taken as empty, and passed);
  * - it has no key `mcp_servers`, whatever its value;
@@ -51,7 +53,8 @@
 
 /** The reasons of a refusal, as proxy.json counts them. */
 export const FILTER_REASONS = Object.freeze(['body-not-json', 'body-not-object', 'depth', 'size', 'messages-form',
-  'mcp-servers', 'tools-not-list', 'server-tool', 'content-type', 'content-source', 'content-file', 'beta', 'invalid']);
+  'mcp-servers', 'body-key', 'tools-not-list', 'server-tool', 'content-type', 'content-source', 'content-file', 'beta',
+  'invalid']);
 
 /**
  * The deepest a body may nest, the body itself one level, each array or object inside it one more (sec-d3e7). Claude
@@ -63,15 +66,30 @@ export const FILTER_REASONS = Object.freeze(['body-not-json', 'body-not-object',
 export const MAX_DEPTH = 64;
 
 /**
- * The most arrays and objects a body may hold (review round 4 of factory#29, SEC-21, measured by the owner: 32 MiB of
- * about 11 million empty arrays cost JSON.parse 1.6 s, a walk 1.5 s and about 1.57 GB of heap, the event loop stopped
- * some 3 s; on the VM, a lower heap limit would end the dispatcher out of memory: sec-d3e7's end by another road).
- * Claude Code's calls hold few: the fixture's two variants, built with an input_schema of one object per tool, hold 34
- * and 38 (a real tool's JSON Schema some tens more each, a long session's messages some thousands). 100 000 is far
- * above that, and far below what stops the loop or fills the heap: the walk of 100 000 nodes takes milliseconds and a
- * few MB. It is counted twice: on the bytes, before JSON.parse builds anything (byteShape), and on the parsed tree.
+ * The most items a body may hold: its arrays and objects, and every key and value in them (review round 4 of
+ * factory#29, SEC-21; round 5 counted the containers alone). The owner's measurements: 32 MiB of about 11 million
+ * empty arrays cost JSON.parse 1.6 s, a walk 1.5 s and some 1.57 GB of heap; 32 MiB of 3.5 million distinct keys cost
+ * JSON.parse 1.7 s and 304 MB, of 4.4 million short strings 1.0 s and 167 MB, of 16.8 million numbers 0.14 s and
+ * 160 MB. Claude Code's calls hold few: the fixture's two variants, built with an input_schema of one object per tool,
+ * hold 139 (A) and 154 (B) items, counted as byteShape counts them; a real tool's JSON Schema adds some hundreds, a
+ * long session's messages some tens of thousands. 200 000 is far above that, and bounds a body's parse to some 0.1 s
+ * and 20 MB by the measurements' rates, four requests in flight some 80 MB.
+ *
+ * Counted on the bytes, before JSON.parse builds anything (byteShape): each bracket, comma and colon outside a string,
+ * which for valid JSON is each array and object, and each value after the first of an array, and each key and value
+ * of an object but its first value. treeBounds counts the same items on the parsed tree.
  */
-export const MAX_NODES = 100_000;
+export const MAX_NODES = 200_000;
+
+/**
+ * The top-level keys a body may have (review round 5 of factory#29, FAC-S02; an allowlist, as the whole filter): the
+ * ones Claude Code 2.1.328's calls sent, both variants of the owner's measurement (the fixture, whose test holds
+ * them to this list), and no other. A parameter Claude Code may send in another mode of work (tool_choice, temperature,
+ * stop_sequences, …) is not here until a measurement shows it: a call that sends one is refused (400), which the
+ * trial on the VM shows, never let through unmeasured.
+ */
+export const BODY_KEYS = Object.freeze(['context_management', 'max_tokens', 'messages', 'metadata', 'model',
+  'output_config', 'stream', 'system', 'thinking', 'tools']);
 
 /**
  * The content block types passed (review round 4 of factory#29, FAC-S02; an allowlist, as the whole filter): the two
@@ -85,9 +103,10 @@ export const BLOCK_TYPES = Object.freeze(['text', 'image', 'document', 'tool_use
   'redacted_thinking']);
 
 /**
- * The arrays and objects of a JSON text, and its deepest nesting, counted on its bytes before JSON.parse builds
- * anything (review round 4 of factory#29): brackets outside strings, a string's escapes skipped. It stops at the
- * first bound passed. The text need not be valid JSON: JSON.parse refuses what this cannot judge.
+ * The items of a JSON text (MAX_NODES), and its deepest nesting, counted on its bytes before JSON.parse builds
+ * anything (review rounds 4 and 5 of factory#29): each bracket, comma and colon outside a string, a string's escapes
+ * skipped (a \" stays in it). It stops at the first bound passed. The text need not be valid JSON: JSON.parse refuses
+ * what this cannot judge.
  *
  * @param {Buffer} bytes
  * @returns {'depth' | 'size' | null}
@@ -120,6 +139,11 @@ export function byteShape(bytes) {
       }
     } else if (b === 0x5d || b === 0x7d) {
       depth -= 1;
+    } else if (b === 0x2c || b === 0x3a) {
+      nodes += 1;
+      if (nodes > MAX_NODES) {
+        return 'size';
+      }
     }
   }
   return null;
@@ -131,9 +155,13 @@ export const SOURCES = Object.freeze(['base64', 'text']);
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /**
- * Why `value` is past its bounds, or null: deeper than MAX_DEPTH (itself one level), or more than MAX_NODES arrays and
- * objects, walked with a stack of its own, every array and object under any key, in one pass. It stops at the first
- * bound passed, so a hostile tree is never walked whole.
+ * Why `value` is past its bounds, or null: deeper than MAX_DEPTH (itself one level), or of more than MAX_NODES items,
+ * counted as byteShape counts them on the bytes (each array and object, an array's values after its first, an
+ * object's keys and its values after its first), walked with a stack of its own, every array and object under any key,
+ * in one pass. It stops at the first bound passed, so a hostile tree is never walked whole.
+ *
+ * A second line, not the first: for valid JSON it counts what byteShape counted, so it refuses nothing byteShape
+ * passed; it holds only if byteShape were wrong.
  *
  * @returns {'depth' | 'size' | null}
  */
@@ -148,11 +176,13 @@ export function treeBounds(value) {
     if (depth > MAX_DEPTH) {
       return 'depth';
     }
-    nodes += 1;
+    const children = Array.isArray(node) ? node : Object.values(node);
+    // The container, then its commas and colons: n - 1 in an array of n, 2k - 1 in an object of k keys.
+    nodes += 1 + (children.length === 0 ? 0 : (Array.isArray(node) ? children.length - 1 : 2 * children.length - 1));
     if (nodes > MAX_NODES) {
       return 'size';
     }
-    for (const child of Array.isArray(node) ? node : Object.values(node)) {
+    for (const child of children) {
       if (typeof child === 'object' && child !== null) {
         stack.push([child, depth + 1]);
       }
@@ -253,6 +283,9 @@ export const requestRefusal = (request) => filterRequest(request).reason;
 function refusalOf(parsed) {
   if (Object.hasOwn(parsed, 'mcp_servers')) {
     return 'mcp-servers';
+  }
+  if (!Object.keys(parsed).every((key) => BODY_KEYS.includes(key))) {
+    return 'body-key';
   }
   if (Object.hasOwn(parsed, 'tools')) {
     if (!Array.isArray(parsed.tools)) {

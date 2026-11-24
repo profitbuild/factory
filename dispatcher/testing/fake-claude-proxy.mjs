@@ -37,8 +37,8 @@ export function callProxy(argv, tokenDir, fakeDir, entry) {
   } catch {
     // no token: the call is sent without one, as Claude Code's would fail
   }
-  const body = JSON.stringify({ model: 'claude-opus-5-5', stream: true, messages: [{ role: 'user', content: 'hi' }],
-    marker: entry.bodyMarker ?? '' });
+  const body = JSON.stringify({ model: 'claude-opus-5-5', stream: true,
+    messages: [{ role: 'user', content: `hi ${entry.bodyMarker ?? ''}` }] });
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', CLIENT, url, token,
     JSON.stringify(entry.headers ?? {}), body], { encoding: 'utf8', timeout: 20_000 });
   const result = child.stdout ? JSON.parse(child.stdout) : { error: `exit ${child.status}` };
