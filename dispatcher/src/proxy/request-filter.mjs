@@ -7,20 +7,38 @@
  * (mcp_servers), which reach any host from there: past the VM's filter and the managed settings' tools. So, before
  * anything goes upstream:
  *
- * - the body is held, to the proxy's BODY_LIMIT (a chunked body too), and parsed as JSON; it must be an object;
+ * - the body is held, to the proxy's BODY_LIMIT (a chunked body too), and parsed as JSON; it must be an object, no
+ *   deeper than MAX_DEPTH anywhere (below);
+ * - `messages` is an array of objects, each with a `content` that is a string or an array (review round 3 of
+ *   factory#29: one that is no array was taken as empty, and passed);
  * - it has no key `mcp_servers`, whatever its value;
  * - each element of `tools`, if there is one (an array), is a client tool: an object with no `type`, or
  *   `type: "custom"`. Any other `type`, whatever its name or version, is refused;
  * - each object with a `source` key, in any content block of `messages` and of `system` (when it is a list), a
  *   tool_result's content among them, at any depth, has a source of type `base64` or `text`: Anthropic fetches a
  *   `url` source itself, and a `file` one is the workspace's, so any other type is refused (review round 2 of
- *   factory#29, sec-c41e);
+ *   factory#29, sec-c41e); and no object there has a `file_id` key (a container_upload block names a file of the
+ *   workspace's with no source: harmless only while code execution, a server tool, is refused; review round 3);
  * - each comma-separated value of `anthropic-beta` is on the list measured from Claude Code's own calls
  *   (claude-code/expectations.json's anthropicBetas, re-measured at a version bump). Any other value refuses the
  *   request: it is not cut from the header.
  * A request refused is 400 invalid_request_error, X-Should-Retry false (server.mjs), counted in proxy.json under its
  * reason, and logged by that reason alone: never the body, a tool's name or type, or the header's value. Nothing of
  * it reaches upstream.
+ *
+ * The filter never throws, on any input of a client's (review round 3 of factory#29, sec-d3e7, a regression of
+ * round 2). Round 2's walk of the content (a recursion) and JSON.stringify of the parsed body went down a tree the
+ * task's code builds, with no bound: 200 KB of nested arrays (JSON.parse takes them) threw "Maximum call stack size
+ * exceeded" after JSON.parse's try, the request's async handler left the rejection unhandled, and Node ended the
+ * dispatcher without its finally blocks (the proxy not closed, the token not revoked, the task left running, its
+ * container with no one to watch it). So, at each layer:
+ *   1. the depth of the whole parsed body is measured first, iteratively (a stack of its own, not the call stack),
+ *      every key included, and a body deeper than MAX_DEPTH is refused (reason depth) before anything else walks it or
+ *      JSON.stringify serializes it; the content's walk is iterative too;
+ *   2. filterRequest turns any exception at all into a refusal (reason invalid), logged by that reason alone, never by
+ *      the exception's text, which could hold the body's;
+ *   3. server.mjs's handler catches whatever is left, answers 500 in Anthropic's shape (or ends the socket once the
+ *      headers went), and leaves no rejection: the process outlives any request.
  *
  * What goes upstream is what was checked: the parsed body, serialized again (JSON.stringify), so a key given twice or
  * bytes that are no UTF-8 cannot make Anthropic's parser see another body than this check did (review round 2 of
@@ -30,26 +48,72 @@
  */
 
 /** The reasons of a refusal, as proxy.json counts them. */
-export const FILTER_REASONS = Object.freeze(['body-not-json', 'body-not-object', 'mcp-servers', 'tools-not-list',
-  'server-tool', 'content-source', 'beta']);
+export const FILTER_REASONS = Object.freeze(['body-not-json', 'body-not-object', 'depth', 'messages-form',
+  'mcp-servers', 'tools-not-list', 'server-tool', 'content-source', 'content-file', 'beta', 'invalid']);
+
+/**
+ * The deepest a body may nest, the body itself one level, each array or object inside it one more (sec-d3e7). Claude
+ * Code's calls are shallow: the owner's measurement (2026-11-24) shows message blocks four levels down (body,
+ * messages, a message, its content), a tool_result's content two more, and a tool's input_schema, a JSON Schema,
+ * some ten more at most. 64 is far above that, and far below what JSON.stringify's recursion, the one walk left on
+ * the call stack, can take (V8's stack holds thousands of frames).
+ */
+export const MAX_DEPTH = 64;
 
 /** The content sources passed: data the request carries, never one Anthropic fetches (sec-c41e). */
 export const SOURCES = Object.freeze(['base64', 'text']);
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** Whether each object with a `source` key in `content` (a block list, or any value), at any depth, has a SOURCE. */
-function sourcesAllowed(content) {
-  if (Array.isArray(content)) {
-    return content.every(sourcesAllowed);
+/**
+ * Whether `value` nests no deeper than `max` (itself one level), walked with a stack of its own: every array and
+ * object, under any key. It stops at the first level past `max`, so a hostile tree is never walked whole.
+ */
+export function withinDepth(value, max) {
+  const stack = [[value, 1]];
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop();
+    if (typeof node !== 'object' || node === null) {
+      continue;
+    }
+    if (depth > max) {
+      return false;
+    }
+    for (const child of Array.isArray(node) ? node : Object.values(node)) {
+      if (typeof child === 'object' && child !== null) {
+        stack.push([child, depth + 1]);
+      }
+    }
   }
-  if (!isObject(content)) {
-    return true;
+  return true;
+}
+
+/**
+ * The reason `content` (a block list, or any value) is refused, or null: each object with a `source` key, at any depth
+ * through the blocks' `content`, must have a SOURCE, and none may have a `file_id`. Walked with a stack of its own.
+ */
+function contentRefusal(content) {
+  const stack = [content];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (Array.isArray(node)) {
+      stack.push(...node);
+      continue;
+    }
+    if (!isObject(node)) {
+      continue;
+    }
+    if (Object.hasOwn(node, 'source') && !(isObject(node.source) && SOURCES.includes(node.source.type))) {
+      return 'content-source';
+    }
+    if (Object.hasOwn(node, 'file_id') || (isObject(node.source) && Object.hasOwn(node.source, 'file_id'))) {
+      return 'content-file';
+    }
+    if (Object.hasOwn(node, 'content')) {
+      stack.push(node.content);
+    }
   }
-  if (Object.hasOwn(content, 'source') && !(isObject(content.source) && SOURCES.includes(content.source.type))) {
-    return false;
-  }
-  return !Object.hasOwn(content, 'content') || sourcesAllowed(content.content);
+  return null;
 }
 
 /**
@@ -57,9 +121,18 @@ function sourcesAllowed(content) {
  *
  * @param {{ body: Buffer, beta: string | string[] | undefined, betas: readonly string[] }} request `beta` the request's
  *   anthropic-beta header (node joins a repeated one); `betas` the values allowed
- * @returns {{ reason: string | null, json: string | null }} `reason` one of FILTER_REASONS
+ * @returns {{ reason: string | null, json: string | null }} `reason` one of FILTER_REASONS; never a throw
  */
 export function filterRequest({ body, beta, betas }) {
+  try {
+    return checkRequest({ body, beta, betas });
+  } catch {
+    // Whatever the body made happen, a refusal, never an exception (sec-d3e7, layer 2): its text is not kept.
+    return { reason: 'invalid', json: null };
+  }
+}
+
+function checkRequest({ body, beta, betas }) {
   const refused = (reason) => ({ reason, json: null });
   if (beta !== undefined) {
     const values = (Array.isArray(beta) ? beta.join(',') : beta).split(',').map((value) => value.trim());
@@ -75,6 +148,10 @@ export function filterRequest({ body, beta, betas }) {
   }
   if (!isObject(parsed)) {
     return refused('body-not-object');
+  }
+  // Before anything walks the body or serializes it (sec-d3e7, layer 1).
+  if (!withinDepth(parsed, MAX_DEPTH)) {
+    return refused('depth');
   }
   const reason = refusalOf(parsed);
   return reason === null ? { reason: null, json: JSON.stringify(parsed) } : refused(reason);
@@ -96,10 +173,16 @@ function refusalOf(parsed) {
       return 'server-tool';
     }
   }
-  const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
-  if (!messages.every((message) => !isObject(message) || sourcesAllowed(message.content))
-    || (Array.isArray(parsed.system) && !sourcesAllowed(parsed.system))) {
-    return 'content-source';
+  if (!Array.isArray(parsed.messages) || !parsed.messages.every((message) => isObject(message)
+    && (typeof message.content === 'string' || Array.isArray(message.content)))) {
+    return 'messages-form';
+  }
+  for (const content of [...parsed.messages.map((message) => message.content),
+    ...(Array.isArray(parsed.system) ? [parsed.system] : [])]) {
+    const reason = contentRefusal(content);
+    if (reason !== null) {
+      return reason;
+    }
   }
   return null;
 }

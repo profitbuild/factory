@@ -914,7 +914,7 @@ async function filesUnder(dir) {
 }
 
 /** One POST to a proxy's address with `token`: its status, or the connection's error. */
-const askProxy = (url, token) => fetch(`${url}/v1/messages?beta=true`, { method: 'POST', body: '{}',
+const askProxy = (url, token) => fetch(`${url}/v1/messages?beta=true`, { method: 'POST', body: '{"messages":[]}',
   headers: { 'x-api-key': token, authorization: `Bearer ${token}`, 'content-type': 'application/json' } })
   .then(async (res) => ({ status: res.status, body: await res.text() }),
     (error) => ({ error: error.cause?.code ?? error.message }));

@@ -48,8 +48,9 @@ async function proxyOf({ ports = testPorts(), upstream = anthropic.upstream } = 
 }
 
 /** One request to `baseUrl`, its answer read whole: { status, headers, body } or { error }. */
-function send(baseUrl, { method = 'POST', path = '/v1/messages?beta=true', headers = {}, body = '{}', token,
-  onFirst } = {}) {
+function send(baseUrl, {
+  method = 'POST', path = '/v1/messages?beta=true', headers = {}, body = '{"messages":[]}', token, onFirst,
+} = {}) {
   const url = new URL(baseUrl);
   const all = { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', ...headers };
   if (token !== undefined) {
@@ -178,7 +179,7 @@ test('#0-313 AC8: the client\'s Authorization, X-Api-Key and Cookie and every he
   const start = anthropic.requests.length;
   const answer = await send(proxy.baseUrl, { token: proxy.token, headers: { cookie: 'c=COOKIE-VALUE',
     'x-foo': 'FOO-VALUE', 'x-stainless-arch': 'x64', 'user-agent': 'claude-cli/2.1.328', 'anthropic-beta': 'b1',
-    'accept-encoding': 'gzip', host: 'evil.example', 'x_odd': 'v' }, body: '{"marker":"BODY-MARKER"}' });
+    'accept-encoding': 'gzip', host: 'evil.example', 'x_odd': 'v' }, body: '{"messages":[],"marker":"BODY-MARKER"}' });
   assert.equal(answer.status, 200);
   const seen = anthropic.requests[start];
   assert.equal(seen.headers['x-api-key'], KEY, 'the key, set by the proxy');
@@ -191,7 +192,7 @@ test('#0-313 AC8: the client\'s Authorization, X-Api-Key and Cookie and every he
     assert.ok(seen.headers[name] !== undefined, name);
   }
   assert.equal(seen.url, '/v1/messages?beta=true');
-  assert.equal(seen.body, '{"marker":"BODY-MARKER"}', 'the body streamed as it was');
+  assert.equal(seen.body, '{"messages":[],"marker":"BODY-MARKER"}', 'the body as it was sent');
   // The response: the proxy's list, set-cookie and the organization's id dropped.
   assert.equal(answer.headers['set-cookie'], undefined);
   assert.equal(answer.headers['anthropic-organization-id'], undefined);
@@ -457,11 +458,11 @@ test('review round 1 of factory#29, sec-5a7e: the filter\'s rules one by one, an
     assert.equal(check(JSON.stringify(CLIENT_CALL), 'b1'), null);
     assert.equal(check(JSON.stringify(CLIENT_CALL), ['b1', 'beta-allowed-2025']), null, 'a repeated header');
     assert.equal(check(JSON.stringify(CLIENT_CALL), 'b1', []), 'beta', 'an empty list allows no beta');
-    assert.equal(check(JSON.stringify({ model: 'm' }), undefined), null, 'no tools at all');
-    assert.equal(check(JSON.stringify({ tools: [] }), undefined), null);
-    assert.equal(check(JSON.stringify({ tools: [{ type: 'custom', name: 'x' }] }), undefined), null);
-    assert.deepEqual(FILTER_REASONS, ['body-not-json', 'body-not-object', 'mcp-servers', 'tools-not-list',
-      'server-tool', 'content-source', 'beta']);
+    assert.equal(check(JSON.stringify({ model: 'm', messages: [] }), undefined), null, 'no tools at all');
+    assert.equal(check(JSON.stringify({ messages: [], tools: [] }), undefined), null);
+    assert.equal(check(JSON.stringify({ messages: [], tools: [{ type: 'custom', name: 'x' }] }), undefined), null);
+    assert.deepEqual(FILTER_REASONS, ['body-not-json', 'body-not-object', 'depth', 'messages-form', 'mcp-servers',
+      'tools-not-list', 'server-tool', 'content-source', 'content-file', 'beta', 'invalid']);
     await assert.rejects(startProxy({ addr: ADDR, ports: testPorts(), key: KEY, runId: '20261123T100000Z-0d0313',
       stateDir: root.dir, err: { write() {} } }), TypeError);
   });
@@ -536,16 +537,26 @@ test('review round 2 of factory#29: a client gone before its body is whole sends
   const { proxy, runId } = await proxyOf();
   proxy.activate();
   const start = anthropic.requests.length;
+  // The headers and part of the body written (the write's callback: they left this side), then the client gone.
   await new Promise((resolve) => {
     const url = new URL(proxy.baseUrl);
     const req = request({ host: url.hostname, port: url.port, method: 'POST', path: '/v1/messages',
       headers: { 'x-api-key': proxy.token, 'content-length': '1000' } });
-    req.on('error', () => resolve());
-    req.write('{"model":');
-    setTimeout(() => { req.destroy(); resolve(); }, 200);
+    req.on('error', () => {});
+    req.write('{"model":', () => { req.destroy(); resolve(); });
   });
-  await new Promise((resolve) => { setTimeout(resolve, 200); });
+  // Waited for by the proxy's own count of it (review round 3 of factory#29, GEN-07), never a fixed delay: a client
+  // the proxy never saw would leave gone at 0, and the test would fail, not pass for the wrong reason.
+  let record;
+  for (const deadline = Date.now() + 10_000; Date.now() < deadline;) {
+    record = await readProxyRecord(root.dir, runId);
+    if (record.gone === 1) {
+      break;
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+  }
   await proxy.close();
+  assert.equal(record.gone, 1, 'the proxy saw the client go before its body');
   assert.equal(anthropic.requests.length, start, 'nothing upstream');
   assert.equal((await readProxyRecord(root.dir, runId)).forwarded, 0);
 });
@@ -560,14 +571,15 @@ test('review round 2 of factory#29 (FAC-A01): the filter\'s reasons are each a k
   }
   // And every other key is a refusal of the server's own.
   const own = ['no-token', 'credentials-differ', 'unknown-token', 'token-not-active', 'path', 'in-flight',
-    'body-too-large', 'upstream'];
+    'body-too-large', 'upstream', 'internal'];
   assert.deepEqual([...keys].sort(), [...own, ...FILTER_REASONS].sort());
 });
 
-/** A request of the fixture's shape (the owner's measurement, 2026-11-24): its keys, types and roles, made-up values. */
-async function measuredCall() {
-  const { call } = JSON.parse(await readFile(new URL('../testing/fixtures/claude-code-2.1.328-request-shape.json',
-    import.meta.url), 'utf8'));
+/** A request of a call's shape in the fixture (the owner's measurement, 2026-11-24), its values made up. */
+const readFixture = async () => JSON.parse(await readFile(new URL(
+  '../testing/fixtures/claude-code-2.1.328-request-shape.json', import.meta.url), 'utf8'));
+
+async function measuredCall(call) {
   const block = (shape) => ({ type: shape.type, ...(shape.type === 'text' ? { text: 't' } : {}) });
   const content = (shape) => (shape === 'string' ? 's' : shape.map(block));
   const values = { context_management: {}, max_tokens: 1, metadata: { user_id: 'u' }, model: 'claude-opus-5-5',
@@ -584,28 +596,138 @@ async function measuredCall() {
 
 test('#0-313 (the owner\'s measurement, 2026-11-24): the call Claude Code 2.1.328 makes passes the filter whole, its '
   + 'betas those of expectations.json; the headers it sends off the list are dropped and named', async () => {
-  const { call, body, headers } = await measuredCall();
+  const fixture = await readFixture();
   const { readExpectations } = await import('../src/flow/expectations.mjs');
-  const { anthropicBetas } = await readExpectations();
-  assert.deepEqual([...anthropicBetas].sort(), [...call.betas].sort(), 'the list is the measured one');
-  assert.ok(call.tools.every((tool) => !tool.keys.includes('type')), 'no tool of the call is typed');
+  const { anthropicBetas, claudeCodeVersion } = await readExpectations();
+  // The fixture's version is the pin's (review round 3 of factory#29, FAC-A01): a bump with no new measurement fails.
+  assert.equal(fixture.claudeCodeVersion, claudeCodeVersion);
+  assert.deepEqual(fixture.calls.map((c) => c.variant), ['A', 'B'], 'both variants of the measurement');
+  for (const measured of fixture.calls) {
+    const { call, body, headers } = await measuredCall(measured);
+    assert.deepEqual([...anthropicBetas].sort(), [...call.betas].sort(), 'the list is the measured one');
+    assert.ok(call.tools.every((tool) => !tool.keys.includes('type')), 'no tool of the call is typed');
+    const { filterRequest } = await import('../src/proxy/request-filter.mjs');
+    const checked = filterRequest({ body: Buffer.from(body), beta: headers['anthropic-beta'], betas: anthropicBetas });
+    assert.equal(checked.reason, null);
+    next += 1;
+    const runId = `20261124T19${String(next).padStart(4, '0')}Z-0d0313`;
+    await mkdir(join(root.dir, 'tasks', runId), { recursive: true, mode: 0o700 });
+    const proxy = await startProxy({ addr: ADDR, ports: testPorts(), key: KEY, betas: anthropicBetas, runId,
+      stateDir: root.dir, err: { write() {} }, proxyTesting: { upstream: anthropic.upstream } });
+    proxy.activate();
+    const start = anthropic.requests.length;
+    const answer = await send(proxy.baseUrl, { token: proxy.token, headers, body });
+    assert.equal(answer.status, 200);
+    assert.deepEqual(JSON.parse(anthropic.requests[start].body), JSON.parse(body));
+    assert.equal(anthropic.requests[start].headers['anthropic-beta'], call.betas.join(','));
+    await proxy.close();
+    // The measured headers off the list (review of #0-313's plan, E): known now, dropped knowingly; AC4 shows whether
+    // a call answers without them.
+    assert.deepEqual((await readProxyRecord(root.dir, runId)).droppedHeaders.sort(),
+      ['anthropic-dangerous-direct-browser-access', 'x-app', 'x-claude-code-session-id']);
+  }
+});
+
+// Review round 3 of factory#29, sec-d3e7 (a regression of round 2): a hostile tree in the body must neither throw out
+// of the filter nor leave the handler a rejection, at any layer.
+const nested = (n) => `${'['.repeat(n)}${']'.repeat(n)}`;
+
+test('review round 3 of factory#29, sec-d3e7: a body nested 100 000 deep, under messages, metadata or a tool\'s '
+  + 'input_schema, is 400 depth with nothing upstream, and the proxy answers the next call', async () => {
+  const { MAX_DEPTH } = await import('../src/proxy/request-filter.mjs');
+  assert.equal(MAX_DEPTH, 64);
+  const rejections = [];
+  const onRejection = (reason) => rejections.push(reason);
+  process.on('unhandledRejection', onRejection);
+  try {
+    const { proxy, runId } = await proxyOf();
+    proxy.activate();
+    const start = anthropic.requests.length;
+    for (const body of [`{"messages":[{"role":"user","content":${nested(100_000)}}]}`,
+      `{"messages":[],"metadata":${nested(100_000)}}`,
+      `{"messages":[],"tools":[{"name":"x","input_schema":${nested(100_000)}}]}`]) {
+      assert.ok(Buffer.byteLength(body) < 32 * 1024 * 1024);
+      const answer = await send(proxy.baseUrl, { token: proxy.token, body });
+      assert.equal(answer.status, 400);
+      assert.equal(errorOf(answer).error.type, 'invalid_request_error');
+      assert.equal((await send(proxy.baseUrl, { token: proxy.token })).status, 200, 'the proxy answers the next call');
+    }
+    assert.equal(anthropic.requests.length, start + 3, 'only the three good calls went upstream');
+    await proxy.close();
+    assert.equal((await readProxyRecord(root.dir, runId)).refused.depth, 3);
+    assert.deepEqual(rejections, [], 'no rejection left');
+  } finally {
+    process.off('unhandledRejection', onRejection);
+  }
+});
+
+test('review round 3 of factory#29, sec-d3e7: a body at MAX_DEPTH passes, one level deeper is refused, under any key',
+  async () => {
+    const { MAX_DEPTH, filterRequest } = await import('../src/proxy/request-filter.mjs');
+    const check = (body) => filterRequest({ body: Buffer.from(body), betas: [] }).reason;
+    // The body is one level, metadata's value the next: n nested arrays make 1 + n.
+    assert.equal(check(`{"messages":[],"metadata":${nested(MAX_DEPTH - 1)}}`), null);
+    assert.equal(check(`{"messages":[],"metadata":${nested(MAX_DEPTH)}}`), 'depth');
+    assert.equal(check(`{"messages":[{"content":[{"type":"tool_result","content":${nested(MAX_DEPTH)}}]}]}`), 'depth');
+    assert.equal(check(`{"messages":[],"x":{"a":${'{"a":'.repeat(MAX_DEPTH)}1${'}'.repeat(MAX_DEPTH)}}}`), 'depth',
+      'objects count as arrays do');
+  });
+
+test('review round 3 of factory#29, sec-d3e7: filterRequest turns any exception into a refusal (invalid), never a '
+  + 'throw', async () => {
   const { filterRequest } = await import('../src/proxy/request-filter.mjs');
-  const checked = filterRequest({ body: Buffer.from(body), beta: headers['anthropic-beta'], betas: anthropicBetas });
-  assert.equal(checked.reason, null);
-  next += 1;
-  const runId = `20261124T19${String(next).padStart(4, '0')}Z-0d0313`;
-  await mkdir(join(root.dir, 'tasks', runId), { recursive: true, mode: 0o700 });
-  const proxy = await startProxy({ addr: ADDR, ports: testPorts(), key: KEY, betas: anthropicBetas, runId,
-    stateDir: root.dir, err: { write() {} }, proxyTesting: { upstream: anthropic.upstream } });
-  proxy.activate();
-  const start = anthropic.requests.length;
-  const answer = await send(proxy.baseUrl, { token: proxy.token, headers, body });
-  assert.equal(answer.status, 200);
-  assert.deepEqual(JSON.parse(anthropic.requests[start].body), JSON.parse(body));
-  assert.equal(anthropic.requests[start].headers['anthropic-beta'], call.betas.join(','));
-  await proxy.close();
-  // The measured headers off the list (review of #0-313's plan, E): known now, dropped knowingly; AC4 shows whether
-  // a call answers without them.
-  assert.deepEqual((await readProxyRecord(root.dir, runId)).droppedHeaders.sort(),
-    ['anthropic-dangerous-direct-browser-access', 'x-app', 'x-claude-code-session-id']);
+  // A beta that is no string makes split throw: caught inside filterRequest, whatever throws.
+  assert.deepEqual(filterRequest({ body: Buffer.from('{"messages":[]}'), beta: 42, betas: [] }),
+    { reason: 'invalid', json: null });
+  assert.deepEqual(filterRequest({ body: Buffer.from('{"messages":[]}'), betas: null, beta: 'b' }),
+    { reason: 'invalid', json: null });
+});
+
+test('review round 3 of factory#29, sec-d3e7: whatever throws in a request\'s handling is 500 api_error, '
+  + 'X-Should-Retry false, logged by its reason, with no rejection left and the proxy still answering', async () => {
+  const rejections = [];
+  const onRejection = (reason) => rejections.push(reason);
+  process.on('unhandledRejection', onRejection);
+  try {
+    next += 1;
+    const runId = `20261124T20${String(next).padStart(4, '0')}Z-0d0313`;
+    await mkdir(join(root.dir, 'tasks', runId), { recursive: true, mode: 0o700 });
+    const lines = [];
+    const proxy = await startProxy({ addr: ADDR, ports: testPorts(), key: KEY, betas: BETAS, runId, stateDir: root.dir,
+      err: { write: (line) => lines.push(line) }, proxyTesting: { upstream: anthropic.upstream,
+        filter: () => { throw new RangeError('agent-words: Maximum call stack size exceeded'); } } });
+    proxy.activate();
+    for (let i = 0; i < 2; i += 1) {
+      const answer = await send(proxy.baseUrl, { token: proxy.token });
+      assert.equal(answer.status, 500);
+      assert.equal(errorOf(answer).error.type, 'api_error');
+      assert.equal(answer.headers['x-should-retry'], 'false');
+    }
+    await proxy.close();
+    assert.equal((await readProxyRecord(root.dir, runId)).refused.internal, 2);
+    assert.ok(lines.every((line) => !line.includes('agent-words')), lines.join(''));
+    await new Promise((resolve) => { setImmediate(resolve); });
+    assert.deepEqual(rejections, [], 'no rejection left');
+  } finally {
+    process.off('unhandledRejection', onRejection);
+  }
+});
+
+test('review round 3 of factory#29: messages must be an array of objects each with a string or array content, and '
+  + 'no object of the content may carry a file_id', async () => {
+  const { filterRequest } = await import('../src/proxy/request-filter.mjs');
+  const check = (value) => filterRequest({ body: Buffer.from(JSON.stringify(value)), betas: [] }).reason;
+  for (const value of [{}, { messages: {} }, { messages: 'x' }, { messages: [1] }, { messages: [null] },
+    { messages: [{ role: 'user' }] }, { messages: [{ role: 'user', content: 3 }] },
+    { messages: [{ role: 'user', content: { type: 'text', text: 't' } }] }]) {
+    assert.equal(check(value), 'messages-form', JSON.stringify(value));
+  }
+  const user = (...content) => ({ messages: [{ role: 'user', content }] });
+  for (const value of [user({ type: 'container_upload', file_id: 'file_1' }),
+    user({ type: 'tool_result', content: [{ type: 'container_upload', file_id: 'file_1' }] }),
+    user({ type: 'image', source: { type: 'base64', data: 'AAAA', file_id: 'file_1' } }),
+    { messages: [], system: [{ type: 'text', text: 's' }, { type: 'container_upload', file_id: 'f' }] }]) {
+    assert.equal(check(value), 'content-file', JSON.stringify(value));
+  }
+  assert.equal(check(user({ type: 'text', text: 'a file_id in words only' })), null);
 });

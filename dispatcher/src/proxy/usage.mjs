@@ -13,7 +13,7 @@
  * - the names of the request headers the proxy dropped (upstream.mjs's list is a guess until AC4 compares it with a
  *   call that answered: review of #0-313's plan, E): lower case, ^[a-z0-9-]{1,64}$, at most 32 distinct, no value; one
  *   off that form, or past 32, is counted, not named.
- * - the requests forwarded, and those refused by reason.
+ * - the requests forwarded, those refused by reason, and the clients gone before their body was whole (gone).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,7 +39,7 @@ export const proxyRecordPath = (stateDir, runId) => join(stateDir, 'tasks', runI
 /** A new record of the run `runId`. */
 export function newRecord(runId) {
   return {
-    version: 1, runId, forwarded: 0, refused: {},
+    version: 1, runId, forwarded: 0, gone: 0, refused: {},
     usage: Object.fromEntries([...TOKENS, 'unmetered'].map((k) => [k, 0])),
     rateLimits: {}, rateLimitsDropped: 0, droppedHeaders: [], droppedHeadersUncounted: 0,
   };

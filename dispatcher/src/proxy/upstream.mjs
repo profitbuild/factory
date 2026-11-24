@@ -96,7 +96,9 @@ export function upstreamAgent(upstream) {
  * @returns {Promise<'done' | 'refused' | 'aborted' | 'gone'>} once the exchange is over: `gone` a client that left
  *   before its body was whole, nothing sent upstream
  */
-export async function forward({ req, res, path, key, betas, upstream, agent, onResponse, onChunk, onDropped, refuse }) {
+export async function forward({
+  req, res, path, key, betas, upstream, agent, filter = filterRequest, onResponse, onChunk, onDropped, refuse,
+}) {
   const declared = req.headers['content-length'];
   if (declared !== undefined && (!/^[0-9]{1,12}$/.test(declared) || Number(declared) > BODY_LIMIT)) {
     refuse(413, 'request_too_large', 'the request body is larger than the proxy takes', 'body-too-large');
@@ -112,7 +114,7 @@ export async function forward({ req, res, path, key, betas, upstream, agent, onR
     refuse(413, 'request_too_large', 'the request body is larger than the proxy takes', 'body-too-large');
     return 'refused';
   }
-  const { reason: refusal, json } = filterRequest({ body, beta: req.headers['anthropic-beta'], betas });
+  const { reason: refusal, json } = filter({ body, beta: req.headers['anthropic-beta'], betas });
   if (refusal !== null) {
     refuse(400, 'invalid_request_error', 'the request asks for what the proxy does not forward: only the client\'s '
       + 'own tools, and the betas of Claude Code\'s calls', refusal);

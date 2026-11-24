@@ -26,6 +26,10 @@
  *   own words, with X-Should-Retry false on 400, 401, 403, 404 and 413, and true with Retry-After: 1 on 429 and 503
  *   (opencomputer's modelproxy, its design only), so Claude Code retries only what can succeed.
  * - Authentication first, then the path, then the limit: a request without the token learns nothing of the rest.
+ * - The handler leaves no rejection (review round 3 of factory#29, sec-d3e7, layer 3): whatever a request makes throw
+ *   is caught where it happens, answered 500 api_error with X-Should-Retry false (or the socket ended, once the
+ *   headers went), counted as refused (internal) and logged by that reason alone. A rejection left would end the
+ *   dispatcher with none of its finally blocks run. No process-wide handler swallows errors instead.
  * The order of checks, the streaming and what is counted are upstream.mjs's and usage.mjs's.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -67,8 +71,8 @@ export function presentedToken(headers) {
  *
  * @param {{ addr: string, ports: number[], key: string, betas: readonly string[], runId: string, stateDir: string,
  *   err: { write: (line: string) => void }, proxyTesting?: { upstream?: object } }} options `betas` the
- *   anthropic-beta values allowed (expectations.json's anthropicBetas); `proxyTesting.upstream` a fake upstream, for
- *   the tests only
+ *   anthropic-beta values allowed (expectations.json's anthropicBetas); `proxyTesting.upstream` a fake upstream and
+ *   `proxyTesting.filter` a filter in filterRequest's place (one that throws), for the tests only
  * @returns {Promise<{ baseUrl: string, token: string, port: number, activate: () => void, revoke: () => void,
  *   close: () => Promise<void> }>}
  */
@@ -77,6 +81,7 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
     throw new TypeError('startProxy: betas must be the list of anthropic-beta values allowed');
   }
   const upstream = proxyTesting.upstream ?? UPSTREAM;
+  const filter = proxyTesting.filter;
   const agent = upstreamAgent(upstream);
   const token = randomBytes(32).toString('base64url');
   const tokenDigest = digest(token);
@@ -144,7 +149,7 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
       inFlight += 1;
       let meter = null;
       try {
-        const how = await forward({ req, res, path: req.url, key, betas, upstream, agent,
+        const how = await forward({ req, res, path: req.url, key, betas, upstream, agent, filter,
           onDropped: (names) => {
             if (names.length > 0) {
               noteDropped(record, names);
@@ -166,6 +171,17 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
           } else {
             meter.end();
           }
+        } else if (how === 'gone') {
+          record.gone += 1;
+        }
+      } catch {
+        // Nothing a request does leaves this handler as a rejection (sec-d3e7, layer 3): its text is not kept.
+        if (res.headersSent) {
+          record.refused.internal = (record.refused.internal ?? 0) + 1;
+          log('refused (internal)');
+          res.destroy();
+        } else {
+          refuse(res, 500, 'api_error', 'the proxy could not handle the request', 'internal');
         }
       } finally {
         inFlight -= 1;
