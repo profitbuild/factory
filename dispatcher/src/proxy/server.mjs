@@ -29,7 +29,11 @@
  * - The handler leaves no rejection (review round 3 of factory#29, sec-d3e7, layer 3): whatever a request makes throw
  *   is caught where it happens, answered 500 api_error with X-Should-Retry false (or the socket ended, once the
  *   headers went), counted as refused (internal) and logged by that reason alone. A rejection left would end the
- *   dispatcher with none of its finally blocks run. No process-wide handler swallows errors instead.
+ *   dispatcher with none of its finally blocks run. No process-wide handler swallows errors instead. The callbacks
+ *   that count a response (onDropped, onResponse, onChunk) run in upstream's listeners, which the handler's catch
+ *   does not see: each catches its own (review round 4 of factory#29, SEC-21). A failure to count stops that
+ *   response's count, never its stream: it is counted in accountingErrors and logged by that reason alone. A listener
+ *   that throws past them destroys both sides (upstream.mjs, 'faulted'), counted as internal.
  * The order of checks, the streaming and what is counted are upstream.mjs's and usage.mjs's.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -70,7 +74,8 @@ export function presentedToken(headers) {
  * Starts the run's proxy on the first free port of `ports`, at `addr`.
  *
  * @param {{ addr: string, ports: number[], key: string, betas: readonly string[], runId: string, stateDir: string,
- *   err: { write: (line: string) => void }, proxyTesting?: { upstream?: object } }} options `betas` the
+ *   err: { write: (line: string) => void }, proxyTesting?: { upstream?: object, filter?: Function, forward?: Function,
+ *   accounting?: { noteRateLimits?: Function, sseMeter?: Function } } }} options `betas` the
  *   anthropic-beta values allowed (expectations.json's anthropicBetas); `proxyTesting.upstream` a fake upstream and
  *   `proxyTesting.filter` a filter in filterRequest's place (one that throws), for the tests only
  * @returns {Promise<{ baseUrl: string, token: string, port: number, activate: () => void, revoke: () => void,
@@ -82,6 +87,9 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
   }
   const upstream = proxyTesting.upstream ?? UPSTREAM;
   const filter = proxyTesting.filter;
+  const forwardOne = proxyTesting.forward ?? forward;
+  const rateLimitsOf = proxyTesting.accounting?.noteRateLimits ?? noteRateLimits;
+  const meterOf = proxyTesting.accounting?.sseMeter ?? sseMeter;
   const agent = upstreamAgent(upstream);
   const token = randomBytes(32).toString('base64url');
   const tokenDigest = digest(token);
@@ -106,10 +114,14 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
       }, RECORD_EVERY_MS);
     }
   };
-  const refuse = (res, status, type, message, reason, detail = '') => {
+  /** A refusal counted and logged by its reason alone, the one way every refusal is. */
+  const count = (reason, detail = '') => {
     record.refused[reason] = (record.refused[reason] ?? 0) + 1;
     touch();
     log(`refused (${reason})`, detail);
+  };
+  const refuse = (res, status, type, message, reason, detail = '') => {
+    count(reason, detail);
     const headers = { 'content-type': 'application/json', 'x-should-retry': RETRY.has(status) ? 'true' : 'false' };
     if (RETRY.has(status)) {
       headers['retry-after'] = '1';
@@ -148,19 +160,36 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
       }
       inFlight += 1;
       let meter = null;
+      let metering = true;
+      // A failure to count (a callback of upstream's listeners) stops this response's count, never its stream.
+      const counted = (callback) => (...args) => {
+        try {
+          callback(...args);
+        } catch {
+          metering = false;
+          meter = null;
+          record.accountingErrors += 1;
+          touch();
+          log('could not count a response');
+        }
+      };
       try {
-        const how = await forward({ req, res, path: req.url, key, betas, upstream, agent, filter,
-          onDropped: (names) => {
+        const how = await forwardOne({ req, res, path: req.url, key, betas, upstream, agent, filter,
+          onDropped: counted((names) => {
             if (names.length > 0) {
               noteDropped(record, names);
               log('dropped request headers off the list', `(${names.length}; their names in proxy.json)`);
             }
-          },
-          onResponse: (status, headers) => {
-            noteRateLimits(record, headers);
-            meter = /^text\/event-stream\b/.test(headers['content-type'] ?? '') ? sseMeter(record) : null;
-          },
-          onChunk: (chunk) => meter?.feed(chunk),
+          }),
+          onResponse: counted((status, headers) => {
+            rateLimitsOf(record, headers);
+            meter = /^text\/event-stream\b/.test(headers['content-type'] ?? '') ? meterOf(record) : null;
+          }),
+          onChunk: counted((chunk) => {
+            if (metering) {
+              meter?.feed(chunk);
+            }
+          }),
           refuse: (status, type, message, reason) => refuse(res, status, type, message, reason),
         });
         // Forwarded: what reached upstream, done or ended midway; not a refusal, nor a client gone before its body.
@@ -169,16 +198,20 @@ export async function startProxy({ addr, ports, key, betas, runId, stateDir, err
           if (meter === null) {
             record.usage.unmetered += 1;
           } else {
-            meter.end();
+            counted(() => meter.end())();
+            if (meter === null) {
+              record.usage.unmetered += 1;
+            }
           }
         } else if (how === 'gone') {
           record.gone += 1;
+        } else if (how === 'faulted') {
+          count('internal');
         }
       } catch {
         // Nothing a request does leaves this handler as a rejection (sec-d3e7, layer 3): its text is not kept.
         if (res.headersSent) {
-          record.refused.internal = (record.refused.internal ?? 0) + 1;
-          log('refused (internal)');
+          count('internal');
           res.destroy();
         } else {
           refuse(res, 500, 'api_error', 'the proxy could not handle the request', 'internal');

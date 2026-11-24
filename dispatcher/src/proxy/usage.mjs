@@ -39,7 +39,7 @@ export const proxyRecordPath = (stateDir, runId) => join(stateDir, 'tasks', runI
 /** A new record of the run `runId`. */
 export function newRecord(runId) {
   return {
-    version: 1, runId, forwarded: 0, gone: 0, refused: {},
+    version: 1, runId, forwarded: 0, gone: 0, accountingErrors: 0, refused: {},
     usage: Object.fromEntries([...TOKENS, 'unmetered'].map((k) => [k, 0])),
     rateLimits: {}, rateLimitsDropped: 0, droppedHeaders: [], droppedHeadersUncounted: 0,
   };

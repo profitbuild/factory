@@ -461,8 +461,9 @@ test('review round 1 of factory#29, sec-5a7e: the filter\'s rules one by one, an
     assert.equal(check(JSON.stringify({ model: 'm', messages: [] }), undefined), null, 'no tools at all');
     assert.equal(check(JSON.stringify({ messages: [], tools: [] }), undefined), null);
     assert.equal(check(JSON.stringify({ messages: [], tools: [{ type: 'custom', name: 'x' }] }), undefined), null);
-    assert.deepEqual(FILTER_REASONS, ['body-not-json', 'body-not-object', 'depth', 'messages-form', 'mcp-servers',
-      'tools-not-list', 'server-tool', 'content-source', 'content-file', 'beta', 'invalid']);
+    assert.deepEqual(FILTER_REASONS, ['body-not-json', 'body-not-object', 'depth', 'size', 'messages-form',
+      'mcp-servers', 'tools-not-list', 'server-tool', 'content-type', 'content-source', 'content-file', 'beta',
+      'invalid']);
     await assert.rejects(startProxy({ addr: ADDR, ports: testPorts(), key: KEY, runId: '20261123T100000Z-0d0313',
       stateDir: root.dir, err: { write() {} } }), TypeError);
   });
@@ -723,11 +724,163 @@ test('review round 3 of factory#29: messages must be an array of objects each wi
     assert.equal(check(value), 'messages-form', JSON.stringify(value));
   }
   const user = (...content) => ({ messages: [{ role: 'user', content }] });
-  for (const value of [user({ type: 'container_upload', file_id: 'file_1' }),
-    user({ type: 'tool_result', content: [{ type: 'container_upload', file_id: 'file_1' }] }),
+  // A container_upload block is refused by its type since round 4 (content-type); a file_id on an allowed block, or
+  // on its source, by this rule.
+  for (const value of [user({ type: 'text', text: 't', file_id: 'file_1' }),
+    user({ type: 'tool_result', content: [{ type: 'document', file_id: 'file_1',
+      source: { type: 'text', data: 'x' } }] }),
     user({ type: 'image', source: { type: 'base64', data: 'AAAA', file_id: 'file_1' } }),
-    { messages: [], system: [{ type: 'text', text: 's' }, { type: 'container_upload', file_id: 'f' }] }]) {
+    { messages: [], system: [{ type: 'text', text: 's' }, { type: 'text', text: 's', file_id: 'f' }] }]) {
     assert.equal(check(value), 'content-file', JSON.stringify(value));
   }
+  assert.equal(check(user({ type: 'container_upload', file_id: 'file_1' })), 'content-type');
   assert.equal(check(user({ type: 'text', text: 'a file_id in words only' })), null);
+});
+
+// Review round 4 of factory#29: the content's block types, the body's nodes, and the callbacks of upstream's listeners.
+
+test('review round 4 of factory#29 (FAC-S02): a content block of a type off BLOCK_TYPES, or with none, is 400 '
+  + 'content-type, nested in a tool_result too, nothing upstream; each allowed type passes', async () => {
+  const { BLOCK_TYPES, filterRequest } = await import('../src/proxy/request-filter.mjs');
+  assert.deepEqual(BLOCK_TYPES, ['text', 'image', 'document', 'tool_use', 'tool_result', 'thinking',
+    'redacted_thinking']);
+  const check = (value) => filterRequest({ body: Buffer.from(JSON.stringify(value)), betas: [] }).reason;
+  const user = (...content) => ({ messages: [{ role: 'user', content }] });
+  const nestedIn = (block) => user({ type: 'tool_result', tool_use_id: 't', content: [block] });
+  for (const block of [{ type: 'server_tool_use', id: 's', name: 'web_fetch', input: {} },
+    { type: 'web_search_tool_result', tool_use_id: 's', content: [] }, { type: 'mcp_tool_use', id: 'm', name: 'x' },
+    { type: 'container_upload', file_id: 'f' }, { type: 'TYPE-MARKER' }, { text: 'no type' }, { type: 3 }, 'a string',
+    ['an array']]) {
+    assert.equal(check(user(block)), 'content-type', JSON.stringify(block));
+    assert.equal(check(nestedIn(block)), 'content-type', `nested: ${JSON.stringify(block)}`);
+    assert.equal(check({ messages: [], system: [block] }), 'content-type', `system: ${JSON.stringify(block)}`);
+  }
+  assert.equal(check(user({ type: 'tool_result', tool_use_id: 't', content: { type: 'text' } })), 'content-type',
+    'a content that is neither a string nor an array');
+  for (const block of [{ type: 'text', text: 't' }, { type: 'image', source: { type: 'base64', data: 'A' } },
+    { type: 'document', source: { type: 'text', data: 'x' } }, { type: 'tool_use', id: 'u', name: 'Bash', input: {} },
+    { type: 'tool_result', tool_use_id: 'u', content: 'string' }, { type: 'thinking', thinking: 't', signature: 's' },
+    { type: 'redacted_thinking', data: 'x' }]) {
+    assert.equal(check(user(block)), null, block.type);
+  }
+  // Through the proxy: refused, nothing upstream.
+  const { proxy } = await proxyOf();
+  proxy.activate();
+  const start = anthropic.requests.length;
+  const answer = await send(proxy.baseUrl, { token: proxy.token,
+    body: JSON.stringify(nestedIn({ type: 'server_tool_use', id: 's', name: 'web_fetch', input: {} })) });
+  assert.equal(answer.status, 400);
+  assert.equal(anthropic.requests.length, start);
+  await proxy.close();
+});
+
+test('review round 4 of factory#29 (SEC-21): a body of MAX_NODES + 1 arrays is 400 size on its bytes, nothing '
+  + 'upstream, the next call 200; one at the limit passes; the parsed tree is held to it too', async () => {
+  const { MAX_NODES, filterRequest, treeBounds, byteShape } = await import('../src/proxy/request-filter.mjs');
+  assert.equal(MAX_NODES, 100_000);
+  // The body, messages and metadata: three nodes, then n empty arrays.
+  const flat = (n) => `{"messages":[],"metadata":[${Array(n).fill('[]').join(',')}]}`;
+  assert.equal(filterRequest({ body: Buffer.from(flat(MAX_NODES - 3)), betas: [] }).reason, null, 'at the limit');
+  assert.equal(filterRequest({ body: Buffer.from(flat(MAX_NODES - 2)), betas: [] }).reason, 'size');
+  assert.equal(byteShape(Buffer.from(flat(MAX_NODES - 2))), 'size', 'refused on the bytes, before JSON.parse');
+  // Before JSON.parse: a body past the limit and no JSON at all is refused by its size, never parsed.
+  assert.equal(filterRequest({ body: Buffer.from(`${flat(MAX_NODES)}not JSON`), betas: [] }).reason, 'size');
+  assert.equal(byteShape(Buffer.from(`{"messages":[],"s":"${'['.repeat(MAX_NODES + 1)}"}`)), null,
+    'brackets in a string are no nodes');
+  assert.equal(byteShape(Buffer.from('{"s":"\\"[[[","messages":[]}')), null, 'an escaped quote keeps the string open');
+  // The second layer, on the tree, whatever the bytes said.
+  assert.equal(treeBounds({ messages: [], metadata: Array.from({ length: MAX_NODES }, () => []) }), 'size');
+  assert.equal(treeBounds({ messages: [], metadata: Array.from({ length: MAX_NODES - 3 }, () => []) }), null);
+  const { proxy, runId } = await proxyOf();
+  proxy.activate();
+  const start = anthropic.requests.length;
+  assert.equal((await send(proxy.baseUrl, { token: proxy.token, body: flat(MAX_NODES) })).status, 400);
+  assert.equal(anthropic.requests.length, start, 'nothing upstream');
+  assert.equal((await send(proxy.baseUrl, { token: proxy.token })).status, 200, 'the next call');
+  await proxy.close();
+  assert.equal((await readProxyRecord(root.dir, runId)).refused.size, 1);
+});
+
+/** A proxy with test's own callbacks (proxyTesting): the record and the log lines kept. */
+async function proxyWith(proxyTesting) {
+  next += 1;
+  const runId = `20261124T21${String(next).padStart(4, '0')}Z-0d0313`;
+  await mkdir(join(root.dir, 'tasks', runId), { recursive: true, mode: 0o700 });
+  const lines = [];
+  const proxy = await startProxy({ addr: ADDR, ports: testPorts(), key: KEY, betas: BETAS, runId, stateDir: root.dir,
+    err: { write: (line) => lines.push(line) }, proxyTesting: { upstream: anthropic.upstream, ...proxyTesting } });
+  proxy.activate();
+  return { proxy, runId, lines };
+}
+
+test('review round 4 of factory#29 (SEC-21): a callback that counts a response and throws (the rate-limit headers, '
+  + 'the stream\'s meter) stops that count, never the stream: the client gets the whole answer, the next call 200',
+async () => {
+  const rejections = [];
+  const onRejection = (reason) => rejections.push(reason);
+  process.on('unhandledRejection', onRejection);
+  try {
+    const whole = sseAnswer().join('');
+    for (const accounting of [
+      { noteRateLimits: () => { throw new Error('agent-words in a header'); } },
+      { sseMeter: () => ({ feed() { throw new Error('agent-words in a chunk'); }, end() {} }) },
+      { sseMeter: () => ({ feed() {}, end() { throw new Error('agent-words at the end'); } }) },
+    ]) {
+      const { proxy, runId, lines } = await proxyWith({ accounting });
+      const answer = await send(proxy.baseUrl, { token: proxy.token });
+      assert.equal(answer.status, 200);
+      assert.equal(answer.body, whole, 'the stream went on');
+      assert.equal((await send(proxy.baseUrl, { token: proxy.token })).status, 200, 'the next call');
+      await proxy.close();
+      const record = await readProxyRecord(root.dir, runId);
+      assert.ok(record.accountingErrors >= 2, JSON.stringify(record));
+      assert.ok(lines.every((line) => !line.includes('agent-words')), lines.join(''));
+    }
+    await new Promise((resolve) => { setImmediate(resolve); });
+    assert.deepEqual(rejections, []);
+  } finally {
+    process.off('unhandledRejection', onRejection);
+  }
+});
+
+test('review round 4 of factory#29 (SEC-21): a listener of upstream\'s response that throws past the callbacks '
+  + 'destroys both sides, counted internal; an exception after the headers went ends the socket; the proxy answers '
+  + 'the next call', async () => {
+  const { forward } = await import('../src/proxy/upstream.mjs');
+  const rejections = [];
+  const onRejection = (reason) => rejections.push(reason);
+  process.on('unhandledRejection', onRejection);
+  try {
+    let calls = 0;
+    // The first exchange's onResponse, and the second's onChunk, throw inside upstream's listeners, unguarded (faults
+    // past the callbacks); the third throws after forward is over, its headers gone; the fourth is as it comes.
+    const { proxy, runId, lines } = await proxyWith({ forward: async (options) => {
+      calls += 1;
+      if (calls === 1) {
+        return forward({ ...options, onResponse: () => { throw new Error('agent-words in a listener'); } });
+      }
+      if (calls === 2) {
+        return forward({ ...options, onChunk: () => { throw new Error('agent-words in a chunk\'s listener'); } });
+      }
+      if (calls === 3) {
+        await forward(options);
+        throw new Error('agent-words after the headers');
+      }
+      return forward(options);
+    } });
+    const first = await send(proxy.baseUrl, { token: proxy.token });
+    assert.ok(first.error !== undefined || first.status === 200, JSON.stringify(first).slice(0, 80));
+    const second = await send(proxy.baseUrl, { token: proxy.token });
+    assert.ok(second.error !== undefined || second.status === 200, JSON.stringify(second).slice(0, 80));
+    const third = await send(proxy.baseUrl, { token: proxy.token });
+    assert.ok(third.error !== undefined || third.status === 200, JSON.stringify(third).slice(0, 80));
+    assert.equal((await send(proxy.baseUrl, { token: proxy.token })).status, 200, 'the next call');
+    await proxy.close();
+    assert.equal((await readProxyRecord(root.dir, runId)).refused.internal, 3);
+    assert.ok(lines.every((line) => !line.includes('agent-words')), lines.join(''));
+    await new Promise((resolve) => { setImmediate(resolve); });
+    assert.deepEqual(rejections, []);
+  } finally {
+    process.off('unhandledRejection', onRejection);
+  }
 });

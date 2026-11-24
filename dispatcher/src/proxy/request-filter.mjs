@@ -8,7 +8,7 @@
  * anything goes upstream:
  *
  * - the body is held, to the proxy's BODY_LIMIT (a chunked body too), and parsed as JSON; it must be an object, no
- *   deeper than MAX_DEPTH anywhere (below);
+ *   deeper than MAX_DEPTH anywhere and of no more than MAX_NODES arrays and objects (below);
  * - `messages` is an array of objects, each with a `content` that is a string or an array (review round 3 of
  *   factory#29: one that is no array was taken as empty, and passed);
  * - it has no key `mcp_servers`, whatever its value;
@@ -17,7 +17,9 @@
  * - each object with a `source` key, in any content block of `messages` and of `system` (when it is a list), a
  *   tool_result's content among them, at any depth, has a source of type `base64` or `text`: Anthropic fetches a
  *   `url` source itself, and a `file` one is the workspace's, so any other type is refused (review round 2 of
- *   factory#29, sec-c41e); and no object there has a `file_id` key (a container_upload block names a file of the
+ *   factory#29, sec-c41e); each block there is of a type of BLOCK_TYPES (review round 4: a block of any other type,
+ *   one a beta might let define or change a tool in a message, never reaches Anthropic); and no object there has a
+ *   `file_id` key (a container_upload block names a file of the
  *   workspace's with no source: harmless only while code execution, a server tool, is refused; review round 3);
  * - each comma-separated value of `anthropic-beta` is on the list measured from Claude Code's own calls
  *   (claude-code/expectations.json's anthropicBetas, re-measured at a version bump). Any other value refuses the
@@ -48,8 +50,8 @@
  */
 
 /** The reasons of a refusal, as proxy.json counts them. */
-export const FILTER_REASONS = Object.freeze(['body-not-json', 'body-not-object', 'depth', 'messages-form',
-  'mcp-servers', 'tools-not-list', 'server-tool', 'content-source', 'content-file', 'beta', 'invalid']);
+export const FILTER_REASONS = Object.freeze(['body-not-json', 'body-not-object', 'depth', 'size', 'messages-form',
+  'mcp-servers', 'tools-not-list', 'server-tool', 'content-type', 'content-source', 'content-file', 'beta', 'invalid']);
 
 /**
  * The deepest a body may nest, the body itself one level, each array or object inside it one more (sec-d3e7). Claude
@@ -60,24 +62,95 @@ export const FILTER_REASONS = Object.freeze(['body-not-json', 'body-not-object',
  */
 export const MAX_DEPTH = 64;
 
+/**
+ * The most arrays and objects a body may hold (review round 4 of factory#29, SEC-21, measured by the owner: 32 MiB of
+ * about 11 million empty arrays cost JSON.parse 1.6 s, a walk 1.5 s and about 1.57 GB of heap, the event loop stopped
+ * some 3 s; on the VM, a lower heap limit would end the dispatcher out of memory: sec-d3e7's end by another road).
+ * Claude Code's calls hold few: the fixture's two variants, built with an input_schema of one object per tool, hold 34
+ * and 38 (a real tool's JSON Schema some tens more each, a long session's messages some thousands). 100 000 is far
+ * above that, and far below what stops the loop or fills the heap: the walk of 100 000 nodes takes milliseconds and a
+ * few MB. It is counted twice: on the bytes, before JSON.parse builds anything (byteShape), and on the parsed tree.
+ */
+export const MAX_NODES = 100_000;
+
+/**
+ * The content block types passed (review round 4 of factory#29, FAC-S02; an allowlist, as the whole filter): the two
+ * measured variants of Claude Code 2.1.328's calls hold text blocks alone; the others are what Claude Code sends in
+ * ordinary work: images and documents (base64 or text sources, SOURCES), its tools' calls and their results, and its
+ * thinking. None runs anything on Anthropic's side. Any other type (server_tool_use, web_search_tool_result,
+ * mcp_tool_use, container_upload, one a beta adds) is refused, so that no beta, such as one that changes tools in the
+ * middle of a conversation, can carry a server tool in a message.
+ */
+export const BLOCK_TYPES = Object.freeze(['text', 'image', 'document', 'tool_use', 'tool_result', 'thinking',
+  'redacted_thinking']);
+
+/**
+ * The arrays and objects of a JSON text, and its deepest nesting, counted on its bytes before JSON.parse builds
+ * anything (review round 4 of factory#29): brackets outside strings, a string's escapes skipped. It stops at the
+ * first bound passed. The text need not be valid JSON: JSON.parse refuses what this cannot judge.
+ *
+ * @param {Buffer} bytes
+ * @returns {'depth' | 'size' | null}
+ */
+export function byteShape(bytes) {
+  let nodes = 0;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < bytes.length; i += 1) {
+    const b = bytes[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (b === 0x5c) {
+        escaped = true;
+      } else if (b === 0x22) {
+        inString = false;
+      }
+    } else if (b === 0x22) {
+      inString = true;
+    } else if (b === 0x5b || b === 0x7b) {
+      nodes += 1;
+      depth += 1;
+      if (depth > MAX_DEPTH) {
+        return 'depth';
+      }
+      if (nodes > MAX_NODES) {
+        return 'size';
+      }
+    } else if (b === 0x5d || b === 0x7d) {
+      depth -= 1;
+    }
+  }
+  return null;
+}
+
 /** The content sources passed: data the request carries, never one Anthropic fetches (sec-c41e). */
 export const SOURCES = Object.freeze(['base64', 'text']);
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /**
- * Whether `value` nests no deeper than `max` (itself one level), walked with a stack of its own: every array and
- * object, under any key. It stops at the first level past `max`, so a hostile tree is never walked whole.
+ * Why `value` is past its bounds, or null: deeper than MAX_DEPTH (itself one level), or more than MAX_NODES arrays and
+ * objects, walked with a stack of its own, every array and object under any key, in one pass. It stops at the first
+ * bound passed, so a hostile tree is never walked whole.
+ *
+ * @returns {'depth' | 'size' | null}
  */
-export function withinDepth(value, max) {
+export function treeBounds(value) {
   const stack = [[value, 1]];
+  let nodes = 0;
   while (stack.length > 0) {
     const [node, depth] = stack.pop();
     if (typeof node !== 'object' || node === null) {
       continue;
     }
-    if (depth > max) {
-      return false;
+    if (depth > MAX_DEPTH) {
+      return 'depth';
+    }
+    nodes += 1;
+    if (nodes > MAX_NODES) {
+      return 'size';
     }
     for (const child of Array.isArray(node) ? node : Object.values(node)) {
       if (typeof child === 'object' && child !== null) {
@@ -85,23 +158,33 @@ export function withinDepth(value, max) {
       }
     }
   }
-  return true;
+  return null;
 }
 
 /**
- * The reason `content` (a block list, or any value) is refused, or null: each object with a `source` key, at any depth
- * through the blocks' `content`, must have a SOURCE, and none may have a `file_id`. Walked with a stack of its own.
+ * The reason `content` is refused, or null. A content is a string, or an array of blocks, each an object of a type of
+ * BLOCK_TYPES; a block's own `content` (a tool_result's) is a content too, at any depth. Each block's `source`, if any,
+ * must have a SOURCE type, and no block, nor its source, may have a `file_id`. Walked with a stack of its own.
  */
 function contentRefusal(content) {
-  const stack = [content];
-  while (stack.length > 0) {
-    const node = stack.pop();
-    if (Array.isArray(node)) {
-      stack.push(...node);
-      continue;
+  const blocks = [];
+  const take = (value) => {
+    if (typeof value === 'string') {
+      return true;
     }
-    if (!isObject(node)) {
-      continue;
+    if (!Array.isArray(value)) {
+      return false;
+    }
+    blocks.push(...value);
+    return true;
+  };
+  if (!take(content)) {
+    return 'content-type';
+  }
+  while (blocks.length > 0) {
+    const node = blocks.pop();
+    if (!isObject(node) || typeof node.type !== 'string' || !BLOCK_TYPES.includes(node.type)) {
+      return 'content-type';
     }
     if (Object.hasOwn(node, 'source') && !(isObject(node.source) && SOURCES.includes(node.source.type))) {
       return 'content-source';
@@ -109,8 +192,8 @@ function contentRefusal(content) {
     if (Object.hasOwn(node, 'file_id') || (isObject(node.source) && Object.hasOwn(node.source, 'file_id'))) {
       return 'content-file';
     }
-    if (Object.hasOwn(node, 'content')) {
-      stack.push(node.content);
+    if (Object.hasOwn(node, 'content') && !take(node.content)) {
+      return 'content-type';
     }
   }
   return null;
@@ -140,6 +223,11 @@ function checkRequest({ body, beta, betas }) {
       return refused('beta');
     }
   }
+  // The bounds on the bytes, before JSON.parse builds anything (review round 4 of factory#29, SEC-21).
+  const bytes = byteShape(body);
+  if (bytes !== null) {
+    return refused(bytes);
+  }
   let parsed;
   try {
     parsed = JSON.parse(body.toString('utf8'));
@@ -149,9 +237,10 @@ function checkRequest({ body, beta, betas }) {
   if (!isObject(parsed)) {
     return refused('body-not-object');
   }
-  // Before anything walks the body or serializes it (sec-d3e7, layer 1).
-  if (!withinDepth(parsed, MAX_DEPTH)) {
-    return refused('depth');
+  // Before anything walks the body or serializes it (sec-d3e7, layer 1), whatever the bytes' count said.
+  const tree = treeBounds(parsed);
+  if (tree !== null) {
+    return refused(tree);
   }
   const reason = refusalOf(parsed);
   return reason === null ? { reason: null, json: JSON.stringify(parsed) } : refused(reason);

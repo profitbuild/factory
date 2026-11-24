@@ -1,8 +1,8 @@
 {
   "title": "What a run's credential proxy counted, $FACTORY_STATE_DIR/tasks/<runId>/proxy.json",
-  "description": "The proxy's own (incident-platform backlog #0-313 AC3, AC8; dispatcher/src/proxy/usage.mjs), apart from task.json, which the phases write: the requests forwarded and refused (by the proxy's reason), the tokens summed from each response's stream (unmetered: the responses it could not count), the last response's rate-limit headers (a name of their form, a number or an ISO time; those off it counted in rateLimitsDropped), and the names of the request headers it dropped (no value; at most 32, the rest counted in droppedHeadersUncounted). No value of a request's, and no key or token.",
+  "description": "The proxy's own (incident-platform backlog #0-313 AC3, AC8; dispatcher/src/proxy/usage.mjs), apart from task.json, which the phases write: the requests forwarded and refused (by the proxy's reason), the clients gone before their body was whole (gone), the failures to count a response, whose stream went on (accountingErrors), the tokens summed from each response's stream (unmetered: the responses it could not count), the last response's rate-limit headers (a name of their form, a number or an ISO time; those off it counted in rateLimitsDropped), and the names of the request headers it dropped (no value; at most 32, the rest counted in droppedHeadersUncounted). No value of a request's, and no key or token.",
   "type": "object",
-  "required": ["version", "runId", "forwarded", "gone", "refused", "usage", "rateLimits", "rateLimitsDropped", "droppedHeaders",
+  "required": ["version", "runId", "forwarded", "gone", "accountingErrors", "refused", "usage", "rateLimits", "rateLimitsDropped", "droppedHeaders",
     "droppedHeadersUncounted"],
   "additionalProperties": false,
   "properties": {
@@ -10,6 +10,7 @@
     "runId": { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$" },
     "forwarded": { "type": "integer", "minimum": 0 },
     "gone": { "type": "integer", "minimum": 0 },
+    "accountingErrors": { "type": "integer", "minimum": 0 },
     "refused": {
       "type": "object",
       "additionalProperties": false,
@@ -25,6 +26,8 @@
         "body-not-json": { "type": "integer", "minimum": 0 },
         "body-not-object": { "type": "integer", "minimum": 0 },
         "depth": { "type": "integer", "minimum": 0 },
+        "size": { "type": "integer", "minimum": 0 },
+        "content-type": { "type": "integer", "minimum": 0 },
         "messages-form": { "type": "integer", "minimum": 0 },
         "content-file": { "type": "integer", "minimum": 0 },
         "invalid": { "type": "integer", "minimum": 0 },

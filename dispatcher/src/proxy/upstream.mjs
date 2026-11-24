@@ -39,6 +39,13 @@ const BY_RULE = new Set(['authorization', 'x-api-key', 'cookie', 'host', 'connec
 export const RESPONSE_HEADERS = Object.freeze(['content-type', 'content-length', 'request-id', 'retry-after',
   'x-should-retry']);
 
+/**
+ * The longest body taken (review round 4 of factory#29, weighed and kept): Anthropic's Messages API takes requests up
+ * to 32 MB, and a long session with base64 images or documents comes near it, so a lower limit could refuse Claude Code's
+ * own calls; the owner's measurement saw only small bodies, not a long session's. What made 32 MiB costly was a body of
+ * millions of arrays, which request-filter.mjs's byteShape refuses on its bytes before JSON.parse (31.5 MiB of 11
+ * million arrays in some 2 ms); 32 MiB of one string parses and serializes in some 0.2 s.
+ */
 export const BODY_LIMIT = 32 * 1024 * 1024;
 export const CONNECT_MS = 10_000;
 export const HEADERS_MS = 120_000;
@@ -93,8 +100,9 @@ export function upstreamAgent(upstream) {
  *   onChunk: (chunk: Buffer) => void, onDropped: (names: string[]) => void,
  *   refuse: (status: number, type: string, message: string, reason: string) => void }} options `refuse` answers the
  *   client before upstream's headers (400, 413, 503); `betas` the anthropic-beta values allowed
- * @returns {Promise<'done' | 'refused' | 'aborted' | 'gone'>} once the exchange is over: `gone` a client that left
- *   before its body was whole, nothing sent upstream
+ * @returns {Promise<'done' | 'refused' | 'aborted' | 'gone' | 'faulted'>} once the exchange is over: `gone` a client
+ *   that left before its body was whole, nothing sent upstream; `faulted` an exception in a listener of upstream's
+ *   response (review round 4 of factory#29), both sides destroyed
  */
 export async function forward({
   req, res, path, key, betas, upstream, agent, filter = filterRequest, onResponse, onChunk, onDropped, refuse,
@@ -163,19 +171,38 @@ export async function forward({
       clearTimeout(headersTimer);
       fail();
     });
+    // The listeners of upstream's response run outside this promise, so the handler's catch never sees them: an
+    // exception there would end the process (review round 4 of factory#29, SEC-21). Each catches its own, and since a
+    // response half written cannot go on safely, destroys both sides.
+    const fault = () => {
+      if (!settled) {
+        res.destroy();
+        up.destroy();
+        end('faulted');
+      }
+    };
     up.on('response', (upRes) => {
-      answered = true;
-      clearTimeout(headersTimer);
-      onResponse(upRes.statusCode, upRes.headers);
-      res.writeHead(upRes.statusCode, clientHeaders(upRes.headers));
-      res.flushHeaders();
-      up.setTimeout(IDLE_MS, () => fail());
+      try {
+        answered = true;
+        clearTimeout(headersTimer);
+        onResponse(upRes.statusCode, upRes.headers);
+        res.writeHead(upRes.statusCode, clientHeaders(upRes.headers));
+        res.flushHeaders();
+        up.setTimeout(IDLE_MS, () => fail());
+      } catch {
+        fault();
+        return;
+      }
       upRes.on('data', (chunk) => {
-        onChunk(chunk);
-        // Each chunk as it comes, never held (#0-313 AC8): backpressure pauses upstream, nothing is gathered.
-        if (!res.write(chunk)) {
-          upRes.pause();
-          res.once('drain', () => upRes.resume());
+        try {
+          onChunk(chunk);
+          // Each chunk as it comes, never held (#0-313 AC8): backpressure pauses upstream, nothing is gathered.
+          if (!res.write(chunk)) {
+            upRes.pause();
+            res.once('drain', () => upRes.resume());
+          }
+        } catch {
+          fault();
         }
       });
       upRes.on('end', () => {
