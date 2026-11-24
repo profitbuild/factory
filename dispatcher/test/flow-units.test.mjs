@@ -140,9 +140,11 @@ test('#0-301 AC6: the expected version is one file of the factory\'s, MAJOR.MINO
 test('#0-301 (D): the managed settings are exactly the ADR\'s keys, strictPluginOnlyCustomization true, the agents\' '
   + 'tools allowed, and never allowManagedHooksOnly nor disableSideloadFlags', async () => {
   const settings = JSON.parse(await readFile(new URL('claude-code/etc/managed-settings.json', ROOT), 'utf8'));
-  assert.deepEqual(Object.keys(settings).sort(), ['allowManagedPermissionRulesOnly', 'disableAllHooks', 'permissions',
-    'strictKnownMarketplaces', 'strictPluginOnlyCustomization'].sort());
+  assert.deepEqual(Object.keys(settings).sort(), ['allowManagedPermissionRulesOnly', 'apiKeyHelper', 'disableAllHooks',
+    'permissions', 'strictKnownMarketplaces', 'strictPluginOnlyCustomization'].sort());
   assert.equal(settings.allowManagedPermissionRulesOnly, true);
+  // #0-313 (ADR-0064 point 5 as amended): the task's token, printed from its read-only file, by full paths.
+  assert.equal(settings.apiKeyHelper, '/usr/bin/cat /run/factory/token');
   assert.equal(settings.strictPluginOnlyCustomization, true, 'a boolean: 2.1.328 takes an object as invalid');
   assert.deepEqual(settings.strictKnownMarketplaces, []);
   assert.equal(settings.disableAllHooks, false);

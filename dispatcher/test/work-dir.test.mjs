@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import { BASE_REF, makeBaseBundle } from '../src/git/base-bundle.mjs';
 import {
   HELPER_IMAGE, SCRIPTS, WorkDirError, helperArgs, makeWorkDir, removeAllWorkDirs, removeWorkDir, writeOverride,
+  writeTokenFile,
 } from '../src/container/work-dir.mjs';
 import { makeFakeDaemon } from '../testing/fake-daemon.mjs';
 import { REAL_GIT, git } from '../testing/git-fixtures.mjs';
@@ -54,7 +55,9 @@ test('AC7: the base\'s bundle is refs/heads/base at the base, made in FACTORY_RE
   assert.equal(git(work, ['rev-parse', 'HEAD']), product.base);
   assert.equal(git(work, ['symbolic-ref', 'HEAD']), 'refs/heads/base', 'checked out, by the branch named');
   assert.equal(await readFile(join(work, '.devcontainer', 'Dockerfile'), 'utf8'), 'FROM scratch\n');
-  assert.deepEqual((await readdir(join(fake.tasks, RUN_ID))).sort(), ['w'], 'the bundle file is removed');
+  // The bundle removed; `token/` the token's directory, empty until the container is checked (#0-313).
+  assert.deepEqual((await readdir(join(fake.tasks, RUN_ID))).sort(), ['token', 'w'], 'the bundle file is removed');
+  assert.deepEqual(await readdir(join(fake.tasks, RUN_ID, 'token')), [], 'no token before the container is checked');
   assert.equal((await stat(join(fake.tasks, RUN_ID))).mode & 0o777, 0o700);
   const repo = await inodes(join(product.repoDir, 'objects'));
   const clone = await inodes(join(work, '.git', 'objects'));
@@ -147,3 +150,32 @@ test('AC12: the work directory is removed whole, dot entries and the directory i
     await assert.rejects(removeAllWorkDirs({ runId: RUN_ID, image: IMAGE, ...fake.runner }),
       /the work directories could not be removed: docker run failed \(exit 1\); its stderr, the agent's side's, is not quoted: it is kept in \S+$/);
   });
+
+test('#0-313: the task\'s token is written from stdin into token/token, 444, never over a file or a link there, and '
+  + 'never as an argument', async () => {
+  const { product, fake } = await setUp();
+  const bundle = await makeBaseBundle({ repoDir: product.repoDir, baseSha: product.base, git: REAL_GIT });
+  await makeWorkDir({ runId: RUN_ID, bundle, image: IMAGE, ...fake.runner });
+  const token = 'T'.repeat(43);
+  await writeTokenFile({ runId: RUN_ID, token, image: IMAGE, ...fake.runner });
+  const file = join(fake.tasks, RUN_ID, 'token', 'token');
+  assert.equal(await readFile(file, 'utf8'), token);
+  assert.equal((await stat(file)).mode & 0o777, 0o444);
+  const call = fake.calls().at(-1);
+  assert.equal(call.stdinBytes, 43);
+  assert.ok(!call.args.join(' ').includes(token), 'the token in no argument');
+  // Again, a file there: refused, never written over (noclobber); and a link an agent planted, never followed.
+  await assert.rejects(writeTokenFile({ runId: RUN_ID, token: 'U'.repeat(43), image: IMAGE, ...fake.runner }),
+    WorkDirError);
+  assert.equal(await readFile(file, 'utf8'), token);
+  const other = join(fake.tasks, RUN_ID, 'w', 'planted');
+  await writeFile(other, 'planted\n');
+  const { unlink, chmod } = await import('node:fs/promises');
+  await chmod(join(fake.tasks, RUN_ID, 'token'), 0o755);
+  await unlink(file).catch(async () => { await chmod(file, 0o644); await unlink(file); });
+  await symlink(other, file);
+  await assert.rejects(writeTokenFile({ runId: RUN_ID, token: 'V'.repeat(43), image: IMAGE, ...fake.runner }),
+    WorkDirError);
+  assert.equal(await readFile(other, 'utf8'), 'planted\n', 'the link\'s target untouched');
+  assert.throws(() => writeTokenFile({ runId: RUN_ID, token: 'short', image: IMAGE, ...fake.runner }), TypeError);
+});

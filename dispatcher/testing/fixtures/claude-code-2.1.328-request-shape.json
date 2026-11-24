@@ -1,0 +1,304 @@
+{
+  "$comment": "The shape of the model calls of Claude Code 2.1.328 (the pin) under F3, measured by the owner on 2026-11-24 (incident-platform backlog #0-313, review rounds 1 to 3 of factory#29: sec-5a7e, sec-c41e): the devcontainer image of the pin (ip-devc-0313:fe6ab3e3, incident-platform main fe6ab3e3), F3's argv, the managed settings of factory#29 at adb27c0 (apiKeyHelper; apiKeySource \"apiKeyHelper\", each call's result a success), a fake gateway on a docker network made --internal that recorded the shape only. Six calls, two per agent (architect, implementer, implementer-light), every one POST /v1/messages?beta=true with the same eight betas, the same body keys, the same eight tools (none of them typed) and no content source. They differ in their messages alone, in two variants, both from the measurement's own output (not from a summary): A (three of the six calls) and B (the other three). claudeCodeVersion is the version measured: a test holds it to expectations.json's, so a bump of the pin without a new measurement fails in CI, not as a 400 on every call on the VM. No text of a prompt, of a tool or of a header's value but the betas: keys, types and roles alone.",
+  "claudeCodeVersion": "2.1.328",
+  "calls": [
+    {
+      "variant": "A",
+      "method": "POST",
+      "path": "/v1/messages",
+      "query": "beta=true",
+      "headerNames": [
+        "accept",
+        "accept-encoding",
+        "anthropic-beta",
+        "anthropic-dangerous-direct-browser-access",
+        "anthropic-version",
+        "authorization",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        "x-api-key",
+        "x-app",
+        "x-claude-code-session-id",
+        "x-stainless-arch",
+        "x-stainless-lang",
+        "x-stainless-os",
+        "x-stainless-package-version",
+        "x-stainless-retry-count",
+        "x-stainless-runtime",
+        "x-stainless-runtime-version",
+        "x-stainless-timeout"
+      ],
+      "betas": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "context-management-2025-06-27",
+        "per-turn-control-2026-07-01",
+        "mid-conversation-tool-changes-2026-07-01",
+        "thinking-token-count-2026-05-13",
+        "effort-2025-11-24",
+        "thinking-display-updates-2026-08-18"
+      ],
+      "bodyKeys": [
+        "context_management",
+        "max_tokens",
+        "messages",
+        "metadata",
+        "model",
+        "output_config",
+        "stream",
+        "system",
+        "thinking",
+        "tools"
+      ],
+      "tools": [
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "defer_loading",
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        }
+      ],
+      "system": [
+        {
+          "type": "text"
+        },
+        {
+          "type": "text"
+        },
+        {
+          "type": "text"
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text"
+            },
+            {
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "role": "system",
+          "content": [
+            {
+              "type": "text"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "variant": "B",
+      "method": "POST",
+      "path": "/v1/messages",
+      "query": "beta=true",
+      "headerNames": [
+        "accept",
+        "accept-encoding",
+        "anthropic-beta",
+        "anthropic-dangerous-direct-browser-access",
+        "anthropic-version",
+        "authorization",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        "x-api-key",
+        "x-app",
+        "x-claude-code-session-id",
+        "x-stainless-arch",
+        "x-stainless-lang",
+        "x-stainless-os",
+        "x-stainless-package-version",
+        "x-stainless-retry-count",
+        "x-stainless-runtime",
+        "x-stainless-runtime-version",
+        "x-stainless-timeout"
+      ],
+      "betas": [
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "context-management-2025-06-27",
+        "per-turn-control-2026-07-01",
+        "mid-conversation-tool-changes-2026-07-01",
+        "thinking-token-count-2026-05-13",
+        "effort-2025-11-24",
+        "thinking-display-updates-2026-08-18"
+      ],
+      "bodyKeys": [
+        "context_management",
+        "max_tokens",
+        "messages",
+        "metadata",
+        "model",
+        "output_config",
+        "stream",
+        "system",
+        "thinking",
+        "tools"
+      ],
+      "tools": [
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "defer_loading",
+            "description",
+            "input_schema",
+            "name"
+          ]
+        },
+        {
+          "keys": [
+            "description",
+            "input_schema",
+            "name"
+          ]
+        }
+      ],
+      "system": [
+        {
+          "type": "text"
+        },
+        {
+          "type": "text"
+        },
+        {
+          "type": "text"
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text"
+            },
+            {
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "role": "system",
+          "content": "string"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

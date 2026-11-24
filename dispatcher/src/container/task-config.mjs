@@ -33,7 +33,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { ConfigError, refuseSecretShaped } from '../config/settings.mjs';
 import LIST from './task-config-list.json' with { type: 'json' };
 import {
-  FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, MANAGED_SETTINGS_MOUNT, MANAGED_SETTINGS_SOURCE, WORKSPACE, taskPaths,
+  FACTORY_CHECKOUT, FACTORY_MOUNT, M2_VOLUME, MANAGED_SETTINGS_MOUNT, MANAGED_SETTINGS_SOURCE, TOKEN_MOUNT, WORKSPACE,
+  taskPaths,
 } from './paths.mjs';
 
 /** A task configuration, or an image's metadata, is off the list. */
@@ -300,11 +301,14 @@ export function checkTaskConfig(config, { configPath, lock = null, list = LIST }
 
 /** The dispatcher's mounts, as `docker run` arguments: none of them is the image's metadata, so none outlives the run. */
 export function dispatcherMounts(runId, user) {
-  const { claudeVolume } = taskPaths(runId);
+  const { claudeVolume, tokenDir } = taskPaths(runId);
   return [
     `--mount=type=bind,source=${FACTORY_CHECKOUT},target=${FACTORY_MOUNT},readonly`,
     // The factory's managed settings, read-only on the whole of /etc/claude-code (#0-301, ADR-0064 point 1).
     `--mount=type=bind,source=${MANAGED_SETTINGS_SOURCE},target=${MANAGED_SETTINGS_MOUNT},readonly`,
+    // The task's token's directory, read-only (#0-313): the one credential on the daemon, valid only through the
+    // dispatcher's proxy and only while the run lives (ADR-0062 point 5 as amended).
+    `--mount=type=bind,source=${tokenDir},target=${TOKEN_MOUNT},readonly`,
     `--mount=type=volume,source=${claudeVolume},target=/home/${user}/.claude`,
     `--mount=type=volume,source=${M2_VOLUME},target=/home/${user}/.m2`,
   ];

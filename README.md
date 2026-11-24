@@ -35,6 +35,7 @@ Decided in [incident-platform](https://github.com/profitbuild/incident-platform)
 | `dispatcher/src/container/task-config-list.json` | The closed list of a task configuration (ADR-0062 point 4): the capabilities, the `docker run` arguments, the `containerEnv` keys and the features (by id, options and values, and per digest the image metadata the feature declares, which the built image's entry must equal value by value) a product's task configuration may carry. The dispatcher's, not a product's: widening it is a pull request here, reviewed by the code owner, that a product gets with the factory's next tag; an entry names a kind of product's need, never one product |
 | `$FACTORY_STATE_DIR` | On the build VM, outside any repository; made by the provisioning (700, the dispatcher user's), which `run` checks and never changes: `lock` (the dispatcher's), `state.lock` (the state's) and `tasks/<runId>/lock` (a task's), the three locks of "The locks" below, `state.json` (the breaker, the semantics of incident-platform's `state.sh`), `tasks/<runId>/task.json` (with the task image's ID, #0-277), `tasks/<runId>/bundles/` (what a task container hands over, #0-277), `stderr/` (what each container call wrote to stderr, the agent's side's, kept for the owner, #0-284; its files are not rotated yet: nothing removes them today); every file 600: `state.json` and `task.json` written to a temporary file and renamed (`dispatcher/src/state/`), a bundle and a stderr file each opened once, new, with O_EXCL and O_NOFOLLOW (`task-bundle.mjs`, `run-container.mjs`) |
 | `dispatcher/src/github/retry.mjs` | The one helper of every GitHub call of the flow: a 5xx, a 429, a rate limit's 403, a timeout or a network error is retried (1 s doubling to 60 s, with jitter), not counted as an attempt; ten in a row block the task with the reason (incident-platform #0-261) |
+| `dispatcher/src/proxy/` | The run's credential proxy: Claude's key, the proxy's configuration, the fresh-VM marker, the token, the upstream ("The credential proxy" below; incident-platform backlog #0-313) |
 | `schemas/answers/`, `schemas/findings.schema.json`, `claude-code/` | The agents' answers, a fix-review run's findings, the task container's managed settings and what an agent call must show ("Agent calls" below; incident-platform backlog #0-301) |
 | `schemas/adapter.schema.json`, `schemas/gate.schema.json` | A product's `.factory/adapter.json` and its gate's answer (incident-platform ADR-0060 D6), checked by `dispatcher/src/schema/validate.mjs`, a validator of Node's built-ins that refuses any keyword it does not check |
 | `CONTRIBUTING.md` | How a change is made, from the change to the merge, and who writes what: what stays after ADR-0055's migration, and what holds until a named stage |
@@ -98,7 +99,7 @@ ADR-0060 D5 as amended), which a product's task container loads read-only from `
 
 ## Agent calls
 
-The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 and M2.3; ADR-0063, ADR-0064, ADR-0065) run in `dispatcher/src/flow/`, under the run's task lock, in the task container the run set up. No call in this repository's code or tests reaches Claude: the tests replay recorded stream-json through the fake daemon (`dispatcher/testing/stream-json.mjs`). The task container holds no credential until #0-313 (M2.7) adds the proxy.
+The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 and M2.3; ADR-0063, ADR-0064, ADR-0065) run in `dispatcher/src/flow/`, under the run's task lock, in the task container the run set up. No call in this repository's code or tests reaches Claude: the tests replay recorded stream-json through the fake daemon (`dispatcher/testing/stream-json.mjs`). The task container holds no Claude key: only its task's token for the run's credential proxy ("The credential proxy" below; incident-platform backlog #0-313, M2.7).
 
 **The call (F3, `flow/call.mjs`).**
 - The command is `docker exec <ID> /usr/bin/timeout … /usr/bin/env -i <list> /usr/local/bin/claude -p --plugin-dir /opt/factory --agent factory:<agent> --restricted --tools <frontmatter> --add-dir /workspace --output-format stream-json --verbose --json-schema <schema> --permission-mode dontAsk --max-turns <frontmatter>`.
@@ -108,13 +109,15 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
 - The list for `env -i` holds only literals the dispatcher writes:
   - `HOME`, the locale, and `PATH` with the system directories only;
   - the `containerEnv` the task configuration was accepted with;
-  - `DISABLE_AUTOUPDATER=1`, `DISABLE_UPDATES=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (Claude Code's traffic other than the model's calls, such as the telemetry among its builtin plugins and the remote settings, would otherwise go to Anthropic past #0-313's proxy: ADR-0064 point 5 as amended on 2026-11-22), `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`.
+  - `DISABLE_AUTOUPDATER=1`, `DISABLE_UPDATES=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (Claude Code's traffic other than the model's calls, such as the telemetry among its builtin plugins and the remote settings, would otherwise go to Anthropic past #0-313's proxy: ADR-0064 point 5 as amended on 2026-11-22), `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`;
+  - `ANTHROPIC_BASE_URL=http://<ADDR>:<port>`, the run's proxy's address (#0-313): a literal, no secret. The token is in no variable.
   
   No secret ever goes in it: the arguments of `env` are visible in `/proc`.
 - The time limit is 30 minutes for the architect, 90 for the implementer and 60 for implementer-light.
 
 **Managed settings.**
 - `claude-code/etc/managed-settings.json` is mounted read-only over the whole of `/etc/claude-code` in the task container. The mount is part of `expectedMounts` and of the HostConfig table.
+- `apiKeyHelper` is `/usr/bin/cat /run/factory/token` (#0-313): Claude Code's credential is the task's token, from its read-only file.
 - It sets `allowManagedPermissionRulesOnly: true`, `strictPluginOnlyCustomization: true` (a boolean: 2.1.328 rejects the object form), `strictKnownMarketplaces: []` and `disableAllHooks: false`.
 - The agents have seven tools: `Read`, `Grep`, `Glob`, `Bash`, `Edit`, `Write` and `StructuredOutput`, through which `structured_output` comes back. The settings allow six of them: `Bash`, `Read`, `Edit`, `Write`, `Grep`, `Glob`. The list leaves out `StructuredOutput` on purpose: measured on 2.1.328, its call passes under `allowManagedPermissionRulesOnly` and `dontAsk` with no allow rule (`permission_denials` empty).
 - It never sets `allowManagedHooksOnly` or `disableSideloadFlags`.
@@ -127,9 +130,10 @@ The build zone's phases (incident-platform backlog #0-301, migration steps M2.2 
 - `model` is the frontmatter's;
 - `permissionMode` is `dontAsk`;
 - `claude_code_version` is the expected one;
-- `mcp_servers` is empty.
+- `mcp_servers` is empty;
+- `apiKeySource` is `"apiKeyHelper"` (#0-313): a constant of the check, not of `expectations.json`. #0-313 measured `"none"` without a helper and with `ANTHROPIC_AUTH_TOKEN` in the environment, so a call whose credential came any other way stops. What keeps a credential of the environment out is `env -i`, not this field.
 
-**`claude-code/expectations.json`** holds the expected version (`claudeCodeVersion`, `MAJOR.MINOR.PATCH`), which incident-platform's `check-factory-copies.rb` compares with its `.devcontainer/claude-code.pin`. It also holds the builtin plugins and builtin agents measured on that version, and each agent's tools; a test keeps the tools equal to the frontmatter.
+**`claude-code/expectations.json`** holds the expected version (`claudeCodeVersion`, `MAJOR.MINOR.PATCH`), which incident-platform's `check-factory-copies.rb` compares with its `.devcontainer/claude-code.pin`. It also holds the builtin plugins and builtin agents measured on that version, each agent's tools (a test keeps them equal to the frontmatter), and `anthropicBetas`, the `anthropic-beta` values Claude Code's calls send on that version, which the credential proxy alone lets through (#0-313: the eight measured by the owner on 2026-11-24, every call of the three agents sending all of them; the call's shape, keys, types and roles only, is `dispatcher/testing/fixtures/claude-code-2.1.328-request-shape.json`, and a test passes a call of that shape through the proxy).
 
 Both builtin lists are measured with the whole of `callEnv`'s variables, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` among them. The first call on the VM (#0-301 AC4) records the builtin plugins and agents of its init event. If they differ from the lists, the lists are corrected before any run; until then a run stops at the init event's check, as it should.
 
@@ -166,6 +170,76 @@ The file is read after `sweep`'s branch, so `cli.mjs sweep` still works when it 
 - Every stop goes through `stopItem`: the task is marked BLOCKED with `<stage>: <reason>` in the dispatcher's own words, and the breaker counts it with its stage.
 - The item comes from the adapter's queue files (a queue of kind `backlog-md`; any other kind is a stop), read as blobs of the base. It must have a single `**Complexity:** low|medium|high` anywhere in its block and at least one line beginning `AC<n>.`.
 - Until #0-302 commits a run's work, a task that has completed a phase cannot be resumed, with `--findings` or without.
+
+## The credential proxy
+
+Claude's key stays outside the task container (incident-platform backlog #0-313, M2.7; ADR-0060 D4, ADR-0064 point 5 and ADR-0062 points 4 and 5 as amended). The container holds only its task's token, and reaches Claude through a proxy of the dispatcher's (`dispatcher/src/proxy/`). No test reaches Anthropic or holds a real key: they run against a fake upstream (`dispatcher/testing/fake-anthropic.mjs`) with a key that is a marker.
+
+**A run, step by step** (`proxy/task-proxy.mjs`):
+1. Before the slot section, `cli.mjs` reads Claude's key and `/etc/factory-proxy.conf`. Either one off its form refuses the run before the daemon, and so does `FACTORY_SLOTS` above the number of ports.
+2. Right before the task's container, the run consumes the fresh-VM marker (below), since `devcontainer up` already runs the product's code.
+3. The container is set up and checked. Its token's directory, `/home/factory/tasks/<runId>/token/`, made empty by the work directory's helper, is mounted read-only on `/run/factory`. The mount is in the exact mount comparison and the `HostConfig` table.
+4. The proxy starts in the run's own process, on `ADDR` and the first free port of `PORTS`. It makes the token: 32 random bytes.
+5. A helper writes the token into `token/token`: from stdin, never an argument (sudo logs a command's arguments), mode 444, with noclobber.
+6. The token is activated, and the phases run. Each call's `env -i` list holds `ANTHROPIC_BASE_URL`, and the managed settings' `apiKeyHelper` prints the file.
+7. In a finally, whatever the phases did, the token is revoked, the proxy closed and its record written.
+8. The sweep at the end removes the work directory, and the token's file with it.
+
+A stop in step 2, 4 or 5 ends the task BLOCKED through `stopItem`, stage `fresh-vm` or `proxy`, and the breaker counts it. No token is then issued.
+
+**The proxy** (`proxy/server.mjs`, `proxy/upstream.mjs`):
+- It lives and dies with its run, so a token is valid only while its run lives. A run killed takes its proxy with it, and each run's proxy knows no token but its own.
+- It listens on `ADDR` alone, never `0.0.0.0` or the loopback.
+- A request carries the token in `x-api-key` or `Authorization: Bearer`. Claude Code sends both, and both present must agree. The token is compared in constant time.
+- Anything else is 401: no token, another task's, one not yet active or revoked.
+- It forwards only `POST /v1/messages`, with no query or exactly `?beta=true`. `HEAD /api/hello`, `count_tokens` and every other path are 404 until AC4 shows a need (the owner's answer on the plan).
+- The target is fixed, `https://api.anthropic.com:443`, its Host and TLS server name the proxy's own, never the request's.
+- Every refusal is in Anthropic's error shape, `X-Should-Retry` false on 400, 401, 403, 404 and 413, true with `Retry-After: 1` on 429 and 503.
+- At most 4 requests of the task are in flight; one more is 429.
+- The request's body is held, to 32 MiB (413 past it, a chunked body too), and read only to check its tools and betas: never logged, written or kept after the request. The response is never buffered. A client that closes ends the upstream request. (This reverses #0-313's first rule, "the body is never read": review round 1 of factory#29, sec-5a7e.)
+- **What passes** (`proxy/request-filter.mjs`, an allowlist): the body must be a JSON object, nested no deeper than 64 levels anywhere (`MAX_DEPTH`) and of no more than 200 000 items, its arrays, objects, keys and values (`MAX_NODES`: each bracket, comma and colon outside a string, counted on the bytes before `JSON.parse` builds anything, and again on the tree), whose top-level keys are of `BODY_KEYS` alone (the ten keys Claude Code 2.1.328's measured calls sent; any other is refused), with no `mcp_servers` key, whatever its value, and a `messages` that is an array of objects, each with a `content` that is a string or an array. Each element of its `tools`, if any, must be a client tool: no `type`, or `type: "custom"`; any other `type` (`web_search`, `web_fetch`, any server tool, whatever its version) is refused. Each object with a `source` key, in any content block of `messages` or of `system` (when it is a list), a `tool_result`'s content included, at any depth, must have `source.type` `base64` or `text`, each block there must be of a type of `BLOCK_TYPES` (`text`, `image`, `document`, `tool_use`, `tool_result`, `thinking`, `redacted_thinking`; any other, or none, is refused), and no object there may carry a `file_id`: Anthropic fetches a `url` source itself, and a `file` one is the workspace's (review round 2 of factory#29, sec-c41e). What goes upstream is the parsed body serialized again, the very value the filter checked, so a key given twice or bytes that are no UTF-8 cannot show Anthropic another body. Each comma-separated value of `anthropic-beta` must be one of `claude-code/expectations.json`'s `anthropicBetas`, the betas measured from Claude Code's own calls on the pinned version. Any other value refuses the request; it is not cut from the header. A refusal is 400 `invalid_request_error`, `X-Should-Retry: false`, counted in `proxy.json` and logged by its reason alone (never the body, a tool's name or type, or the header's value), and nothing reaches upstream. Without this check a task's code, which holds the token and Bash, could ask Anthropic to run a tool on Anthropic's side that reaches any host from there.
+- **The filter never throws, and the handler leaves no rejection** (review round 3 of factory#29, sec-d3e7, a regression of round 2, whose unbounded walk of a hostile tree could end the dispatcher with none of its `finally` blocks run). The depth is measured first, iteratively, over the whole body; any exception in the check is a refusal (`invalid`); anything left in the awaited handling of a request is 500 `api_error`, `X-Should-Retry: false` (or the socket ended, once the headers went); each callback that counts a response in upstream's listeners catches its own, a failure there stopping that response's count and never its stream (`accountingErrors`), and a listener that throws past them destroys both sides of that exchange alone (`internal`). So no exception a request makes in the proxy's code reaches the process. The proxy guarantees this for its own code. A fault of Node's own, such as memory run out, is outside it: what `MAX_NODES` and `BODY_LIMIT` bound is a body's items (200 000) and bytes (32 MiB), so, by the owner's measurements, the work of parsing one body to some 0.1 s and 20 MB, never the heap as a whole.
+- **A second layer, outside this repository and checked by nothing here:** web search, web fetch and the MCP connector turned off for the factory's workspace in the Console, where the Console allows it per workspace (the owner checks it).
+- Timeouts: 10 s to connect, 120 s to the response's headers, 300 s with no byte of the stream.
+- A refusal goes to the run's stderr at most once per 10 s per reason, the next line counting those skipped. A line names the run, the reason and, for a path, the path alone (no query, cut to 200 characters, quoted as JSON). It never names a header, a query or a value of the request's or of upstream's.
+
+**The headers:**
+
+| Direction | Removed | Set | Passed |
+|---|---|---|---|
+| Client to upstream | `Authorization`, `X-Api-Key`, `Cookie` of the client; the hop-by-hop ones; every header not passed | `x-api-key` (the key), `host`, `accept-encoding: identity` (so the meter reads plain SSE), `content-length` | `anthropic-version`, `anthropic-beta`, `content-type`, `accept`, `user-agent`, `x-stainless-*` |
+| Upstream to client | `set-cookie` and every header not passed | | `content-type`, `content-length`, `request-id`, `retry-after`, `x-should-retry`, `anthropic-ratelimit-*` |
+
+The request list is a guess: no measurement recorded Claude Code's header names. So the names of the request headers dropped go to `proxy.json`, without values. AC4 compares them with a call that answered, and the list changes knowingly if a dropped header was needed.
+
+**What it counts** (`proxy/usage.mjs`): `tasks/<runId>/proxy.json` (`state/proxy.schema.json`), its own file and not `task.json`, which the phases write from the task they hold. It holds:
+- the requests forwarded, and those refused by reason;
+- the tokens summed from each response's SSE stream, read from `message_start` and `message_delta` alone. The meter holds one line at most, and a response it cannot count is `unmetered`;
+- the last response's rate-limit headers (`retry-after`, `anthropic-ratelimit-*`, each value a number or an ISO time), for M5's slots;
+- the names of the request headers dropped (`^[a-z0-9-]{1,64}$`, at most 32, the rest counted).
+
+The proxy writes it under the state's lock, at most once a second, and once more when it closes.
+
+**Claude's key** (`proxy/key.mjs`): `CLAUDE_KEY`, an absolute path, by default `/home/dispatcher/.config/factory/claude.key`. It holds the Console key of the factory's workspace, which has a monthly spend limit (the owner's). It must be the dispatcher's own regular file, mode 600, at most 512 bytes, one line `sk-ant-…`. It is read once at the start of a run and kept only in that run's memory and in the upstream's `x-api-key`.
+
+**`/etc/factory-proxy.conf`** (`proxy/conf.mjs`), written by incident-platform's `provision.sh` at every boot, `root:root` 0644:
+
+    ADDR=<the address of the dummy interface provision.sh sets up for the proxy>
+    PORTS=8770
+
+The proxy has an address of its own, on a dummy interface (the owner's measurement on the VM). `ADDR` must be an IPv4 literal of a local interface, neither a wildcard nor of `127.0.0.0/8`, and not the address of an interface a default route leaves by (read from `/proc/net/route`): that is the VM's own address, which in a cloud its network sees. A route table that cannot be read refuses the run too. `PORTS` (one port per slot, comma-separated) must lie in 1024–65535, outside the ephemeral range 32768–60999, with no port twice. Until #0-285 the fresh-VM marker allows one run per VM, whatever `FACTORY_SLOTS` and however many ports: a second port added early is no working second slot. The file must be root's and writable by no one else. A refusal names the file and the field, never a value. The address comes from this file alone: the dispatcher works out no address of the VM's. `provision.sh` also drops the ports from any device but `lo` (the proxy is unreachable from outside the VM), and lets `factory`'s containers reach them through `FACTORY-EGRESS`.
+
+**The fresh VM** (`proxy/fresh-vm.mjs`, #0-313 AC6): until #0-285, a run that holds a token runs only on a VM made anew that has run nothing before.
+- incident-platform's `create.sh` writes `/etc/factory-fresh-vm` as root once provisioning has finished: `root:root` 0644, one line of 32 hex. `provision.sh` never writes it.
+- The dispatcher cannot remove a file of root's. A run consumes the marker in the dispatcher's state instead: `fresh-vm.json`, compare and set under the state's lock.
+- Every later run on that VM stops in stage `fresh-vm`, naming the run that consumed it. So does a `--resume`, and so does a run with the marker missing or off its form.
+- The limit: removing the dispatcher's state on a live VM arms the marker again. Only someone with access to the VM can do that, and a VM made anew has a new state anyway.
+
+**The token, and what it yields when leaked.**
+- The token's file is 444 and owned by `factory`'s container root. Any process in the task's container can read it, as it can read anything of its container: ADR-0064 promises no isolation between users inside a container.
+- On the VM, any process of uid `factory` can read it too, and that includes every task, through the daemon's socket. This is why the fresh-VM rule holds.
+- Between tasks, what isolates is: the mount into its own task's container only, a token valid only in its own run's proxy, and the fresh VM.
+- A leaked token yields calls of the model through that proxy, and so from the VM only and only while its run lives, within the workspace's spend limit. It yields no key and no other path. What the body's filter closes, by itself, is: Anthropic's server tools (a typed tool other than `custom`), MCP connectors (`mcp_servers`), content sources other than `base64` and `text` (a `url` Anthropic would fetch, a `file` of the workspace's), content blocks of any type off `BLOCK_TYPES` (`server_tool_use`, `mcp_tool_use`, `container_upload`, or one a beta adds), any `file_id` in the content, `messages` off its form, a top-level key off `BODY_KEYS` (a parameter a beta might add), and betas off the measured list. So far as that allowlist holds, a leaked token reaches no other host through Anthropic. The Console's setting above is the second layer, outside this repository.
 
 ## The locks
 

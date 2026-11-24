@@ -23,8 +23,9 @@
  *
  * Every one is required but FACTORY_SLOTS, which the owner's decision of #0-303 gives a default of 1, the one slot of
  * M2: none other has a default (ADR-0052 point 5), so a limit is always one the owner wrote. A variable
- * with the prefix FACTORY_ that is not one of these is refused as unknown, FACTORY_PROXY_ADDR included until step 4.6
- * (the credential proxy) adds it here. The mechanism and its rules (a refusal names the variable, never its value) are
+ * with the prefix FACTORY_ that is not one of these is refused as unknown. FACTORY_PROXY_ADDR stays refused: the
+ * proxy's address has one source, /etc/factory-proxy.conf (proxy/conf.mjs; incident-platform backlog
+ * #0-313). The mechanism and its rules (a refusal names the variable, never its value) are
  * settings.mjs's.
  */
 import { isAbsolute } from 'node:path';

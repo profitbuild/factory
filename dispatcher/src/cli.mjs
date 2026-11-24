@@ -33,9 +33,10 @@
  *      another run holds is live, and refused, its record as it was), so that a refusal leaves no task; then the
  *      sweep, the whole daemon when no other task is live (in M2, always), only the run's own labelled objects when
  *      one is. Then the dispatcher's lock is released;
- *   7. under the task's lock alone: the run's network, the rollback checked again; its container, from a fresh clone
- *      of the base (a refusal there ends the task BLOCKED, with the reason); its phases, from the one after the last
- *      completed (state/tasks.mjs). v0 has none: they are 4.4's;
+ *   7. under the task's lock alone: the run's network, the rollback checked again; the fresh-VM marker consumed; its
+ *      container, from a fresh clone of the base (a refusal there ends the task BLOCKED, with the reason); the run's
+ *      credential proxy and the task's token (proxy/task-proxy.mjs, incident-platform backlog #0-313); its phases,
+ *      from the one after the last completed (state/tasks.mjs), then the token revoked and the proxy closed;
  *   8. the dispatcher's lock again, the live tasks counted again, the daemon swept as in 6, the task BLOCKED or not;
  *      then the task's lock released, and the dispatcher's last. If the dispatcher's lock is not free within the
  *      wait, the run's own labelled objects are removed under the task's lock (review round 1 of factory#25,
@@ -78,6 +79,9 @@ import { blockTask, createTask, findTaskByBranch, listTasks, liveTasks, newRunId
 import { readExpectations } from './flow/expectations.mjs';
 import { readFindings } from './flow/findings.mjs';
 import { buildPhases } from './flow/phases.mjs';
+import { readProxyConf } from './proxy/conf.mjs';
+import { readClaudeEnv, readClaudeKey } from './proxy/key.mjs';
+import { runTaskWithProxy } from './proxy/task-proxy.mjs';
 
 
 /** The command line is wrong. */
@@ -223,22 +227,24 @@ function refuseFullSlots(others, slots) {
  *   apiBase?: string,
  *   gitBase?: string, fetchImpl?: typeof fetch, err?: { write: (text: string) => void }, dispatcherWaitS?: number,
  *   hooks?: { inSlot?: () => Promise<void>, beforeDispatcherLock?: () => Promise<void>,
- *   taskMade?: (runId: string) => Promise<void> } }} [options] all but argv
+ *   taskMade?: (runId: string) => Promise<void> }, proxyTesting?: object }} [options] all but argv
  *   for the tests (`sudo`: the fake daemon's;
  *   `apiBase`, `gitBase`, `fetchImpl`: the fake GitHub's; `dispatcherWaitS` the wait for the dispatcher's lock;
  *   `hooks.inSlot` runs in the slot section, once the slot is counted, for a test that holds a run there;
  *   `hooks.beforeDispatcherLock` right before the run asks for the dispatcher's lock, for a test that knows a run is
- *   waiting for it; `hooks.taskMade` between a new task's record and its lock, for a test that takes that lock first)
+ *   waiting for it; `hooks.taskMade` between a new task's record and its lock, for a test that takes that lock first;
+ *   `proxyTesting` the proxy's files, their owner and a fake upstream, #0-313)
  * @returns {Promise<object>} the task as it was left (`run`), or what the sweep removed (`sweep`)
  */
 export async function main(argv, {
   env = process.env, out = process.stdout, err = process.stderr, now, random, phases, sudo,
-  apiBase = GITHUB_API, gitBase = GIT_HOST, fetchImpl, dispatcherWaitS = DISPATCHER_WAIT_S, hooks = {},
+  apiBase = GITHUB_API, gitBase = GIT_HOST, fetchImpl, dispatcherWaitS = DISPATCHER_WAIT_S, hooks = {}, proxyTesting,
 } = {}) {
   const args = parse(argv);
   refuseSecretShaped(env);
   const settings = readFactoryEnv(env);
   const builder = readBuilderEnv(env);
+  const claude = readClaudeEnv(env);
   const { stateDir } = settings;
   await checkStateDir(stateDir);
   await checkRepoDir(settings.repoDir);
@@ -260,6 +266,14 @@ export async function main(argv, {
     // round 1 of factory#26, 5).
     const expectations = await readExpectations();
     const findings = args.findings === undefined ? null : await readFindings(args.findings);
+    // Claude's key and where the proxy listens, the same way (#0-313): off their form, the run is refused before the
+    // daemon, and with more slots than the proxy has ports too.
+    const claudeKey = await readClaudeKey(claude.keyPath);
+    const proxyConf = await readProxyConf({ proxyTesting });
+    if (settings.slots > proxyConf.ports.length) {
+      throw new Error(`FACTORY_SLOTS is ${settings.slots}, more than the ${proxyConf.ports.length} port`
+        + `${proxyConf.ports.length === 1 ? '' : 's'} of the proxy's configuration: the run is refused`);
+    }
     // The slot section (#0-303; review round 1 of factory#25, the owner's decision 2), under the dispatcher's lock:
     //   a. the breaker;
     //   b. the fetch of main (FACTORY_REPO_DIR is shared, and two fetches at once collide on git's own locks);
@@ -328,17 +342,17 @@ export async function main(argv, {
       }
       return sweepForRun({ runId, helperImage: settings.helperImage, stateDir, sudo,
         othersLive: await liveTasks(stateDir, { except: runId }) });
-    } }, async () => {
-      const ready = await setUpTaskContainer({ stateDir, repoDir: settings.repoDir, task, adapter,
-        helperImage: settings.helperImage, sudo });
-      if (ready.container === null) {
-        return ready.task;
-      }
-      // A fix-review run runs its own phases from the first (#0-301), whatever phase the task completed before.
-      const start = findings === null ? ready.task : { ...ready.task, phase: null };
-      return runPhases(stateDir, start, phases ?? buildPhases({ stateDir, repoDir: settings.repoDir, adapter,
-        container: ready.container, carried: ready.carried, expectations, findings, sudo }));
-    });
+    } }, () => runTaskWithProxy({ stateDir, task, conf: proxyConf, key: claudeKey, betas: expectations.anthropicBetas,
+      helperImage: settings.helperImage, err, sudo, proxyTesting }, {
+      setUp: () => setUpTaskContainer({ stateDir, repoDir: settings.repoDir, task, adapter,
+        helperImage: settings.helperImage, sudo }),
+      run: (ready, baseUrl) => {
+        // A fix-review run runs its own phases from the first (#0-301), whatever phase the task completed before.
+        const start = findings === null ? ready.task : { ...ready.task, phase: null };
+        return runPhases(stateDir, start, phases ?? buildPhases({ stateDir, repoDir: settings.repoDir, adapter,
+          container: ready.container, carried: ready.carried, expectations, findings, baseUrl, sudo }));
+      },
+    }));
     out.write(`${JSON.stringify({ runId: left.runId, item: left.item, branch: left.branch, phase: left.phase,
       status: left.status, reason: left.reason })}\n`);
     return left;

@@ -34,13 +34,15 @@ const ready = await setUpTaskContainer({ stateDir, repoDir: product.repoDir, tas
   { runId: RUN_ID }), adapter: { taskImage: CONFIG_PATH }, helperImage: HELPER_IMAGE, ...fake.runner, git: REAL_GIT });
 assert.equal(ready.task.status, 'running', ready.task.reason);
 let n = 0;
+/** The run's proxy's address, as the call is given it (#0-313): no proxy listens, the fake Claude Code calls none. */
+const BASE_URL = 'http://10.0.2.15:8770';
 
 /** A call of `agent` whose fake Claude Code prints `lines`. */
 async function callWith(agent, lines, { exit = 0 } = {}) {
   n += 1;
   fake.update((s) => { s.scenario.claude = [{ stream: lines, exit }]; });
   return callAgent({ container: ready.container, task: ready.task, n, agentName: agent, prompt: `the task, call ${n}`,
-    carried: ready.carried, expectations, stateDir, ...fake.runner });
+    carried: ready.carried, expectations, stateDir, baseUrl: BASE_URL, ...fake.runner });
 }
 
 const refused = async (agent, lines, pattern) => {
@@ -65,7 +67,7 @@ test('#0-301 AC1: a call is F3 by the container\'s ID, full paths, --tools from 
   const agent = await readAgent('architect');
   const { text } = await readAnswerSchema('architect');
   assert.deepEqual(call.argv.slice(call.argv.indexOf('/usr/bin/env')), callArgs({ agent, schemaText: text,
-    carried: ready.carried }));
+    carried: ready.carried, baseUrl: BASE_URL }));
   const argv = call.argv;
   const flag = (name) => argv[argv.indexOf(name) + 1];
   assert.equal(argv[argv.indexOf('/usr/bin/env') + 1], '-i');
@@ -89,13 +91,21 @@ test('#0-301 AC1: a call is F3 by the container\'s ID, full paths, --tools from 
 });
 
 test('#0-301: env -i\'s list holds literals alone: HOME, the locale, PATH\'s system directories, the accepted '
-  + 'containerEnv and the four switches, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 among them', async () => {
+  + 'containerEnv, the four switches, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 among them, and the proxy\'s '
+  + 'ANTHROPIC_BASE_URL (#0-313)', async () => {
   const carried = await readTaskConfig({ repoDir: product.repoDir, base: product.base, path: CONFIG_PATH,
     git: REAL_GIT });
-  const env = callEnv(carried);
+  const env = callEnv(carried, { baseUrl: BASE_URL });
   assert.deepEqual(env, ['HOME=/home/dev', 'LANG=C.UTF-8', 'LC_ALL=C.UTF-8', `PATH=${CALL_PATH}`,
     ...Object.entries(carried.containerEnv).map(([k, v]) => `${k}=${v}`), 'DISABLE_AUTOUPDATER=1', 'DISABLE_UPDATES=1',
-    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1', 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1']);
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1', 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1',
+    `ANTHROPIC_BASE_URL=${BASE_URL}`]);
+  // The token is in no variable (#0-313, ADR-0064 point 5): only the address, an http IPv4 literal and a port.
+  assert.ok(!env.some((entry) => /TOKEN|KEY|AUTH/.test(entry.split('=')[0])), 'no credential in the list');
+  for (const bad of [undefined, '', 'https://10.0.2.15:8770', 'http://proxy.invalid:8770', 'http://10.0.2.15',
+    'http://10.0.2.15:8770/v1', 'http://10.0.2.15:8770 X=1']) {
+    assert.throws(() => callEnv(carried, { baseUrl: bad }), TypeError, String(bad));
+  }
   // ADR-0064 point 5 as amended on 2026-11-22: no traffic of Claude Code's past the proxy but the model's calls.
   assert.equal(env.filter((entry) => entry.startsWith('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=')).join(),
     'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1');
@@ -121,6 +131,9 @@ const OFF = {
   permissionMode: ['default', 'bypassPermissions', undefined],
   claude_code_version: ['2.1.329', undefined],
   mcp_servers: [[{ name: 'claude.ai Gmail', status: 'needs-auth', source: 'claudeai' }], undefined],
+  // #0-313: measured "none" without a helper and with ANTHROPIC_AUTH_TOKEN; any other source is a credential that
+  // did not come from the token's file.
+  apiKeySource: ['none', 'ANTHROPIC_API_KEY', 'user', undefined],
 };
 
 test('#0-301 AC1: each field of the init event off its rule stops the call, naming the field; the answer is not read',

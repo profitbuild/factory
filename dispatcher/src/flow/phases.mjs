@@ -45,12 +45,12 @@ const fieldsOf = (task) => Object.fromEntries(Object.entries(task).filter(([k]) 
  * The phases of a run.
  *
  * @param {{ stateDir: string, repoDir: string, adapter: object, container: object, carried: object,
- *   expectations: object, findings?: object[] | null, sudo?: string, git?: string }} context `findings` a fix-review
- *   run's (findings.mjs)
+ *   expectations: object, findings?: object[] | null, baseUrl: string, sudo?: string, git?: string }} context
+ *   `findings` a fix-review run's (findings.mjs); `baseUrl` the run's proxy's, for every agent call (#0-313)
  * @returns {{ name: string, run: (task: object) => Promise<object> }[]}
  */
 export function buildPhases({
-  stateDir, repoDir, adapter, container, carried, expectations, findings = null, sudo, git,
+  stateDir, repoDir, adapter, container, carried, expectations, findings = null, baseUrl, sudo, git,
 }) {
   /**
    * Whether `error` stops the item (review round 1 of factory#26, arc-5c1e): a call's, the item's, or one of the task
@@ -92,7 +92,7 @@ export function buildPhases({
       ? { ...c, ...fields } : c)) });
     try {
       const { answer, file, answerFile } = await callAgent({ container, task: current, n, agentName, prompt, carried,
-        expectations, stateDir, sudo });
+        expectations, stateDir, baseUrl, sudo });
       current = await settle({ outcome: 'answered', file, answerFile,
         agentText: { commitMessage: answer.commitMessage } });
       if (answer.blocked === true) {

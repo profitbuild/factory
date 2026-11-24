@@ -37,6 +37,7 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { VM_DOCKER_INFO, dockerDefaultHostConfig } from './docker-hostconfig.mjs';
+import { callProxy } from './fake-claude-proxy.mjs';
 import { labelEntry } from './feature-artifact.mjs';
 import { checkShellSafe } from './state-dir.mjs';
 
@@ -430,15 +431,12 @@ function exec(context, input) {
 }
 
 /**
- * The task image's Claude Code (incident-platform backlog #0-301), which CI does not have and no test may run: an exec
- * of /usr/local/bin/claude takes the next of scenario.claude, a list a test sets, each { stream: (event | string)[],
- * exit?: number, files?: Record<path, text>, flood?: number, signal?: string, stderr?: string, lockStderr?: string }:
- * the stream printed one line per item (an object as JSON, a string as it is), `files` written in the container's
- * workspace first (an agent's changes), the exit code `exit` (0). For the stops of review round 1 of factory#26:
- * `flood` prints that many bytes of one line after the stream; `signal` ends the call by it; `stderr` is written
- * to stderr, and `lockStderr` makes that directory (the state's stderr/) open to others first (755), so the starter
- * cannot keep it. Each call's argv (after the container's ID) and its stdin are recorded to claude-calls.jsonl.
- * With no call left, it prints nothing and exits 1.
+ * The task image's Claude Code (#0-301), which no test may run: an exec of /usr/local/bin/claude takes the next of
+ * scenario.claude, each { stream, exit?, files?, flood?, signal?, stderr?, lockStderr?, proxy? }: `files` written
+ * first, the stream printed a line per item (an object as JSON), exit `exit` (0); `flood` that many bytes
+ * more, `signal` an end by it, `stderr` to stderr, `lockStderr` that directory 755 first (round 1 of factory#26);
+ * `proxy` a call of the run's proxy with the token of /run/factory first (#0-313, fake-claude-proxy.mjs). Each call's
+ * argv and stdin go to claude-calls.jsonl; with no call left, it exits 1.
  */
 function fakeClaude(context, argv, input, container) {
   const { state, config, save } = context;
@@ -455,6 +453,8 @@ function fakeClaude(context, argv, input, container) {
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, text);
   }
+  const tokenDir = host(config, container.mounts.find((m) => m.Destination === '/run/factory')?.Source ?? '');
+  if (next.proxy) { callProxy(argv, tokenDir, config.dir, next.proxy); }
   out(next.stream.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))).map((line) => `${line}\n`).join(''));
   if (next.lockStderr) {
     mkdirSync(next.lockStderr, { recursive: true, mode: 0o700 });

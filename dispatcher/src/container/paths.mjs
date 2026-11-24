@@ -19,6 +19,11 @@ export const FACTORY_MOUNT = '/opt/factory';
 export const MANAGED_SETTINGS_SOURCE = `${FACTORY_CHECKOUT}/claude-code/etc`;
 export const MANAGED_SETTINGS_MOUNT = '/etc/claude-code';
 /**
+ * Where the task container holds its token's directory, read-only (incident-platform backlog #0-313, ADR-0064 point 5
+ * as amended): the managed settings' apiKeyHelper prints `${TOKEN_MOUNT}/token`, as #0-313's measurement 1 had it.
+ */
+export const TOKEN_MOUNT = '/run/factory';
+/**
  * The dispatcher's env file on the VM, which Node loads with --env-file (README, "Layout"): every command of the
  * dispatcher's that a refusal names gives it.
  */
@@ -52,6 +57,9 @@ export function taskPaths(runId) {
     image: `factory-task-${runId.toLowerCase()}`,
     network: `factory-task-${runId}`,
     claudeVolume: `factory-task-${runId}-claude`,
+    // The token's directory (#0-313): made empty by the work directory's helper before `devcontainer up` (a bind's
+    // source must exist), its file written by a helper of its own once the container is checked (work-dir.mjs).
+    tokenDir: `${dir}/token`,
   };
 }
 
